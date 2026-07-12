@@ -82,14 +82,18 @@ impl AppState {
     }
 
     pub fn undo(&mut self) {
-        if let Some(Some(_)) = self.report(self.store.undo().map(Some).map_err(|e| e)) {
-            self.dirty = true;
+        match self.store.undo() {
+            Ok(Some(_)) => self.dirty = true,
+            Ok(None) => {}
+            Err(e) => self.error = Some(e.to_string()),
         }
     }
 
     pub fn redo(&mut self) {
-        if let Some(Some(_)) = self.report(self.store.redo().map(Some).map_err(|e| e)) {
-            self.dirty = true;
+        match self.store.redo() {
+            Ok(Some(_)) => self.dirty = true,
+            Ok(None) => {}
+            Err(e) => self.error = Some(e.to_string()),
         }
     }
 

@@ -43,9 +43,12 @@ soul, one application, GPU-first, open source (GPLv3).
 
 Everything in the specs traces to one of these; a feature that serves none of them is scope creep.
 
-1. **Playback is the product.** Preview at speed, always: GPU-resident pipeline,
-   content-hash caching, adaptive degradation. The app responds to input in every state —
-   the UI thread never renders a frame ([13-PERFORMANCE-RULES.md](13-PERFORMANCE-RULES.md)).
+1. **Playback is the product — and so is responsiveness at scale.** Preview at speed,
+   always: GPU-resident pipeline, content-hash caching, adaptive degradation. The app
+   responds to input in every state — the UI thread never renders a frame — and stays fully
+   interactive in intensive projects with thousands of layers and hundreds of thousands of
+   keyframes, where AE becomes barely usable. Both are budgeted and CI-enforced
+   ([13-PERFORMANCE-RULES.md](13-PERFORMANCE-RULES.md) §2, §2.1).
 2. **Never lose work, never crash.** Degrade instead of dying; treat GPU resets as routine;
    journalled autosave; plugins in separate processes. Rust because the compiler enforces
    what a style guide cannot ([05-ARCHITECTURE.md](05-ARCHITECTURE.md)).

@@ -153,6 +153,16 @@ Standing policy, enforced in CI ([14-ENGINEERING-RULES.md](14-ENGINEERING-RULES.
 - **Coverage is measured in CI** and the engine crates must stay above the threshold —
   it can only be raised, never lowered.
 
+One budget deserves its own mention because it's the project's founding grievance: **the
+interface must stay responsive with thousands of layers and hundreds of thousands of
+keyframes** (the "stress document" budgets in
+[13-PERFORMANCE-RULES.md](13-PERFORMANCE-RULES.md) §2.1). Two design rules deliver it: the
+UI only ever draws what's visible on screen (so a 5,000-layer timeline costs the same as a
+20-layer one), and the UI thread never does engine work. One known shortcut exists today —
+saving a snapshot currently copies the whole document per edit, which is fine now and will
+be replaced with "copy only what changed" before Phase 1 ends; it's recorded in the
+performance rules so it can't be forgotten.
+
 What the suite guards *today*: time maths exactness (6 property suites), undo/redo
 symmetry, journal replay, the crash-recovery drill both ways, file-format round-trips,
 unknown-field survival, autosave rotation, version refusal.

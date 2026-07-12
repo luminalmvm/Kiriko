@@ -60,6 +60,36 @@ All figures are 95th percentile unless stated; measured by the harness in §7.
 | B10 | A/V sync error during playback | ≤ ±½ video frame | ≤ ±½ video frame |
 | B11 | Background cache fill of the 20 s work area from cold, while idle | ≤ 60 s | ≤ 240 s |
 
+### 2.1 Document-scale budgets (the "thousands of layers" mandate)
+
+After never-crashing, the project's founding grievance is that After Effects becomes
+barely responsive in intensive projects. **Kiriko's UI MUST remain fully interactive at
+document scale**, independent of render load. The reference *stress document* for these
+budgets: 200 comps, 5,000 layers total (one comp holding 1,000), 250,000 keyframes,
+2,000 footage items.
+
+| # | Budget | Both reference machines |
+|---|---|---|
+| S1 | B1 (8 ms UI frame) holds against the stress document — timeline scroll/zoom, layer select, twirl-down, box-select of 10,000 keyframes | ≤ 8 ms |
+| S2 | Committing an edit (one op) with the stress document open | ≤ 16 ms |
+| S3 | Undo/redo of any single op, stress document | ≤ 16 ms |
+| S4 | Open the stress document (.kir → interactive) | ≤ 5 s |
+| S5 | Save the stress document | ≤ 2 s, non-blocking UI |
+| S6 | Graph editor open on a property with 50,000 keyframes: pan/zoom/box-select | ≤ 8 ms/frame |
+
+Consequences the architecture must honour (and known debts):
+
+- Timeline, Project panel, and graph editor MUST be **virtualised** — draw only visible
+  rows/keys; cost scales with what's on screen, never with document size.
+- Property/keyframe lookups MUST be indexed; no O(all-layers) walks inside the UI frame.
+- **Known debt, tracked here until paid:** the Phase 0 `DocumentStore` clones the whole
+  document per op — O(document) commits. Fine now, fails S2 at stress scale. Before the
+  Phase 1 gate, commits move to structural sharing (`im`-style persistent collections or
+  per-item copy-on-write via `Arc`) so an edit copies only the touched path. S2/S3 tests
+  land with that change and hold the line thereafter.
+- The stress document is generated deterministically by a fixture builder in the perf
+  harness (§7) so S-budgets run in CI like every other gate.
+
 Notes:
 
 - B1 is the UI thread alone: layout, paint, input. It holds regardless of engine load because
