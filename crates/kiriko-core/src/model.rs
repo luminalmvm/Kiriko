@@ -21,6 +21,10 @@ impl LinearColour {
 pub struct MediaRef {
     pub relative_path: String,
     pub absolute_path: String,
+    /// Unknown fields from newer Kiriko versions, preserved on load/save
+    /// (docs/10-FILE-FORMAT.md §1.1 — mandatory forward compatibility).
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +32,10 @@ pub struct FootageItem {
     pub id: Uuid,
     pub name: String,
     pub media: MediaRef,
+    /// Unknown fields from newer Kiriko versions, preserved on load/save
+    /// (docs/10-FILE-FORMAT.md §1.1 — mandatory forward compatibility).
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +44,10 @@ pub struct Folder {
     pub name: String,
     /// Ordered children ids (docs/03-DATA-MODEL.md §2 table).
     pub children: Vec<Uuid>,
+    /// Unknown fields from newer Kiriko versions, preserved on load/save
+    /// (docs/10-FILE-FORMAT.md §1.1 — mandatory forward compatibility).
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,6 +61,10 @@ pub struct Composition {
     pub background: LinearColour,
     /// Index 0 = top of the stack.
     pub layers: Vec<Layer>,
+    /// Unknown fields from newer Kiriko versions, preserved on load/save
+    /// (docs/10-FILE-FORMAT.md §1.1 — mandatory forward compatibility).
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +96,10 @@ pub struct Layer {
     /// Where layer time 0 sits on the comp timeline.
     pub start_offset: CompTime,
     pub switches: Switches,
+    /// Unknown fields from newer Kiriko versions, preserved on load/save
+    /// (docs/10-FILE-FORMAT.md §1.1 — mandatory forward compatibility).
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -121,11 +141,15 @@ pub struct Document {
     pub id: Uuid,
     /// Flat item storage; Project panel order = Vec order, folders reference by id.
     pub items: Vec<ProjectItem>,
+    /// Unknown fields from newer Kiriko versions, preserved on load/save
+    /// (docs/10-FILE-FORMAT.md §1.1 — mandatory forward compatibility).
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Document {
     pub fn new() -> Self {
-        Self { id: Uuid::now_v7(), items: Vec::new() }
+        Self { id: Uuid::now_v7(), items: Vec::new(), extra: serde_json::Map::new() }
     }
 
     pub fn item(&self, id: Uuid) -> Option<&ProjectItem> {

@@ -122,6 +122,7 @@ mod tests {
             duration: Duration(Rational::new(30, 1).unwrap()),
             background: LinearColour::BLACK,
             layers: Vec::new(),
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -134,6 +135,7 @@ mod tests {
             out_point: t(10, 1),
             start_offset: t(0, 1),
             switches: Switches::default(),
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -148,9 +150,11 @@ mod tests {
         let footage = FootageItem {
             id: Uuid::now_v7(),
             name: "capture.mp4".into(),
+            extra: serde_json::Map::new(),
             media: MediaRef {
                 relative_path: "footage/capture.mp4".into(),
                 absolute_path: "/tmp/capture.mp4".into(),
+                extra: serde_json::Map::new(),
             },
         };
         let layer = test_layer(footage.id);
