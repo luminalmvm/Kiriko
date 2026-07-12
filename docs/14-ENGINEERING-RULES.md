@@ -159,7 +159,7 @@ machine". Exceptions require a decision entry in [02-DECISIONS.md](02-DECISIONS.
   integrate(speed) ↔ differentiate(map) round-trips, monotone-segment invariants, overrun
   boundary behaviour (K-022: retime never moves edit points); for rational time (associativity,
   no drift over hour-long sums); for the command journal (apply → invert → apply = identity).
-- **Fuzzing** (cargo-fuzz, in CI on a schedule): the `.kiriko` deserialiser and journal
+- **Fuzzing** (cargo-fuzz, in CI on a schedule): the `.kir` deserialiser and journal
   replayer (arbitrary bytes MUST produce a typed error, never a panic or hang) and the OFX
   host boundary (malformed plugin responses, wrong-size frames, dead processes).
 - **Performance regression gates in CI**, on the reference machine (defined in

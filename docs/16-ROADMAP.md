@@ -16,7 +16,7 @@ applies: ship the slice, never rewrite the world.
 
 The app exists: window, docking shell with the default workspace layout
 ([07-UI-SPEC.md](07-UI-SPEC.md)), dark Aizome theme ([15-DESIGN.md](15-DESIGN.md)), project
-new/open/save (`.kiriko` container, autosave, crash recovery), import of footage and audio,
+new/open/save (`.kir` container, autosave, crash recovery), import of footage and audio,
 Project panel, Viewer displaying footage with preview-resolution control, Timeline showing
 Footage layers with in/out trimming, playback of a single clip with sample-accurate audio,
 frame-indexed seeking.

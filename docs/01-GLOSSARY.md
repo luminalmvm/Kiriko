@@ -14,7 +14,7 @@ someone arriving from those tools, but the Kiriko term is the only one used in K
 
 | Term | Definition |
 |---|---|
-| **Project** | The complete editable document: assets, compositions, settings. Serialised as a `.kiriko` file (see [10-FILE-FORMAT.md](10-FILE-FORMAT.md)). Exactly one project is open at a time. |
+| **Project** | The complete editable document: assets, compositions, settings. Serialised as a `.kir` file (see [10-FILE-FORMAT.md](10-FILE-FORMAT.md)). Exactly one project is open at a time. |
 | **Asset** | Anything importable that lives in the Project panel: footage items, audio items, image sequences, still images, and compositions themselves. |
 | **Footage item** | An asset referencing a media file on disk (video, image, image sequence). Kiriko never modifies the file; the project stores a reference plus interpretation settings (frame rate override, alpha interpretation, colour space tag). |
 | **Audio item** | An asset referencing an audio file. |

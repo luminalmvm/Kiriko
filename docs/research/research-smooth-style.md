@@ -75,8 +75,8 @@ HLAE/advancedfx docs, community tutorials. Direct quotes are from video descript
   motion design — game edits and mograph are one continuum for these users.
 
 ### starker (@starkerr) — 8.54k subs, 75 videos; the "went pro" path
-- **Aziz, 24, motion designer from Saudi Arabia** (linktr.ee/starker; Behance
-  behance.net/azizvisuals). Classic-era edits: **Melody** (67k), **Helmir** (64k),
+- **A professional motion designer** (public portfolio linked from his channel).
+  Classic-era edits: **Melody** (67k), **Helmir** (64k),
   **lovely** (34k), **Drift – Fortnite Edit** (29k), plus CoD4/BO2 work — his store sells
   each **project file** ($3–8, 2018/2019 bundles $20) *and the recording configs*:
   "BO2 - CFG", "BO2/COD4 - CFGs", "'Visions' THEME + COD4 Inspector settings".
@@ -229,5 +229,5 @@ Classic montage: cut accuracy, beat markers, speed ramps, shake/impact presets, 
   stooh Ängel epHdJO5_bNg; starker BREAKDOWN: FaZe1 UKS_mpyVB7w
 - Community: codmvm.com (+ /archive, /mod/iw3mvm), effectscollective.com (plugins +
   free-tools articles), doc.hlae.site + advancedfx wiki (mirv_streams matte/depth),
-  steamcommunity.com/groups/VenexaArts, linktr.ee/starker, behance.net/azizvisuals,
+  steamcommunity.com/groups/VenexaArts, the editors' own public portfolio links,
   jayd3nfx flow-style tutorial yr1E5WffuUA, urbandictionary.com/define.php?term=MVM

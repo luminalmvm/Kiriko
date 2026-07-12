@@ -29,7 +29,7 @@ engine/media — mechanically enforceable rather than aspirational.
 | `kiriko-expr` | QuickJS-ng embedding for expressions (K-063): deterministic runtime, AE-surface library, per-property sandboxing. |
 | `kiriko-ofx` | OFX host: out-of-process plugin server, C ABI boundary, shared-memory/shared-texture frame transport. |
 | `kiriko-kfx` | KFX host (K-062). Shares the sandbox/IPC substrate with `kiriko-ofx`. |
-| `kiriko-project` | Serialisation: `.kiriko` container read/write, operation journal, autosave, relink, migrations. Spec: [10-FILE-FORMAT.md](10-FILE-FORMAT.md). |
+| `kiriko-project` | Serialisation: `.kir` container read/write, operation journal, autosave, relink, migrations. Spec: [10-FILE-FORMAT.md](10-FILE-FORMAT.md). |
 | `kiriko-ui` | The egui shell: panels, docking, timeline/graph-editor/Viewer widgets, theming per [15-DESIGN.md](15-DESIGN.md). |
 | `kiriko-app` | The binary: winit event loop, wiring, session lifecycle, crash handler. |
 

@@ -21,6 +21,12 @@ if it reverses a numbered decision — append to `docs/02-DECISIONS.md` (never e
 
 - `docs/` — the specification set (00–16, see README index) plus `docs/research/` (the web
   research that informed them; background, not canonical).
+- `docs/impl/` — **read the matching note before implementing anything it covers** (rational
+  time, keyframe/Retime cubic solving, wgpu foundation, media I/O and hardware decode,
+  playback scheduler, optical flow, OFX hosting, beat detection, expressions). They pin the
+  algorithms, formulas, traps, and test plans so those choices are not re-derived; specs
+  say *what*, these notes are the authoritative *how* for their topics. Implement each
+  note's test plan alongside the feature.
 - Application code will be a Cargo workspace per `docs/05-ARCHITECTURE.md` (engine crates
   never depend on the UI crate).
 

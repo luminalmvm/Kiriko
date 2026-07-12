@@ -84,7 +84,7 @@ conversion nodes sit).
 OFX parameters (double, int, boolean, choice, RGBA, 2D/3D point, string, custom, group,
 page) map onto Kiriko properties one-to-one. The host owns animation: keyframes and curves
 live in Kiriko's property system, are edited in the Timeline and graph editor, serialise
-into the `.kiriko` file, and are readable from expressions like any built-in property.
+into the `.kir` file, and are readable from expressions like any built-in property.
 `paramGetValueAtTime` evaluates the property (including any expression on it) at the
 requested time. Custom parameters carry opaque vendor blobs; Kiriko stores and round-trips
 them without interpretation. Parameter pages/groups become the Effect Controls layout.
@@ -184,7 +184,7 @@ At `describe`, a plugin declares parameters **descriptively**: kind (float, int,
 choice, colour, 2D/3D point, curve, string, file, group), range, default, unit, flags
 (animatable, hidden). The host owns everything from there — UI in Effect Controls,
 keyframes and curves in the Timeline and graph editor, expression access, serialisation
-into `.kiriko` files, undo. At `process` time the plugin receives a read-only,
+into `.kir` files, undo. At `process` time the plugin receives a read-only,
 time-resolved value block. Plugins MUST NOT store parameter state internally; the host's
 values are the only truth. This is the one OFX idea kept whole, minus the string soup.
 
@@ -362,7 +362,7 @@ Boundaries:
   activation needing user-profile and occasionally network access) is an open question
   below. Sandboxing MUST NOT silently break plugin licensing checks — a blocked capability
   surfaces as a per-plugin permission the user can grant.
-- **Bundles and project files**: opening a `.kiriko` project or an AE-import bundle
+- **Bundles and project files**: opening a `.kir` project or an AE-import bundle
   executes nothing — no plugin runs until the comp actually evaluates, expressions run
   only under §4.3's hermetic rules, and parsers treat all input as hostile (fuzzed in CI).
 - **No dynamic code from projects**: project files carry expression *text* interpreted

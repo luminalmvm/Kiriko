@@ -29,7 +29,7 @@ beat-sync covenant, and the genre's staple effects in the box. The full pitch:
 | [07-UI-SPEC](docs/07-UI-SPEC.md) | Panels, workspaces, Viewer, Timeline, graph editor, keymap |
 | [08-EFFECTS](docs/08-EFFECTS.md) | Built-in effect suite (the montage staples in-box) |
 | [09-AUDIO](docs/09-AUDIO.md) | v1 sync toolkit; the future Composer |
-| [10-FILE-FORMAT](docs/10-FILE-FORMAT.md) | The .kiriko container, sidecar caches, autosave |
+| [10-FILE-FORMAT](docs/10-FILE-FORMAT.md) | The .kir container, sidecar caches, autosave |
 | [11-AE-IMPORT](docs/11-AE-IMPORT.md) | After Effects project import and the fidelity matrix |
 | [12-PLUGINS](docs/12-PLUGINS.md) | OFX hosting, the KFX native API, expressions |
 | [13-PERFORMANCE-RULES](docs/13-PERFORMANCE-RULES.md) | Budgets, resource governor, degradation ladder |
@@ -37,7 +37,12 @@ beat-sync covenant, and the genre's staple effects in the box. The full pitch:
 | [15-DESIGN](docs/15-DESIGN.md) | Dark-first Aizome design language |
 | [16-ROADMAP](docs/16-ROADMAP.md) | Phases and their gates |
 
-Research notes that informed the specs are in [docs/research/](docs/research/).
+Two companion sets:
+- [docs/impl/](docs/impl/) — implementation notes for the genuinely hard, low-level parts
+  (rational time, cubic solving, wgpu patterns, hardware decode interop, the scheduler,
+  optical flow, OFX hosting, beat detection, expression embedding): exact algorithms,
+  reference code, traps, and test plans.
+- [docs/research/](docs/research/) — the research notes that informed the specs.
 
 ## Licence
 

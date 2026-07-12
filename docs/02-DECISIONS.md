@@ -117,9 +117,16 @@ Spec: [13-PERFORMANCE-RULES.md](13-PERFORMANCE-RULES.md).
 recommended.** CPU-only operation must work (slowly) for every built-in effect: each WGSL
 effect ships a CPU reference implementation, which doubles as its test oracle.
 
+**K-030 · DECIDED · Two preview modes: Cached (default) and Realtime-adaptive.** Cached
+plays at full chosen quality from the render-ahead ring and cache. Realtime never waits:
+every frame renders live at whatever resolution tier sustains the comp frame rate, adjusted
+continuously with hysteresis — judge motion now at reduced resolution rather than full
+quality after a wait. Added 2026-07-12 at Mack's request. Spec:
+[06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md) §6.5.
+
 ## Persistence
 
-**K-040 · DECIDED · Project file: hybrid container.** A single `.kiriko` file — a zip holding
+**K-040 · DECIDED · Project file: hybrid container.** A single `.kir` file — a zip holding
 a human-readable, versioned `project.json` plus small embedded assets (thumbnails, curve
 data). Footage referenced by path with relink logic. Caches, proxies, and exports live in a
 sidecar folder, deletable at any time. Autosave is journalled. Spec:

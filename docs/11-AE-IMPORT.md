@@ -127,7 +127,7 @@ One broken property never aborts an export.
 A bundle is a folder or zip:
 
 ```
-MyProject.kiriko-bundle/
+MyProject.kir-bundle/
   manifest.json        # bundle schema version, AE version, Bridge version, export date
   project.json         # the exported project fragment
   footage/             # optional collected media
@@ -138,12 +138,12 @@ MyProject.kiriko-bundle/
 [10-FILE-FORMAT.md](10-FILE-FORMAT.md), extended with an `ae` namespace for
 AE-only carry-through data (match names, unmapped parameters, raw blobs, renderer names).
 There is deliberately no separate interchange dialect to maintain: the Bridge emits what a
-`.kiriko` file contains, plus annotations. The `ae` namespace is preserved on load, save,
+`.kir` file contains, plus annotations. The `ae` namespace is preserved on load, save,
 and round-trip — Kiriko never strips what it does not understand (§6).
 
 `manifest.json` carries a semver bundle version. Kiriko MUST refuse bundles with a newer
 major version (with a "please update Kiriko" message) and MUST accept older ones via
-migration, same policy as `.kiriko` files.
+migration, same policy as `.kir` files.
 
 ### 2.4 What the DOM does not expose
 
@@ -295,7 +295,7 @@ A placeholder is an inert effect node that:
 - shows a subtle badge in Effect Controls ("not rendered — imported from After Effects"),
   in the calm style of [15-DESIGN.md](15-DESIGN.md) — no red, no warning triangle
   theatrics;
-- is **never lost**: saving a `.kiriko` project preserves placeholders and their `ae`
+- is **never lost**: saving a `.kir` project preserves placeholders and their `ae`
   namespace data byte-for-byte, so a project can be opened, edited around, saved, and the
   placeholder data survives indefinitely. If a later Kiriko version (or an installed OFX/
   KFX effect registered as an upgrade target in `ae-effect-map.toml`) gains a mapping, the

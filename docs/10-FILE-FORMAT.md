@@ -9,12 +9,12 @@ never by making the document opaque.
 
 ---
 
-## 1. The `.kiriko` file
+## 1. The `.kir` file
 
-A `.kiriko` file is a ZIP archive (deflate). Contents:
+A `.kir` file is a ZIP archive (deflate). Contents:
 
 ```
-myproject.kiriko
+myproject.kir
 ├── manifest.json          # tiny: format + version info, read first
 ├── project.json           # the entire document model
 └── thumbs/                # small embedded preview thumbnails (JPEG/WebP)
@@ -87,7 +87,7 @@ Rules, binding:
 - **Atomic saves**: write to a temp file in the destination directory, fsync, rename over
   the target. A crash mid-save can never corrupt the previous save.
 - **Autosave**: every N minutes (default 5) and before risky operations (export start,
-  plugin install), rotating `<name>.autosave-<k>.kiriko` copies (default keep 5) in an
+  plugin install), rotating `<name>.autosave-<k>.kir` copies (default keep 5) in an
   `autosaves/` folder beside the project.
 - **Journal recovery**: the operation journal ([03-DATA-MODEL.md](03-DATA-MODEL.md) §10) is
   appended to a sidecar `journal/` log between saves. After a crash, Kiriko offers: last
@@ -101,7 +101,7 @@ Rules, binding:
 - **Preset** (`.kfxpreset`): a JSON document containing an effect stack (or single effect,
   or animation) parameter tree — same conventions as project.json, shareable, importable by
   drag onto a layer.
-- **Template**: an ordinary `.kiriko` file opened in "new from template" mode (copy, not
+- **Template**: an ordinary `.kir` file opened in "new from template" mode (copy, not
   edit-in-place). Community "CC packs" and project files are just these two forms.
 
 ## 6. Interchange (summary)
@@ -115,7 +115,7 @@ Rules, binding:
 
 - Zip member compression level vs stored-for-speed on large projects — measure once real
   projects exist.
-- Should the journal be inside the `.kiriko` on save (perfect portability of undo history)
+- Should the journal be inside the `.kir` on save (perfect portability of undo history)
   or stay sidecar (smaller files)? Currently sidecar; undo history does not travel.
 - Embedded fonts: reference-only v1 with a missing-font warning; embedding raises licensing
   questions — revisit with the text animator work.

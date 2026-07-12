@@ -334,7 +334,7 @@ recompute cost exceeds a readback-cost threshold, otherwise drops.
 
 ### 5.4 Disk cache format and location
 
-The disk cache lives in the project's sidecar folder (`<project>.kiriko-cache/`,
+The disk cache lives in the project's sidecar folder (`<project>.kir-cache/`,
 [10-FILE-FORMAT.md](10-FILE-FORMAT.md)), deletable at any time with no correctness effect:
 
 - `frames/<first two hex chars>/<hash>.kfr` — one file per entry: a small header (format
@@ -397,6 +397,21 @@ the work is kept. First (possibly degraded) frame within the scrub budget
 - **A/V sync**: the audio clock is the master ([09-AUDIO.md](09-AUDIO.md)). Video frame
   selection is a function of the audio clock; when video falls behind, frames are held/dropped
   and audio never glitches. Positions are tracked in samples, never frames.
+
+### 6.5 Preview modes (K-030)
+
+Playback runs in one of two user-selected modes (toggle in the transport, per comp):
+
+- **Cached** (default): as above — full chosen quality, render-ahead ring plus the three-tier
+  cache; if the ring underruns, the degradation ladder engages, and background cache fill
+  makes the next pass better.
+- **Realtime (adaptive)**: never waits for cache. Every frame is rendered live at whatever
+  resolution tier sustains the comp frame rate, adjusted continuously from measured frame
+  cost (drop a tier when the last frames overran, climb when there is headroom; hysteresis
+  so the tier does not flap). Frames rendered this way still enter the cache at their tier.
+  This is the "just play it now" mode for heavy comps: motion and timing are judged in real
+  time at reduced resolution rather than full quality after a wait. The active tier MUST be
+  visible in the Viewer's degradation indicator, and the mode MUST never affect export.
 
 ## 7. Export
 

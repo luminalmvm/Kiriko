@@ -450,6 +450,11 @@ as the dockable **Preview panel**.
 - **Audio mute** toggle.
 - **Quality toggle**: full / draft preview quality (draft maps to the engine's reduced
   quality mode; independent of preview resolution).
+- **Preview mode toggle** (K-030): **Cached** (default) / **Realtime**. Realtime renders
+  every frame live, continuously choosing the resolution tier that sustains the comp frame
+  rate instead of waiting on cache — the "just play it now" mode for heavy comps. The
+  active tier shows in the Viewer's degradation indicator
+  ([06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md) §6.5).
 
 ---
 
