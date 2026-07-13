@@ -223,29 +223,26 @@ impl Default for Switches {
 pub enum LayerKind {
     Footage {
         item: Uuid,
+        /// Retime map (docs/04-RETIMING.md): local time → source time. None =
+        /// no retiming (plays at source rate). Defaulted for projects saved
+        /// before Retime existed.
+        #[serde(default)]
+        retime: Option<crate::retime::Retime>,
     },
     /// A SolidDef asset as this layer's source (docs/01-GLOSSARY.md: Solid
     /// layer; docs/03-DATA-MODEL.md §5.2 — solids are assets so they dedupe).
-    Solid {
-        def: Uuid,
-    },
+    Solid { def: Uuid },
     /// Another composition as this layer's source (docs/01-GLOSSARY.md:
     /// Precomp layer). Cycles are invalid states, guarded at insertion and
     /// defensively at render.
-    Precomp {
-        comp: Uuid,
-    },
+    Precomp { comp: Uuid },
     /// Editable styled text (v1: one run — docs/03-DATA-MODEL.md §9.1).
-    Text {
-        document: TextDocument,
-    },
+    Text { document: TextDocument },
     /// A 3D viewpoint (docs/01-GLOSSARY.md: Camera layer). Only affects
     /// layers with the 3D switch; the topmost visible camera is active.
     /// `zoom` is the AE model: focal distance in comp pixels — the z=0
     /// plane maps 1:1.
-    Camera {
-        zoom: Property,
-    },
+    Camera { zoom: Property },
 }
 
 /// The active camera's evaluated placement at one comp time — what both the

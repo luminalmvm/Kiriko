@@ -116,6 +116,12 @@ pub enum Op {
         layer: Uuid,
         animation: Animation,
     },
+    /// Replace a Footage layer's Retime map (None = play at source rate).
+    SetLayerRetime {
+        comp: Uuid,
+        layer: Uuid,
+        retime: Option<crate::retime::Retime>,
+    },
     /// Several ops as one undo step (e.g. "create Solids folder + solid +
     /// layer"). Applied in order; the inverse is the reversed inverses. If a
     /// member fails, the already-applied members are rolled back, so a batch
@@ -401,6 +407,27 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Op, OpError> {
                 comp: *comp,
                 layer: *layer,
                 animation: previous,
+            })
+        }
+        Op::SetLayerRetime {
+            comp,
+            layer,
+            retime,
+        } => {
+            let c = doc.comp_mut(*comp).ok_or(OpError::UnknownComp)?;
+            let l = c
+                .layers
+                .iter_mut()
+                .find(|l| l.id == *layer)
+                .ok_or(OpError::UnknownLayer)?;
+            let crate::model::LayerKind::Footage { retime: slot, .. } = &mut l.kind else {
+                return Err(OpError::UnknownLayer);
+            };
+            let previous = std::mem::replace(slot, retime.clone());
+            Ok(Op::SetLayerRetime {
+                comp: *comp,
+                layer: *layer,
+                retime: previous,
             })
         }
         Op::Batch { ops } => {

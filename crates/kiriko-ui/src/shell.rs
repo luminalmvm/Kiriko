@@ -1230,6 +1230,59 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                         });
                     });
                 }
+                if let kiriko_core::model::LayerKind::Footage { retime, .. } = &layer.kind {
+                    ui.indent(("speed", layer.id), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Speed %")
+                                    .small()
+                                    .color(theme.text_muted),
+                            );
+                            // Displayed speed: the map's rate (100% when none).
+                            let current = retime
+                                .as_ref()
+                                .map(|r| r.speed_at(0.0) * 100.0)
+                                .unwrap_or(100.0);
+                            let id = egui::Id::new(("speed_edit", layer.id));
+                            let mut value = ui.data(|d| d.get_temp::<f64>(id)).unwrap_or(current);
+                            let resp = ui.add(
+                                egui::DragValue::new(&mut value)
+                                    .speed(1.0)
+                                    .range(-800.0..=800.0)
+                                    .suffix(" %"),
+                            );
+                            if resp.dragged() || resp.has_focus() {
+                                ui.data_mut(|d| d.insert_temp(id, value));
+                            }
+                            if resp.drag_stopped() || resp.lost_focus() {
+                                if (value - current).abs() > f64::EPSILON {
+                                    // 100% (identity) stores no retime at all.
+                                    let retime = if (value - 100.0).abs() < f64::EPSILON {
+                                        None
+                                    } else {
+                                        let d = layer.out_point.0;
+                                        let speed = kiriko_core::Rational::from_f64_on_grid(
+                                            value / 100.0,
+                                            1000,
+                                        )
+                                        .unwrap_or(kiriko_core::Rational::ONE);
+                                        Some(kiriko_core::retime::Retime::constant_speed(
+                                            d,
+                                            kiriko_core::Rational::ZERO,
+                                            speed,
+                                        ))
+                                    };
+                                    pending = Some(kiriko_core::Op::SetLayerRetime {
+                                        comp: comp_id,
+                                        layer: layer.id,
+                                        retime,
+                                    });
+                                }
+                                ui.data_mut(|d| d.remove::<f64>(id));
+                            }
+                        });
+                    });
+                }
                 if let kiriko_core::model::LayerKind::Camera { zoom } = &layer.kind {
                     ui.indent(("camera", layer.id), |ui| {
                         ui.horizontal(|ui| {
@@ -2619,7 +2672,7 @@ fn mask_space(
             (f64::from(comp.width), f64::from(comp.height))
         }
         #[cfg(feature = "media")]
-        kiriko_core::model::LayerKind::Footage { item } => match app.media.map.get(item) {
+        kiriko_core::model::LayerKind::Footage { item, .. } => match app.media.map.get(item) {
             Some(crate::app_state::media::MediaStatus::Ready { probe, .. }) => probe
                 .video
                 .as_ref()

@@ -246,8 +246,11 @@ fn feed_source(
     visited: &mut Vec<Uuid>,
 ) -> Option<()> {
     match kind {
-        LayerKind::Footage { item } => {
-            let (identity, frame) = stamper.stamp(*item, lt)?;
+        LayerKind::Footage { item, retime } => {
+            // The retime maps local time → source time; the cache key must key
+            // the RETIMED source frame, so two different ramps never collide.
+            let source_time = retime.as_ref().map(|r| r.evaluate(lt)).unwrap_or(lt);
+            let (identity, frame) = stamper.stamp(*item, source_time)?;
             h.update(b"footage/");
             h.update(identity.as_bytes());
             h.update(&frame.to_le_bytes());
@@ -525,9 +528,39 @@ mod tests {
         let mut l = text_layer("", 0.0, 5.0, 0.0);
         l.kind = LayerKind::Footage {
             item: Uuid::now_v7(),
+            retime: None,
         };
         let comp = comp_with(vec![l]);
         assert!(comp_frame_key(&doc, &comp, 1.0, Quality::default(), &UnknownStamper).is_none());
         assert!(comp_frame_key(&doc, &comp, 1.0, Quality::default(), &StubStamper).is_some());
+    }
+
+    /// A retime keys the RETIMED source frame: half-speed at t=2 must key the
+    /// same frame as no-retime at t=1 (both source time 1), and differ from
+    /// no-retime at t=2.
+    #[test]
+    fn retime_keys_the_source_frame_not_the_local_frame() {
+        use kiriko_core::retime::Retime;
+        use kiriko_core::time::Rational;
+        let doc = Document::new();
+        let item = Uuid::now_v7();
+        let footage = |retime| {
+            let mut l = text_layer("", 0.0, 10.0, 0.0);
+            l.kind = LayerKind::Footage { item, retime };
+            comp_with(vec![l])
+        };
+        let plain = footage(None);
+        let half = footage(Some(Retime::constant_speed(
+            Rational::new(10, 1).unwrap(),
+            Rational::ZERO,
+            Rational::new(1, 2).unwrap(),
+        )));
+        let k = |c: &Composition, t| {
+            comp_frame_key(&doc, c, t, Quality::default(), &StubStamper).unwrap()
+        };
+        // half-speed at t=2 (source 1.0) == plain at t=1 (source 1.0).
+        assert_eq!(k(&half, 2.0), k(&plain, 1.0));
+        // and differs from plain at t=2 (source 2.0).
+        assert_ne!(k(&half, 2.0), k(&plain, 2.0));
     }
 }

@@ -284,6 +284,30 @@ impl Retime {
         }
     }
 
+    /// A single constant-speed retime over [0, `duration`] (local time),
+    /// source running from `source_in` at `speed` (1 = 100%). This is the
+    /// simple "play this clip faster/slower" case the timeline speed control
+    /// produces; the graph-editor lenses build richer stores later.
+    pub fn constant_speed(duration: Rational, source_in: Rational, speed: Rational) -> Self {
+        let mut r = Self {
+            boundaries: vec![
+                Boundary::new(Rational::ZERO, source_in),
+                Boundary::new(duration, source_in),
+            ],
+            segments: vec![RetimeSegment::Rate(RateSegment::new(
+                speed,
+                speed,
+                Ease::Linear,
+            ))],
+            allow_reverse: speed.is_negative(),
+            interpolation: Interpolation::default(),
+            extra: serde_json::Map::new(),
+        };
+        // Fill the end boundary's source position exactly from the rate.
+        let _ = r.recompute_boundaries();
+        r
+    }
+
     /// Structural sanity (docs/04-RETIMING.md §3 invariants): n + 1
     /// boundaries for n segments, first boundary at local time zero,
     /// boundary times strictly increasing.
@@ -609,6 +633,19 @@ mod tests {
         assert!((r.evaluate(0.5) - 6.0).abs() < 1e-9);
         assert!((r.evaluate(1.5) - 8.0).abs() < 1e-9);
         assert!((r.speed_at(1.0) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn constant_speed_evaluates_as_linear_from_source_in() {
+        // Half speed from source 2s over a 4s layer: at lt the source is
+        // 2 + 0.5·lt; the end boundary is exactly 2 + 0.5·4 = 4.
+        let r = Retime::constant_speed(rat(4, 1), rat(2, 1), rat(1, 2));
+        assert_eq!(r.boundaries[1].s, rat(4, 1));
+        assert!((r.evaluate(0.0) - 2.0).abs() < 1e-9);
+        assert!((r.evaluate(2.0) - 3.0).abs() < 1e-9);
+        assert!((r.evaluate(4.0) - 4.0).abs() < 1e-9);
+        assert!((r.speed_at(1.0) - 0.5).abs() < 1e-9);
+        r.validate().unwrap();
     }
 
     #[test]

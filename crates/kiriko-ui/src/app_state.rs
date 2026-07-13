@@ -957,7 +957,10 @@ impl AppState {
         let layer = Layer {
             id: Uuid::now_v7(),
             name: f.name.clone(),
-            kind: LayerKind::Footage { item: item_id },
+            kind: LayerKind::Footage {
+                item: item_id,
+                retime: None,
+            },
             in_point: CompTime(Rational::ZERO),
             out_point: CompTime(out),
             start_offset: CompTime(Rational::ZERO),
@@ -1770,6 +1773,7 @@ impl AppState {
         self.collect_comp_jobs(&doc, comp, t, &mut jobs, &mut visited);
         let _ = LayerKind::Footage {
             item: Uuid::now_v7(),
+            retime: None,
         }; // keep the import used in both cfg modes
         self.preview_engine
             .request_comp(comp_id, self.preview_frame, jobs);
@@ -1830,7 +1834,7 @@ impl AppState {
                         visited.pop();
                     }
                 }
-                LayerKind::Footage { item } => {
+                LayerKind::Footage { item, retime } => {
                     let Some(ProjectItem::Footage(f)) = doc.item(*item) else {
                         continue;
                     };
@@ -1845,7 +1849,9 @@ impl AppState {
                     let Some(video) = probe.video.as_ref() else {
                         continue;
                     };
-                    let source_frame = ((lt * video.fps()).round().max(0.0) as usize)
+                    // Retime maps local time → source time before frame pick.
+                    let source_time = retime.as_ref().map(|r| r.evaluate(lt)).unwrap_or(lt);
+                    let source_frame = ((source_time * video.fps()).round().max(0.0) as usize)
                         .min(src_frames.saturating_sub(1));
                     jobs.push(preview::CompJob {
                         layer: layer.id,
@@ -1981,7 +1987,7 @@ impl AppState {
             if !layer.switches.audible {
                 continue;
             }
-            let LayerKind::Footage { item } = &layer.kind else {
+            let LayerKind::Footage { item, .. } = &layer.kind else {
                 continue;
             };
             let has_audio = matches!(

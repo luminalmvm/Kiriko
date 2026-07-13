@@ -108,12 +108,15 @@ impl Renderer<'_> {
         }
         let lt = t - layer.start_offset.0.to_f64();
         match &layer.kind {
-            LayerKind::Footage { item } => {
+            LayerKind::Footage { item, retime } => {
                 let Some(info) = self.items.get(item) else {
                     return Ok(None);
                 };
-                let source_frame =
-                    ((lt * info.fps).round().max(0.0) as usize).min(info.frames.saturating_sub(1));
+                // Retime maps local → source time; preview uses the same
+                // Retime::evaluate, so export matches preview (K-031).
+                let source_time = retime.as_ref().map(|r| r.evaluate(lt)).unwrap_or(lt);
+                let source_frame = ((source_time * info.fps).round().max(0.0) as usize)
+                    .min(info.frames.saturating_sub(1));
                 if !self.decoders.contains_key(item) {
                     let index = kiriko_media::index::build_frame_index(&info.path)
                         .map_err(|e| e.to_string())?;

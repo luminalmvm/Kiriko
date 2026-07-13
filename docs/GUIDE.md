@@ -130,7 +130,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   segment boundary keeps its source position as an exact fraction, so cutting and
   re-editing a ramp never drifts: a frame synced to a beat stays on the beat. The map
   only chooses *which* source moment shows; how in-between moments become pixels
-  (nearest, blend, optical flow) is a separate per-clip policy.
+  (nearest, blend, optical flow) is a separate per-clip policy. **This is wired up for
+  Footage layers now**: a Speed % box in a footage layer's twirl-down retimes it (50% =
+  half speed, and so on), and the same Retime map feeds preview, export, and the cache
+  key — so a retimed clip previews, exports, and caches consistently. Sequence layers,
+  the graph-editor lenses, and cutting come next.
 - `crates/kiriko-core/src/store.rs` — **The document store**: applies ops, publishes
   snapshots, keeps the undo/redo stacks.
 - `crates/kiriko-project/src/lib.rs` — **`.kir` files.** A `.kir` is a zip containing

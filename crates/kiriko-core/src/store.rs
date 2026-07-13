@@ -142,7 +142,7 @@ mod tests {
         Layer {
             id: Uuid::now_v7(),
             name: "clip.mp4".into(),
-            kind: LayerKind::Footage { item },
+            kind: LayerKind::Footage { item, retime: None },
             in_point: t(0, 1),
             out_point: t(10, 1),
             start_offset: t(0, 1),
@@ -340,6 +340,66 @@ mod tests {
 
     /// A camera layer's zoom and a layer's 3D switch both round-trip through
     /// undo — the two ops the 2.5D camera work added.
+    /// Retime on a Footage layer round-trips through undo; the op refuses a
+    /// non-Footage target.
+    #[test]
+    fn retime_op_round_trips_and_targets_footage() {
+        use crate::retime::Retime;
+        use crate::time::Rational;
+        let store = DocumentStore::new(Document::new());
+        let (ops, comp_id) = scripted_ops(&store.snapshot());
+        let mut layer_id = None;
+        for op in &ops {
+            if let Op::AddLayer { layer, .. } = op {
+                layer_id = Some(layer.id);
+            }
+        }
+        for op in ops {
+            store.commit(op).unwrap();
+        }
+        let layer_id = layer_id.unwrap();
+
+        let retime = Retime::constant_speed(
+            Rational::new(10, 1).unwrap(),
+            Rational::ZERO,
+            Rational::new(1, 2).unwrap(),
+        );
+        store
+            .commit(Op::SetLayerRetime {
+                comp: comp_id,
+                layer: layer_id,
+                retime: Some(retime),
+            })
+            .unwrap();
+        // Half speed: at local time 4 the source is 2.
+        let doc = store.snapshot();
+        let l = doc
+            .comp(comp_id)
+            .unwrap()
+            .layers
+            .iter()
+            .find(|l| l.id == layer_id)
+            .unwrap();
+        if let crate::model::LayerKind::Footage { retime, .. } = &l.kind {
+            assert!((retime.as_ref().unwrap().evaluate(4.0) - 2.0).abs() < 1e-9);
+        } else {
+            panic!("expected a footage layer");
+        }
+        store.undo().unwrap();
+        let doc = store.snapshot();
+        let l = doc
+            .comp(comp_id)
+            .unwrap()
+            .layers
+            .iter()
+            .find(|l| l.id == layer_id)
+            .unwrap();
+        assert!(matches!(
+            &l.kind,
+            crate::model::LayerKind::Footage { retime: None, .. }
+        ));
+    }
+
     #[test]
     fn camera_zoom_and_three_d_ops_round_trip_through_undo() {
         use crate::anim::Animation;
