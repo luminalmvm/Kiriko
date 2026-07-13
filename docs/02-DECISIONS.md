@@ -272,3 +272,13 @@ scheduling are decided from declared traits plus measured cost under the governo
 budgets, exactly as for built-in nodes. OFX plugins are scheduled per their declared
 render-thread-safety, with the host converting depth at the boundary. Added 2026-07-12 at
 Mack's request. Spec: [12-PLUGINS.md](12-PLUGINS.md) §2.3, §3.3–3.4.
+
+**K-067 · DECIDED · The engine's pillars carry Edo-kiriko craft names.** The render
+pipeline as a whole — evaluation graph, GPU compositor, colour engine — is **Togi**
+(研ぎ, the polishing stage that turns cut glass brilliant: it turns the project's cuts
+into the picture). The three-tier cache is **Kura** (蔵, the storehouse). The audio
+engine and master clock is **Hibiki** (響, resonance — everything syncs to it). The
+names appear in user-facing surfaces (boot splash, settings, docs, marketing); crate
+names stay `kiriko-*` and code identifiers stay plain English per the glossary. Future
+subsystem names come from the same craft vocabulary and are logged here. Added
+2026-07-13 at Mack's request.

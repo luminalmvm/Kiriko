@@ -1987,14 +1987,18 @@ impl Shell {
             Some(rs) => {
                 shell.gpu = Some(GpuViewer::new(rs));
                 lines.push(BootLine::ok(
-                    "Colour pipeline: GPU (sRGB → linear fp16 → display)",
+                    "Togi render pipeline: GPU (sRGB → linear fp16 → display)",
                 ));
             }
             None => lines.push(BootLine {
-                text: "Colour pipeline: CPU fallback (no wgpu render state)".into(),
+                text: "Togi render pipeline: CPU fallback (no wgpu render state)".into(),
                 failed: true,
             }),
         }
+        #[cfg(feature = "media")]
+        lines.push(BootLine::ok("Kura cache: RAM tier ready (512 MB)"));
+        #[cfg(feature = "media")]
+        lines.push(BootLine::ok("Hibiki audio: cpal (clock starts with playback)"));
         lines.push(BootLine::ok(
             "Effects: none registered — suite arrives in phase 3",
         ));

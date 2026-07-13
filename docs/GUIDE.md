@@ -28,6 +28,13 @@ app's departments). They live in `crates/`:
 | `kiriko-eval` | (coming) the render engine | Working out what each frame looks like |
 | `kiriko-cache` | (coming) caching | Remembering rendered frames so they're never rendered twice |
 
+Three of these have proper names you'll see in the app and docs (decision K-067),
+drawn from the Edo-kiriko craft the project is named for: **Togi** (polishing) is the
+render pipeline — `kiriko-eval` + `kiriko-gpu` working together to turn the project's
+cuts into the picture; **Kura** (storehouse) is the cache; **Hibiki** (resonance) is the
+audio engine whose clock everything syncs to. Crate names stay plain `kiriko-*` — the
+names are for people, the identifiers are for code.
+
 **One rule ties them together:** the engine crates never depend on the UI. The UI asks the
 engine for things; the engine doesn't know the UI exists. That's why the UI could be
 replaced entirely without touching the engine — like swapping a car's dashboard without

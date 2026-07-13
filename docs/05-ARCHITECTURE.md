@@ -21,11 +21,11 @@ engine/media — mechanically enforceable rather than aspirational.
 |---|---|
 | `kiriko-core` | The document model: project, assets, comps, layers, clips, properties, keyframes, Retime segments, markers. Pure data + command application. No IO, no GPU, no threads. |
 | `kiriko-time` | Rational time types (`SourceTime`, `ClipTime`, `LayerTime`, `CompTime`, `FrameRate`) and conversions. Depended on by everything. |
-| `kiriko-eval` | Compiles a comp's layer stack into the evaluation graph; scheduling, cancellation epochs, the metadata pass, job orchestration for the pixel pass. |
+| `kiriko-eval` | The heart of **Togi** (K-067), the render pipeline: compiles a comp's layer stack into the evaluation graph; scheduling, cancellation epochs, the metadata pass, job orchestration for the pixel pass. |
 | `kiriko-gpu` | The one wgpu device, WGSL effect kernels, texture pool, readback, device-lost recovery, optional CUDA interop. |
 | `kiriko-media` | rsmpeg demux/decode/encode, frame index, persistent decoder instances, hardware decode, proxy generation, image sequences. |
-| `kiriko-audio` | cpal output, audio graph evaluation, the audio clock, peak-pyramid waveform generation, beat detection. |
-| `kiriko-cache` | Three-tier cache (VRAM/RAM/disk), content-hash keys, budget accounting, eviction, the resource governor. |
+| `kiriko-audio` | **Hibiki** (K-067): cpal output, audio graph evaluation, the audio clock, peak-pyramid waveform generation, beat detection. |
+| `kiriko-cache` | **Kura** (K-067): the three-tier cache (VRAM/RAM/disk), content-hash keys, budget accounting, eviction, the resource governor. |
 | `kiriko-expr` | QuickJS-ng embedding for expressions (K-063): deterministic runtime, AE-surface library, per-property sandboxing. |
 | `kiriko-ofx` | OFX host: out-of-process plugin server, C ABI boundary, shared-memory/shared-texture frame transport. |
 | `kiriko-kfx` | KFX host (K-062). Shares the sandbox/IPC substrate with `kiriko-ofx`. |
