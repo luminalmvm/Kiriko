@@ -359,6 +359,68 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                 );
             });
         });
+        ui.indent(("matte", layer.id), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Matte").small().color(theme.text_muted));
+                let current_name = layer
+                    .matte
+                    .as_ref()
+                    .and_then(|m| comp.layers.iter().find(|l| l.id == m.layer))
+                    .map(|l| l.name.clone())
+                    .unwrap_or_else(|| "None".into());
+                let mut set: Option<Option<kiriko_core::model::MatteRef>> = None;
+                egui::ComboBox::from_id_salt(("matte-src", layer.id))
+                    .selected_text(current_name)
+                    .width(120.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(layer.matte.is_none(), "None").clicked() {
+                            set = Some(None);
+                        }
+                        for other in comp.layers.iter().filter(|l| l.id != layer.id) {
+                            let selected = layer.matte.is_some_and(|m| m.layer == other.id);
+                            if ui.selectable_label(selected, &other.name).clicked() {
+                                set = Some(Some(kiriko_core::model::MatteRef {
+                                    layer: other.id,
+                                    channel: layer
+                                        .matte
+                                        .map(|m| m.channel)
+                                        .unwrap_or(kiriko_core::model::MatteChannel::Alpha),
+                                    inverted: layer.matte.is_some_and(|m| m.inverted),
+                                }));
+                            }
+                        }
+                    });
+                if let Some(mut m) = layer.matte {
+                    let luma = matches!(m.channel, kiriko_core::model::MatteChannel::Luma);
+                    if ui
+                        .selectable_label(luma, egui::RichText::new("luma").small())
+                        .on_hover_text("Luma matte (else alpha)")
+                        .clicked()
+                    {
+                        m.channel = if luma {
+                            kiriko_core::model::MatteChannel::Alpha
+                        } else {
+                            kiriko_core::model::MatteChannel::Luma
+                        };
+                        set = Some(Some(m));
+                    }
+                    if ui
+                        .selectable_label(m.inverted, egui::RichText::new("invert").small())
+                        .clicked()
+                    {
+                        m.inverted = !m.inverted;
+                        set = Some(Some(m));
+                    }
+                }
+                if let Some(matte) = set {
+                    pending = Some(kiriko_core::Op::SetLayerMatte {
+                        comp: comp_id,
+                        layer: layer.id,
+                        matte,
+                    });
+                }
+            });
+        });
         ui.indent(("transform", layer.id), |ui| {
             ui.collapsing(
                 egui::RichText::new("Transform")
@@ -564,6 +626,21 @@ fn empty_hint(ui: &mut egui::Ui, theme: &Theme, title: &str, hint: &str) {
 
 /// One decoded layer ready to composite (evaluator v0).
 #[cfg(feature = "media")]
+pub struct MatteDraw {
+    pub rgba: Vec<u8>,
+    pub tex_w: u32,
+    pub tex_h: u32,
+    pub natural_size: (f32, f32),
+    pub position: (f32, f32),
+    pub anchor: (f32, f32),
+    pub scale: (f32, f32),
+    pub rotation_deg: f32,
+    pub opacity: f32,
+    pub luma: bool,
+    pub inverted: bool,
+}
+
+#[cfg(feature = "media")]
 pub struct CompLayerDraw {
     pub rgba: Vec<u8>,
     pub tex_w: u32,
@@ -576,6 +653,7 @@ pub struct CompLayerDraw {
     pub scale: (f32, f32),
     pub rotation_deg: f32,
     pub opacity: f32,
+    pub matte: Option<MatteDraw>,
 }
 
 /// GPU display path (slice 5 completion): decoded sRGB bytes → linear fp16
@@ -627,10 +705,40 @@ impl GpuViewer {
                 self.engine.linearise(&self.ctx, &src)
             })
             .collect();
+        // Matte layers render alone into comp space (one texture per consumer;
+        // the shared-matte cache optimisation arrives with the evaluator).
+        let matte_textures: Vec<Option<egui_wgpu::wgpu::Texture>> = layers
+            .iter()
+            .map(|l| {
+                l.matte.as_ref().map(|m| {
+                    let src = self
+                        .engine
+                        .upload_srgb8(&self.ctx, &m.rgba, m.tex_w, m.tex_h);
+                    let linear = self.engine.linearise(&self.ctx, &src);
+                    self.compositor.composite(
+                        &self.ctx,
+                        width,
+                        height,
+                        [0.0, 0.0, 0.0, 0.0],
+                        &[kiriko_gpu::CompositeLayer {
+                            texture: &linear,
+                            size: m.natural_size,
+                            position: m.position,
+                            anchor: m.anchor,
+                            scale: m.scale,
+                            rotation_deg: m.rotation_deg,
+                            opacity: m.opacity,
+                            matte: None,
+                        }],
+                    )
+                })
+            })
+            .collect();
         let comp_layers: Vec<kiriko_gpu::CompositeLayer> = linear_textures
             .iter()
             .zip(layers)
-            .map(|(texture, l)| kiriko_gpu::CompositeLayer {
+            .zip(&matte_textures)
+            .map(|((texture, l), matte_tex)| kiriko_gpu::CompositeLayer {
                 texture,
                 size: l.natural_size,
                 position: l.position,
@@ -638,6 +746,11 @@ impl GpuViewer {
                 scale: l.scale,
                 rotation_deg: l.rotation_deg,
                 opacity: l.opacity,
+                matte: matte_tex.as_ref().map(|mt| kiriko_gpu::MatteInput {
+                    texture: mt,
+                    luma: l.matte.as_ref().is_some_and(|m| m.luma),
+                    inverted: l.matte.as_ref().is_some_and(|m| m.inverted),
+                }),
             })
             .collect();
         let linear = self
@@ -947,12 +1060,18 @@ impl Shell {
                         if let Some(comp) = doc.comp(cf.comp) {
                             let t_comp = cf.frame as f64 / comp.frame_rate.fps().max(1.0);
                             // Bottom-up: document order is top-first.
+                            // Matte sources decode too but draw only if visible.
+                            let pixels_by_layer: std::collections::HashMap<_, _> =
+                                cf.layers.iter().map(|lp| (lp.layer, lp)).collect();
                             let mut draws: Vec<CompLayerDraw> = Vec::new();
                             for lp in cf.layers.iter().rev() {
                                 let Some(layer) = comp.layers.iter().find(|l| l.id == lp.layer)
                                 else {
                                     continue;
                                 };
+                                if !layer.switches.visible {
+                                    continue;
+                                }
                                 let lt = t_comp - layer.start_offset.0.to_f64();
                                 let tr = &layer.transform;
                                 let natural = self
@@ -973,6 +1092,37 @@ impl Shell {
                                         _ => None,
                                     })
                                     .unwrap_or((lp.width as f32, lp.height as f32));
+                                let matte = layer.matte.as_ref().and_then(|mr| {
+                                    let src = comp.layers.iter().find(|l| l.id == mr.layer)?;
+                                    let mp = pixels_by_layer.get(&mr.layer)?;
+                                    let mlt = t_comp - src.start_offset.0.to_f64();
+                                    let mtr = &src.transform;
+                                    Some(MatteDraw {
+                                        rgba: mp.rgba.clone(),
+                                        tex_w: mp.width,
+                                        tex_h: mp.height,
+                                        natural_size: (mp.width as f32, mp.height as f32),
+                                        position: (
+                                            mtr.position_x.value_at(mlt) as f32,
+                                            mtr.position_y.value_at(mlt) as f32,
+                                        ),
+                                        anchor: (
+                                            mtr.anchor_x.value_at(mlt) as f32,
+                                            mtr.anchor_y.value_at(mlt) as f32,
+                                        ),
+                                        scale: (
+                                            mtr.scale_x.value_at(mlt) as f32,
+                                            mtr.scale_y.value_at(mlt) as f32,
+                                        ),
+                                        rotation_deg: mtr.rotation.value_at(mlt) as f32,
+                                        opacity: mtr.opacity.value_at(mlt) as f32,
+                                        luma: matches!(
+                                            mr.channel,
+                                            kiriko_core::model::MatteChannel::Luma
+                                        ),
+                                        inverted: mr.inverted,
+                                    })
+                                });
                                 draws.push(CompLayerDraw {
                                     rgba: lp.rgba.clone(),
                                     tex_w: lp.width,
@@ -992,6 +1142,7 @@ impl Shell {
                                     ),
                                     rotation_deg: tr.rotation.value_at(lt) as f32,
                                     opacity: tr.opacity.value_at(lt) as f32,
+                                    matte,
                                 });
                             }
                             let bg = comp.background.0;

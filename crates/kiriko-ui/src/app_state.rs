@@ -645,9 +645,26 @@ impl AppState {
         self.preview_frame = self.preview_frame.min(frames.saturating_sub(1));
         let t = self.preview_frame as f64 / comp.frame_rate.fps();
 
+        // Visible layers plus any layers they reference as mattes (a matte
+        // source decodes even when its own visibility is off).
+        let visible: Vec<&kiriko_core::model::Layer> = comp
+            .layers
+            .iter()
+            .filter(|l| {
+                l.switches.visible && t >= l.in_point.0.to_f64() && t < l.out_point.0.to_f64()
+            })
+            .collect();
+        let mut wanted: Vec<Uuid> = visible.iter().map(|l| l.id).collect();
+        for l in &visible {
+            if let Some(m) = &l.matte {
+                if !wanted.contains(&m.layer) {
+                    wanted.push(m.layer);
+                }
+            }
+        }
         let mut jobs = Vec::new();
         for layer in &comp.layers {
-            if !layer.switches.visible {
+            if !wanted.contains(&layer.id) {
                 continue;
             }
             if t < layer.in_point.0.to_f64() || t >= layer.out_point.0.to_f64() {
