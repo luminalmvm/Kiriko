@@ -1206,6 +1206,147 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
 
 /// Footage preview: the frame fit to the surround, scrub bar, resolution picker.
 #[cfg(feature = "media")]
+/// Mask outlines and draggable vertices over the previewed comp — the seed
+/// of the pen tool (07-UI-SPEC §Viewer tools). Outline follows the cursor
+/// mid-drag; pixels update on release (one SetLayerMasks per drag, one undo).
+#[cfg(feature = "media")]
+fn mask_overlay(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    app: &mut AppState,
+    draw: egui::Rect,
+    scale: f32,
+) {
+    let Some(comp_id) = app.preview_comp else {
+        return;
+    };
+    let Some(layer_id) = app.selected_layer else {
+        return;
+    };
+    let doc = app.store.snapshot();
+    let Some(comp) = doc.comp(comp_id) else {
+        return;
+    };
+    let Some(layer) = comp.layers.iter().find(|l| l.id == layer_id) else {
+        return;
+    };
+    if layer.masks.is_empty() || layer.switches.three_d {
+        return; // 3D overlay geometry arrives with the object tools
+    }
+    let fps = comp.frame_rate.fps().max(1.0);
+    let lt = app.preview_frame as f64 / fps - layer.start_offset.0.to_f64();
+    let tr = &layer.transform;
+    let (px, py) = (tr.position_x.value_at(lt), tr.position_y.value_at(lt));
+    let (ax, ay) = (tr.anchor_x.value_at(lt), tr.anchor_y.value_at(lt));
+    let (sx, sy) = (
+        (tr.scale_x.value_at(lt) / 100.0).max(1e-6),
+        (tr.scale_y.value_at(lt) / 100.0).max(1e-6),
+    );
+    let rot = tr.rotation.value_at(lt).to_radians();
+    let (sin, cos) = rot.sin_cos();
+    // Layer space → screen (2D transform chain, then the view placement).
+    let to_screen = |p: (f64, f64)| -> egui::Pos2 {
+        let (dx, dy) = ((p.0 - ax) * sx, (p.1 - ay) * sy);
+        let (rx, ry) = (dx * cos - dy * sin, dx * sin + dy * cos);
+        let (cx, cy) = (px + rx, py + ry);
+        draw.min + egui::vec2(cx as f32, cy as f32) * scale
+    };
+    // Screen → layer space (drag positions come back through this).
+    let from_screen = |pos: egui::Pos2| -> (f64, f64) {
+        let c = (pos - draw.min) / scale;
+        let (dx, dy) = (f64::from(c.x) - px, f64::from(c.y) - py);
+        let (rx, ry) = (dx * cos + dy * sin, -dx * sin + dy * cos);
+        (rx / sx + ax, ry / sy + ay)
+    };
+
+    let stroke = egui::Stroke::new(1.0_f32, theme.accent);
+    let mut committed: Option<Vec<kiriko_core::mask::Mask>> = None;
+    for (mi, mask) in layer.masks.iter().enumerate() {
+        // The path being dragged previews with the moved vertex.
+        let mut path = mask.path.clone();
+        if let Some((dm, dv, pos)) = app.mask_drag {
+            if dm == mi && dv < path.vertices.len() {
+                path.vertices[dv].pos = pos;
+            }
+        }
+        // Flatten each cubic span exactly as the rasteriser does.
+        let n = path.vertices.len();
+        if n >= 2 {
+            let mut points: Vec<egui::Pos2> = Vec::with_capacity(n * 24 + 1);
+            for i in 0..n {
+                let a = &path.vertices[i];
+                let b = &path.vertices[(i + 1) % n];
+                for s in 0..24 {
+                    let t = f64::from(s) / 24.0;
+                    let u = 1.0 - t;
+                    let p0 = a.pos;
+                    let p1 = (a.pos.0 + a.tan_out.0, a.pos.1 + a.tan_out.1);
+                    let p2 = (b.pos.0 + b.tan_in.0, b.pos.1 + b.tan_in.1);
+                    let p3 = b.pos;
+                    let x = u * u * u * p0.0
+                        + 3.0 * u * u * t * p1.0
+                        + 3.0 * u * t * t * p2.0
+                        + t * t * t * p3.0;
+                    let y = u * u * u * p0.1
+                        + 3.0 * u * u * t * p1.1
+                        + 3.0 * u * t * t * p2.1
+                        + t * t * t * p3.1;
+                    points.push(to_screen((x, y)));
+                }
+            }
+            if let Some(first) = points.first().copied() {
+                points.push(first);
+            }
+            ui.painter().add(egui::Shape::line(points, stroke));
+        }
+        // Vertex handles: 8px squares, draggable.
+        for (vi, v) in path.vertices.iter().enumerate() {
+            let centre = to_screen(v.pos);
+            let handle = egui::Rect::from_center_size(centre, egui::vec2(8.0, 8.0));
+            let resp = ui.interact(
+                handle,
+                ui.id().with(("mask-vtx", layer_id, mi, vi)),
+                egui::Sense::click_and_drag(),
+            );
+            let active = app
+                .mask_drag
+                .is_some_and(|(dm, dv, _)| dm == mi && dv == vi);
+            ui.painter().rect_filled(
+                handle.shrink(if active || resp.hovered() { 0.0 } else { 2.0 }),
+                1.0,
+                theme.accent,
+            );
+            if resp.drag_started() || resp.dragged() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    app.mask_drag = Some((mi, vi, from_screen(pos)));
+                }
+            }
+            if resp.drag_stopped() {
+                if let Some((dm, dv, pos)) = app.mask_drag.take() {
+                    if dm == mi && dv == vi {
+                        let mut masks = layer.masks.clone();
+                        if let Some(vtx) =
+                            masks.get_mut(dm).and_then(|m| m.path.vertices.get_mut(dv))
+                        {
+                            vtx.pos = pos;
+                            committed = Some(masks);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(masks) = committed {
+        app.commit(kiriko_core::Op::SetLayerMasks {
+            comp: comp_id,
+            layer: layer_id,
+            masks,
+        });
+        app.refresh_preview();
+    }
+}
+
+#[cfg(feature = "media")]
 fn viewer_footage(
     ui: &mut egui::Ui,
     theme: &Theme,
@@ -1297,6 +1438,8 @@ fn viewer_footage(
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
+            #[cfg(feature = "media")]
+            mask_overlay(ui, theme, app, draw, scale);
         }
     } else {
         ui.painter().text(

@@ -483,6 +483,9 @@ pub struct AppState {
     pub trim_edit: Option<(Uuid, bool, f64)>,
     /// Layer whose properties the graph editor shows (clicked in the Timeline).
     pub selected_layer: Option<Uuid>,
+    /// Mask vertex mid-drag in the Viewer: (mask index, vertex index,
+    /// layer-space position). Committed as one SetLayerMasks op on release.
+    pub mask_drag: Option<(usize, usize, (f64, f64))>,
     /// Property shown in the graph editor.
     pub graph_prop: Option<kiriko_core::model::TransformProp>,
     /// In-flight keyframe drag: (key index, provisional layer-time, value).
@@ -586,6 +589,7 @@ impl Default for AppState {
             last_autosave: Instant::now(),
             comp_counter: 0,
             selected_item: None,
+            mask_drag: None,
             comp_dialog: None,
         }
     }
