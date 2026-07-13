@@ -359,22 +359,84 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     use kiriko_core::model::TransformProp;
     let comp_id = comp.id;
     let mut pending: Option<kiriko_core::Op> = None;
+
+    // ---- ruler + time geometry (07-UI-SPEC Timeline) --------------------
+    let name_w = 180.0_f32;
+    let duration = comp.duration.0.to_f64().max(1e-6);
+    let frames = app.comp_frame_count(comp).max(1);
+    let panel_left = ui.max_rect().left();
+    let panel_right = ui.max_rect().right();
+    let track_left = panel_left + name_w;
+    let track_w = (panel_right - track_left - 8.0).max(40.0);
+    let x_of = |seconds: f64| track_left + (seconds / duration) as f32 * track_w;
+
+    let (ruler_rect, ruler_resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 20.0),
+        egui::Sense::click_and_drag(),
+    );
+    ui.painter().rect_filled(ruler_rect, 0.0, theme.surface_2);
+    let label_every = (duration / 10.0).ceil().max(1.0) as usize;
+    for s in 0..=duration.floor() as usize {
+        let x = x_of(s as f64);
+        ui.painter().line_segment(
+            [
+                egui::pos2(x, ruler_rect.bottom() - 6.0),
+                egui::pos2(x, ruler_rect.bottom()),
+            ],
+            egui::Stroke::new(1.0_f32, theme.hairline_strong),
+        );
+        if s % label_every == 0 {
+            ui.painter().text(
+                egui::pos2(x + 3.0, ruler_rect.top() + 2.0),
+                egui::Align2::LEFT_TOP,
+                format!("{s}s"),
+                egui::FontId::monospace(9.0),
+                theme.text_muted,
+            );
+        }
+    }
+    if ruler_resp.clicked() || ruler_resp.dragged() {
+        if let Some(pos) = ruler_resp.interact_pointer_pos() {
+            let frac = ((pos.x - track_left) / track_w).clamp(0.0, 1.0) as f64;
+            app.preview_comp = Some(comp_id);
+            app.comp_playback = None; // scrubbing pauses
+            app.preview_frame = ((frac * frames as f64) as usize).min(frames.saturating_sub(1));
+            #[cfg(feature = "media")]
+            app.refresh_preview();
+        }
+    }
+    let rows_top = ui.cursor().top();
+
     for layer in &comp.layers {
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(&layer.name).color(theme.text_secondary));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{:.2}s – {:.2}s",
-                        layer.in_point.0.to_f64(),
-                        layer.out_point.0.to_f64()
-                    ))
-                    .monospace()
-                    .small()
-                    .color(theme.text_muted),
-                );
-            });
-        });
+        let (row_rect, _row_resp) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), egui::Sense::hover());
+        ui.painter().text(
+            egui::pos2(row_rect.left() + 4.0, row_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &layer.name,
+            egui::FontId::proportional(12.0),
+            theme.text_secondary,
+        );
+        let bar = egui::Rect::from_min_max(
+            egui::pos2(x_of(layer.in_point.0.to_f64()), row_rect.top() + 2.0),
+            egui::pos2(x_of(layer.out_point.0.to_f64()), row_rect.bottom() - 2.0),
+        );
+        ui.painter().rect(
+            bar,
+            3.0,
+            theme.surface_3,
+            egui::Stroke::new(1.0_f32, theme.hairline_strong),
+            egui::StrokeKind::Inside,
+        );
+        if layer.matte.is_some() {
+            ui.painter().text(
+                egui::pos2(bar.right() - 4.0, bar.center().y),
+                egui::Align2::RIGHT_CENTER,
+                "matte",
+                egui::FontId::monospace(8.0),
+                theme.text_muted,
+            );
+        }
         ui.indent(("matte", layer.id), |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Matte").small().color(theme.text_muted));
@@ -539,6 +601,17 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                 },
             );
         });
+    }
+    // Playhead over ruler and rows (clay, the one accent).
+    if app.preview_comp == Some(comp_id) {
+        let x = x_of(app.preview_frame as f64 / comp.frame_rate.fps().max(1.0));
+        ui.painter().line_segment(
+            [
+                egui::pos2(x, ruler_rect.top()),
+                egui::pos2(x, ui.cursor().top().max(rows_top)),
+            ],
+            egui::Stroke::new(1.5_f32, theme.accent),
+        );
     }
     if let Some(op) = pending {
         app.commit(op);
