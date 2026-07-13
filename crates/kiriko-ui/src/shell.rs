@@ -455,20 +455,55 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                                 ("Rotation °", TransformProp::Rotation, 0.5),
                                 ("Opacity %", TransformProp::Opacity, 0.5),
                             ];
+                            // Layer time at the playhead: where keyframes land
+                            // (AE behaviour: editing an animated value writes a
+                            // key at the current time).
+                            let fps = comp.frame_rate.fps().max(1.0);
+                            let lt = app.preview_frame as f64 / fps - layer.start_offset.0.to_f64();
                             for (label, prop, speed) in rows {
-                                ui.label(
-                                    egui::RichText::new(label).small().color(theme.text_muted),
-                                );
                                 let slot = layer.transform.get(prop);
-                                if slot.is_animated() {
+                                let animated = slot.is_animated();
+                                ui.horizontal(|ui| {
+                                    let clock = if animated { "⏱" } else { "◦" };
+                                    if ui
+                                        .selectable_label(
+                                            animated,
+                                            egui::RichText::new(clock).small(),
+                                        )
+                                        .on_hover_text(if animated {
+                                            "Remove animation (freeze current value)"
+                                        } else {
+                                            "Animate: keyframe at the playhead"
+                                        })
+                                        .clicked()
+                                    {
+                                        let animation = if animated {
+                                            Animation::Static(slot.value_at(lt))
+                                        } else {
+                                            Animation::Keyframed(vec![
+                                                kiriko_core::anim::Keyframe {
+                                                    time: rational_at(lt),
+                                                    value: slot.value_at(lt),
+                                                    interp_in:
+                                                        kiriko_core::anim::SideInterp::Linear,
+                                                    interp_out:
+                                                        kiriko_core::anim::SideInterp::Linear,
+                                                },
+                                            ])
+                                        };
+                                        pending = Some(kiriko_core::Op::SetTransformProperty {
+                                            comp: comp_id,
+                                            layer: layer.id,
+                                            prop,
+                                            animation,
+                                        });
+                                    }
                                     ui.label(
-                                        egui::RichText::new("animated")
-                                            .monospace()
-                                            .small()
-                                            .color(theme.accent),
+                                        egui::RichText::new(label).small().color(theme.text_muted),
                                     );
-                                } else {
-                                    let committed = slot.value_at(0.0);
+                                });
+                                {
+                                    let committed = slot.value_at(lt);
                                     let mut value = match app.prop_edit {
                                         Some((l, p, v)) if l == layer.id && p == prop => v,
                                         _ => committed,
@@ -483,11 +518,16 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                                     }
                                     if resp.drag_stopped() || resp.lost_focus() {
                                         if (value - committed).abs() > f64::EPSILON {
+                                            let animation = if animated {
+                                                Animation::Keyframed(upsert_key(slot, lt, value))
+                                            } else {
+                                                Animation::Static(value)
+                                            };
                                             pending = Some(kiriko_core::Op::SetTransformProperty {
                                                 comp: comp_id,
                                                 layer: layer.id,
                                                 prop,
-                                                animation: Animation::Static(value),
+                                                animation,
                                             });
                                         }
                                         app.prop_edit = None;
@@ -613,6 +653,44 @@ fn viewer_footage(
                 });
             });
     });
+}
+
+/// Layer time → rational on the flick grid (the only f64→rational route).
+fn rational_at(seconds: f64) -> kiriko_core::Rational {
+    kiriko_core::Rational::from_f64_on_grid(seconds.max(0.0), kiriko_core::Rational::FLICK_DEN)
+        .unwrap_or(kiriko_core::Rational::ZERO)
+}
+
+/// Insert or replace a keyframe at layer time `lt` with `value`, keeping the
+/// list sorted and times unique (half-frame tolerance for "same time").
+fn upsert_key(
+    slot: &kiriko_core::anim::Property,
+    lt: f64,
+    value: f64,
+) -> Vec<kiriko_core::anim::Keyframe> {
+    use kiriko_core::anim::{Animation, Keyframe, SideInterp};
+    let mut keys = match &slot.animation {
+        Animation::Keyframed(k) => k.clone(),
+        Animation::Static(v) => vec![Keyframe {
+            time: rational_at(0.0),
+            value: *v,
+            interp_in: SideInterp::Linear,
+            interp_out: SideInterp::Linear,
+        }],
+    };
+    const EPS: f64 = 1.0 / 240.0;
+    if let Some(existing) = keys.iter_mut().find(|k| (k.time.to_f64() - lt).abs() < EPS) {
+        existing.value = value;
+    } else {
+        keys.push(Keyframe {
+            time: rational_at(lt),
+            value,
+            interp_in: SideInterp::Linear,
+            interp_out: SideInterp::Linear,
+        });
+        keys.sort_by_key(|k| k.time);
+    }
+    keys
 }
 
 fn effects_panel(ui: &mut egui::Ui, theme: &Theme) {
