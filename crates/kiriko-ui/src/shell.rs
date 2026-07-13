@@ -332,6 +332,10 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
         );
         return;
     }
+    use kiriko_core::anim::Animation;
+    use kiriko_core::model::TransformProp;
+    let comp_id = comp.id;
+    let mut pending: Option<kiriko_core::Op> = None;
     for layer in &comp.layers {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&layer.name).color(theme.text_secondary));
@@ -348,6 +352,71 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                 );
             });
         });
+        ui.indent(("transform", layer.id), |ui| {
+            ui.collapsing(
+                egui::RichText::new("Transform")
+                    .small()
+                    .color(theme.text_muted),
+                |ui| {
+                    egui::Grid::new(("txgrid", layer.id))
+                        .num_columns(2)
+                        .spacing(egui::vec2(12.0, 2.0))
+                        .show(ui, |ui| {
+                            let rows: [(&str, TransformProp, f64); 6] = [
+                                ("Position x", TransformProp::PositionX, 1.0),
+                                ("Position y", TransformProp::PositionY, 1.0),
+                                ("Scale x %", TransformProp::ScaleX, 0.5),
+                                ("Scale y %", TransformProp::ScaleY, 0.5),
+                                ("Rotation °", TransformProp::Rotation, 0.5),
+                                ("Opacity %", TransformProp::Opacity, 0.5),
+                            ];
+                            for (label, prop, speed) in rows {
+                                ui.label(
+                                    egui::RichText::new(label).small().color(theme.text_muted),
+                                );
+                                let slot = layer.transform.get(prop);
+                                if slot.is_animated() {
+                                    ui.label(
+                                        egui::RichText::new("animated")
+                                            .monospace()
+                                            .small()
+                                            .color(theme.accent),
+                                    );
+                                } else {
+                                    let committed = slot.value_at(0.0);
+                                    let mut value = match app.prop_edit {
+                                        Some((l, p, v)) if l == layer.id && p == prop => v,
+                                        _ => committed,
+                                    };
+                                    let resp = ui.add(
+                                        egui::DragValue::new(&mut value)
+                                            .speed(speed)
+                                            .max_decimals(2),
+                                    );
+                                    if resp.dragged() || resp.has_focus() {
+                                        app.prop_edit = Some((layer.id, prop, value));
+                                    }
+                                    if resp.drag_stopped() || resp.lost_focus() {
+                                        if (value - committed).abs() > f64::EPSILON {
+                                            pending = Some(kiriko_core::Op::SetTransformProperty {
+                                                comp: comp_id,
+                                                layer: layer.id,
+                                                prop,
+                                                animation: Animation::Static(value),
+                                            });
+                                        }
+                                        app.prop_edit = None;
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                },
+            );
+        });
+    }
+    if let Some(op) = pending {
+        app.commit(op);
     }
 }
 

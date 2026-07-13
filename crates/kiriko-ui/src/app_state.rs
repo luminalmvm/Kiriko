@@ -258,6 +258,9 @@ pub struct AppState {
     audio_rx: std::sync::mpsc::Receiver<(Uuid, Result<kiriko_media::AudioBuffer, String>)>,
     #[cfg(feature = "media")]
     audio_tx: std::sync::mpsc::Sender<(Uuid, Result<kiriko_media::AudioBuffer, String>)>,
+    /// In-flight property drag (layer, property, provisional value): commits
+    /// once on release so a drag is ONE undo step, not hundreds.
+    pub prop_edit: Option<(Uuid, kiriko_core::model::TransformProp, f64)>,
     /// Footage item currently shown in the Viewer, and the scrub position.
     pub preview_item: Option<Uuid>,
     pub preview_frame: usize,
@@ -295,6 +298,7 @@ impl Default for AppState {
             audio_rx,
             #[cfg(feature = "media")]
             audio_tx,
+            prop_edit: None,
             preview_item: None,
             preview_frame: 0,
             preview_divisor: 1,
