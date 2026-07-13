@@ -7,12 +7,14 @@
 //! scrubbing land on exactly the right frame in slice 5, and it is cached on
 //! disk keyed by a content *fingerprint* so it is built once per file.
 
+pub mod audio;
 pub mod decode;
 pub mod index;
 pub mod probe;
 
 use std::path::Path;
 
+pub use audio::AudioBuffer;
 pub use decode::{DecodedFrame, VideoDecoder};
 pub use index::{FrameIndex, IndexEntry};
 pub use probe::{AudioInfo, MediaProbe, VideoInfo};
