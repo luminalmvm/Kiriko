@@ -354,6 +354,23 @@ pub mod media {
 }
 
 /// Infallible constructor for small literal rationals.
+/// One decode-width policy for requests AND cache keys — if these ever
+/// disagreed, a cached frame could present at the wrong resolution.
+fn decode_target_width(
+    natural_w: u32,
+    auto_res: bool,
+    display_scale: f32,
+    divisor: u32,
+) -> Option<u32> {
+    if auto_res {
+        let scale = display_scale.clamp(0.05, 1.0);
+        let w = (natural_w as f32 * scale).round() as u32;
+        (w < natural_w).then_some(w.max(16))
+    } else {
+        (divisor > 1).then(|| natural_w / divisor)
+    }
+}
+
 fn rat(n: i64, d: i64) -> Rational {
     Rational::new(n, d).unwrap_or(Rational::ZERO)
 }
@@ -372,6 +389,58 @@ pub struct CompDialog {
     /// Item to add as the first layer once the comp exists (drag-drop with
     /// no comp yet).
     pub pending_item: Option<Uuid>,
+}
+
+/// Cache-bar memo key: (document snapshot ptr, cache epoch, quality tag,
+/// comp id) — the bar is stale iff any of these moved.
+#[cfg(feature = "media")]
+type CacheBarKey = (usize, u64, u32, Uuid);
+
+/// One display-ready comp frame in Kura's RAM tier (sRGB bytes as shown and
+/// as exported — the same pixels, K-031).
+#[cfg(feature = "media")]
+pub struct CachedCompFrame {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+#[cfg(feature = "media")]
+impl kiriko_cache::ByteSized for CachedCompFrame {
+    fn byte_size(&self) -> usize {
+        self.rgba.len() + 16
+    }
+}
+
+/// See [`AppState::stamper`].
+#[cfg(feature = "media")]
+pub struct PreviewStamper<'a> {
+    doc: &'a Document,
+    media: &'a media::MediaRegistry,
+    auto_res: bool,
+    display_scale: f32,
+    divisor: u32,
+}
+
+#[cfg(feature = "media")]
+impl kiriko_eval::SourceStamper for PreviewStamper<'_> {
+    fn stamp(&self, item: Uuid, lt: f64) -> Option<(String, u64)> {
+        let Some(ProjectItem::Footage(f)) = self.doc.item(item) else {
+            return None;
+        };
+        let media::MediaStatus::Ready { probe, frames, .. } = self.media.map.get(&item)? else {
+            return None;
+        };
+        let video = probe.video.as_ref()?;
+        let source_frame =
+            ((lt * video.fps()).round().max(0.0) as usize).min(frames.saturating_sub(1));
+        let target =
+            decode_target_width(video.width, self.auto_res, self.display_scale, self.divisor);
+        Some((
+            format!("{}#w{}", f.media.absolute_path, target.unwrap_or(0)),
+            source_frame as u64,
+        ))
+    }
 }
 
 /// A recovery offer: the saved document plus the journal ops beyond it.
@@ -441,6 +510,22 @@ pub struct AppState {
     pub view_pan: egui::Vec2,
     /// Screen pixels per native image pixel at last paint (Auto res input).
     pub last_display_scale: f32,
+    /// Kura's RAM tier for final comp frames (K-016): display-ready sRGB
+    /// bytes keyed by content hash. Hash mismatch is the only invalidation.
+    #[cfg(feature = "media")]
+    pub comp_frame_cache: kiriko_cache::ByteLru<u128, CachedCompFrame>,
+    /// Bumped on every cache insert (cache-bar memo + repaint driver).
+    #[cfg(feature = "media")]
+    pub cache_epoch: u64,
+    /// A warm frame the shell should present instead of waiting on a render.
+    #[cfg(feature = "media")]
+    pub cached_present: Option<u128>,
+    /// The (comp, frame) currently rendering for the background cache fill.
+    #[cfg(feature = "media")]
+    pub fill_in_flight: Option<(Uuid, usize)>,
+    /// Cache-bar memo: recomputed only when the memo key changes.
+    #[cfg(feature = "media")]
+    cache_bar_memo: Option<(CacheBarKey, std::sync::Arc<Vec<bool>>)>,
     last_autosave: Instant,
     comp_counter: usize,
 }
@@ -488,6 +573,16 @@ impl Default for AppState {
             view_zoom: 1.0,
             view_pan: egui::Vec2::ZERO,
             last_display_scale: 1.0,
+            #[cfg(feature = "media")]
+            comp_frame_cache: kiriko_cache::ByteLru::new(512 * 1024 * 1024),
+            #[cfg(feature = "media")]
+            cache_epoch: 0,
+            #[cfg(feature = "media")]
+            cached_present: None,
+            #[cfg(feature = "media")]
+            fill_in_flight: None,
+            #[cfg(feature = "media")]
+            cache_bar_memo: None,
             last_autosave: Instant::now(),
             comp_counter: 0,
             selected_item: None,
@@ -1391,6 +1486,119 @@ impl AppState {
     /// Build and send the batch request rendering `preview_comp` at the
     /// current frame (evaluator v0: footage layers, no retime yet).
     #[cfg(feature = "media")]
+    /// The evaluator's window onto probed media: which file and which source
+    /// frame a Footage layer shows, with the decode width folded into the
+    /// identity so each preview-resolution tier keys separately (docs/06
+    /// §5.2 quality axis; Auto folds the live zoom in the same way).
+    #[cfg(feature = "media")]
+    fn stamper<'a>(&'a self, doc: &'a Document) -> PreviewStamper<'a> {
+        PreviewStamper {
+            doc,
+            media: &self.media,
+            auto_res: self.preview_auto_res,
+            display_scale: self.last_display_scale,
+            divisor: self.preview_divisor,
+        }
+    }
+
+    /// Content-hash key for one frame of a comp, or None while some footage
+    /// is unprobed (rendered live, not cached).
+    #[cfg(feature = "media")]
+    pub fn frame_key_for(&self, comp_id: Uuid, frame: usize) -> Option<u128> {
+        let doc = self.store.snapshot();
+        let comp = doc.comp(comp_id)?;
+        let t = frame as f64 / comp.frame_rate.fps().max(1.0);
+        kiriko_eval::comp_frame_key(
+            &doc,
+            comp,
+            t,
+            kiriko_eval::Quality { divisor: 1 },
+            &self.stamper(&doc),
+        )
+        .map(|k| k.0)
+    }
+
+    /// Ask the preview engine to render an arbitrary frame (the background
+    /// cache fill) without moving the playhead.
+    #[cfg(feature = "media")]
+    pub fn request_fill_frame(&mut self, comp_id: Uuid, frame: usize) {
+        let doc = self.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let t = frame as f64 / comp.frame_rate.fps().max(1.0);
+        let mut jobs = Vec::new();
+        let mut visited = vec![comp_id];
+        self.collect_comp_jobs(&doc, comp, t, &mut jobs, &mut visited);
+        self.fill_in_flight = Some((comp_id, frame));
+        self.preview_engine.request_comp(comp_id, frame, jobs);
+    }
+
+    /// The next work-area frame worth filling (nearest the playhead first),
+    /// or None when the work area is fully cached or unkeyable.
+    #[cfg(feature = "media")]
+    pub fn next_fill_frame(&self, comp_id: Uuid) -> Option<usize> {
+        let doc = self.store.snapshot();
+        let comp = doc.comp(comp_id)?;
+        let (start, end) = self.work_area_frames(comp);
+        let playhead = self.preview_frame.clamp(start, end.saturating_sub(1));
+        // Outward walk: playhead, +1, -1, +2, -2… (fills what plays next).
+        let span = end - start;
+        (0..span * 2).find_map(|i| {
+            let offset = i.div_ceil(2);
+            let frame = if i % 2 == 0 {
+                playhead.checked_add(offset).filter(|f| *f < end)
+            } else {
+                playhead.checked_sub(offset).filter(|f| *f >= start)
+            }?;
+            let key = self.frame_key_for(comp_id, frame)?;
+            (!self.comp_frame_cache.contains_key(&key)).then_some(frame)
+        })
+    }
+
+    /// One number capturing the preview-quality state (memo key component).
+    #[cfg(feature = "media")]
+    fn quality_tag(&self) -> u32 {
+        if self.preview_auto_res {
+            1000 + (self.last_display_scale.clamp(0.05, 1.0) * 100.0) as u32
+        } else {
+            self.preview_divisor
+        }
+    }
+
+    /// Which of a comp's frames are in Kura's RAM tier — the timeline cache
+    /// bar (docs/07-UI-SPEC.md: cache bars). Memoised per (document, cache
+    /// state, quality); comps beyond 2 400 frames skip the bar for now (the
+    /// evaluator's incremental bar replaces this scan — S-budget debt).
+    #[cfg(feature = "media")]
+    pub fn cache_bar(&mut self, comp: &Composition) -> Option<std::sync::Arc<Vec<bool>>> {
+        let total = self.comp_frame_count(comp);
+        if total == 0 || total > 2400 {
+            return None;
+        }
+        let key = (
+            std::sync::Arc::as_ptr(&self.store.snapshot()) as usize,
+            self.cache_epoch,
+            self.quality_tag(),
+            comp.id,
+        );
+        if let Some((k, bars)) = &self.cache_bar_memo {
+            if *k == key {
+                return Some(bars.clone());
+            }
+        }
+        let bars: Vec<bool> = (0..total)
+            .map(|f| {
+                self.frame_key_for(comp.id, f)
+                    .is_some_and(|k| self.comp_frame_cache.contains_key(&k))
+            })
+            .collect();
+        let bars = std::sync::Arc::new(bars);
+        self.cache_bar_memo = Some((key, bars.clone()));
+        Some(bars)
+    }
+
+    #[cfg(feature = "media")]
     pub fn refresh_comp_preview(&mut self) {
         use kiriko_core::model::LayerKind;
         let Some(comp_id) = self.preview_comp else {
@@ -1403,6 +1611,17 @@ impl AppState {
         let frames = self.comp_frame_count(comp);
         self.preview_frame = self.preview_frame.min(frames.saturating_sub(1));
         let t = self.preview_frame as f64 / comp.frame_rate.fps();
+
+        // A real request supersedes any background fill in flight.
+        self.fill_in_flight = None;
+
+        // Kura warm path: a cached frame presents without decoding anything.
+        if let Some(key) = self.frame_key_for(comp_id, self.preview_frame) {
+            if self.comp_frame_cache.contains_key(&key) {
+                self.cached_present = Some(key);
+                return;
+            }
+        }
 
         // Recursive job collection: visible layers, their matte sources, and
         // everything nested comps need at their mapped times (cycle-guarded).
@@ -1420,13 +1639,12 @@ impl AppState {
     /// resolution mode. Auto: displayed size, capped at 100% (never above
     /// native, however far the view is zoomed in).
     pub fn target_width_for(&self, natural_w: u32) -> Option<u32> {
-        if self.preview_auto_res {
-            let scale = self.last_display_scale.clamp(0.05, 1.0);
-            let w = (natural_w as f32 * scale).round() as u32;
-            (w < natural_w).then_some(w.max(16))
-        } else {
-            (self.preview_divisor > 1).then(|| natural_w / self.preview_divisor)
-        }
+        decode_target_width(
+            natural_w,
+            self.preview_auto_res,
+            self.last_display_scale,
+            self.preview_divisor,
+        )
     }
 
     /// Recursively collect decode jobs for a comp at time `t`

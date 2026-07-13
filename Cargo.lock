@@ -2547,6 +2547,7 @@ dependencies = [
  "kiriko-audio",
  "kiriko-cache",
  "kiriko-core",
+ "kiriko-eval",
  "kiriko-gpu",
  "kiriko-media",
  "kiriko-project",

@@ -91,6 +91,12 @@ impl<K: Eq + Hash + Clone, V: ByteSized> ByteLru<K, V> {
         true
     }
 
+    /// Membership test that does not touch recency (cache-bar drawing polls
+    /// every visible frame each paint; that must not distort eviction).
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.map.contains_key(key)
+    }
+
     pub fn used_bytes(&self) -> usize {
         self.used
     }

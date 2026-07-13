@@ -10,6 +10,7 @@ kiriko-core = { path = "../kiriko-core" }
 egui-wgpu = { version = "0.31", optional = true }
 kiriko-audio = { path = "../kiriko-audio", optional = true }
 kiriko-cache = { path = "../kiriko-cache", optional = true }
+kiriko-eval = { path = "../kiriko-eval", optional = true }
 kiriko-gpu = { path = "../kiriko-gpu", optional = true }
 kiriko-media = { path = "../kiriko-media", optional = true }
 kiriko-text = { path = "../kiriko-text" }
@@ -24,7 +25,7 @@ serde_json = "1"
 # "media" wires probing/frame-indexing (ffmpeg). Default on; Windows CI builds
 # --no-default-features until ffmpeg dev libs are set up there (tracked TODO).
 default = ["media"]
-media = ["dep:kiriko-media", "dep:kiriko-audio", "dep:kiriko-cache", "dep:kiriko-gpu", "dep:egui-wgpu"]
+media = ["dep:kiriko-media", "dep:kiriko-audio", "dep:kiriko-cache", "dep:kiriko-eval", "dep:kiriko-gpu", "dep:egui-wgpu"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.15"

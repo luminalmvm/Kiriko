@@ -678,6 +678,29 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
         );
         ui.painter().rect_filled(band, 0.0, theme.success);
     }
+    // Kura cache bar: mint runs along the ruler's base where frames are
+    // banked (never a warning colour — an empty bar is normal, not a fault).
+    #[cfg(feature = "media")]
+    if let Some(bars) = app.cache_bar(comp) {
+        let fps = comp.frame_rate.fps().max(1.0);
+        let mut run_start: Option<usize> = None;
+        for f in 0..=bars.len() {
+            let cached = f < bars.len() && bars[f];
+            match (cached, run_start) {
+                (true, None) => run_start = Some(f),
+                (false, Some(s)) => {
+                    let band = egui::Rect::from_min_max(
+                        egui::pos2(x_of(s as f64 / fps), ruler_rect.bottom() - 2.0),
+                        egui::pos2(x_of(f as f64 / fps), ruler_rect.bottom()),
+                    );
+                    ui.painter().rect_filled(band, 0.0, theme.success);
+                    run_start = None;
+                }
+                _ => {}
+            }
+        }
+    }
+
     let label_every = (duration / 10.0).ceil().max(1.0) as usize;
     for s in 0..=duration.floor() as usize {
         let x = x_of(s as f64);
@@ -2131,6 +2154,21 @@ impl GpuViewer {
         )
     }
 
+    /// Realise a comp frame straight to display-ready sRGB bytes (Kura's
+    /// cache-fill path — nothing is registered for painting).
+    fn realise_to_bytes(
+        &self,
+        camera: Option<kiriko_core::model::CameraPose>,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        layers: &[CompLayerDraw],
+    ) -> Option<Vec<u8>> {
+        let linear = self.realise(camera, width, height, background, layers);
+        let shown = self.engine.display(&self.ctx, &linear);
+        self.engine.readback8(&self.ctx, &shown).ok()
+    }
+
     /// Realise a comp's draws and register the frame for painting.
     fn present_comp(
         &mut self,
@@ -2656,6 +2694,25 @@ impl Shell {
                 // Selection made before probe finished: retry until Ready.
                 self.app.refresh_preview();
             }
+            // Kura warm path: a cached frame presents as a plain upload.
+            if let Some(key) = self.app.cached_present.take() {
+                if let Some(gpu) = &mut self.gpu {
+                    if let Some(frame) = self.app.comp_frame_cache.get(&key) {
+                        let (w, h, rgba) = (frame.width, frame.height, frame.rgba.clone());
+                        self.preview_display = Some(gpu.present(&rgba, w, h));
+                    }
+                }
+            }
+            // Idle: fill the work area around the playhead, one frame at a
+            // time (any real request supersedes the fill mid-flight).
+            if !self.app.is_playing() && self.app.fill_in_flight.is_none() {
+                if let Some(comp_id) = self.app.preview_comp {
+                    if let Some(frame) = self.app.next_fill_frame(comp_id) {
+                        self.app.request_fill_frame(comp_id, frame);
+                        ctx.request_repaint_after(std::time::Duration::from_millis(30));
+                    }
+                }
+            }
             let mut newest = None;
             while let Ok(result) = self.app.preview_engine.results.try_recv() {
                 newest = Some(result);
@@ -2663,6 +2720,8 @@ impl Shell {
             use crate::app_state::preview::PreviewResult;
             match newest {
                 Some(Ok(PreviewResult::Comp(cf))) if Some(cf.comp) == self.app.preview_comp => {
+                    let is_fill = self.app.fill_in_flight == Some((cf.comp, cf.frame))
+                        && cf.frame != self.app.preview_frame;
                     if let Some(gpu) = &mut self.gpu {
                         let doc = self.app.store.snapshot();
                         if let Some(comp) = doc.comp(cf.comp) {
@@ -2678,18 +2737,71 @@ impl Shell {
                                 &mut visited,
                             );
                             let bg = comp.background.0;
-                            self.preview_display = Some(gpu.present_comp(
-                                comp.camera_pose(t_comp),
-                                comp.width,
-                                comp.height,
-                                [
-                                    f64::from(bg[0]),
-                                    f64::from(bg[1]),
-                                    f64::from(bg[2]),
-                                    f64::from(bg[3]),
-                                ],
-                                &draws,
-                            ));
+                            let background = [
+                                f64::from(bg[0]),
+                                f64::from(bg[1]),
+                                f64::from(bg[2]),
+                                f64::from(bg[3]),
+                            ];
+                            let pose = comp.camera_pose(t_comp);
+                            if is_fill {
+                                // Background fill: readback, store, don't show.
+                                if let (Some(key), Some(rgba)) = (
+                                    self.app.frame_key_for(cf.comp, cf.frame),
+                                    gpu.realise_to_bytes(
+                                        pose,
+                                        comp.width,
+                                        comp.height,
+                                        background,
+                                        &draws,
+                                    ),
+                                ) {
+                                    self.app.comp_frame_cache.insert(
+                                        key,
+                                        crate::app_state::CachedCompFrame {
+                                            width: comp.width,
+                                            height: comp.height,
+                                            rgba,
+                                        },
+                                    );
+                                    self.app.cache_epoch += 1;
+                                }
+                                self.app.fill_in_flight = None;
+                            } else {
+                                self.preview_display = Some(gpu.present_comp(
+                                    pose,
+                                    comp.width,
+                                    comp.height,
+                                    background,
+                                    &draws,
+                                ));
+                                // Paused or scrubbing: bank the frame while
+                                // it's hot (playback misses skip the readback
+                                // to protect the frame budget).
+                                if !self.app.is_playing() {
+                                    if let Some(key) = self.app.frame_key_for(cf.comp, cf.frame) {
+                                        if !self.app.comp_frame_cache.contains_key(&key) {
+                                            if let Some(rgba) = gpu.realise_to_bytes(
+                                                pose,
+                                                comp.width,
+                                                comp.height,
+                                                background,
+                                                &draws,
+                                            ) {
+                                                self.app.comp_frame_cache.insert(
+                                                    key,
+                                                    crate::app_state::CachedCompFrame {
+                                                        width: comp.width,
+                                                        height: comp.height,
+                                                        rgba,
+                                                    },
+                                                );
+                                                self.app.cache_epoch += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
