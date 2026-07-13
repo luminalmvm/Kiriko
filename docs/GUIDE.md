@@ -137,6 +137,14 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   ramp: a start speed → an end speed with an ease (Linear/Slow/Fast/Smooth/Sharp), so a
   clip can rush in and settle — the core montage gesture — not just play at one flat rate.
   Sequence layers, the graph-editor lenses, and per-beat cutting come next.
+- `crates/kiriko-core/src/sequence.rs` — **Sequence layers (the model).** A Sequence layer
+  is one timeline row holding clips laid end to end — Kiriko's Vegas-style editing surface.
+  Each clip points at a source, carries its own trim and its own Retime ramp, and sits at
+  an exact place on the row; clips never overlap and a gap shows through transparent. This
+  file answers the one question the renderer asks — "which clip is under the playhead, and
+  which moment of its source does that map to?" — and checks the no-overlap rule. Drawing
+  those clips (wiring this into layers) and cutting come next; the resolution logic is
+  here and tested first.
 - `crates/kiriko-core/src/store.rs` — **The document store**: applies ops, publishes
   snapshots, keeps the undo/redo stacks.
 - `crates/kiriko-project/src/lib.rs` — **`.kir` files.** A `.kir` is a zip containing

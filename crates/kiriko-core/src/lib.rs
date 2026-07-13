@@ -7,6 +7,7 @@ pub mod mask;
 pub mod model;
 pub mod ops;
 pub mod retime;
+pub mod sequence;
 pub mod store;
 pub mod time;
 
