@@ -223,6 +223,11 @@ fn blend_tag(b: kiriko_core::model::BlendMode) -> u8 {
         BlendMode::Add => 1,
         BlendMode::Multiply => 2,
         BlendMode::Screen => 3,
+        BlendMode::Overlay => 4,
+        BlendMode::SoftLight => 5,
+        BlendMode::HardLight => 6,
+        BlendMode::Lighten => 7,
+        BlendMode::Darken => 8,
     }
 }
 

@@ -205,13 +205,21 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   folder (Kiriko remembers the folder itself, not its name). Compositions do the same
   with a Compositions folder. Multi-step creations like that land as a single undo
   step — a batch operation whose inverse is just the reversed inverses of its members.
+- **Blend modes** — the full everyday set: Normal, Add, Multiply, Screen, Overlay,
+  Soft light, Hard light, Lighten, Darken. Two families under the hood: Add and
+  Multiply are physical light maths and run in linear; Screen, Overlay and the lights
+  are the Photoshop-era formulas people know by eye, so Kiriko runs them on encoded
+  values (running them in linear is tidier maths and the wrong look). Lighten and
+  Darken are a simple per-channel max/min where the distinction doesn't matter. Every
+  mode is pinned to its textbook formula by a GPU test.
 - **Colour depth, in one paragraph.** Kiriko's frames are "half float" (fp16) in linear
   light. Unlike AE's 16bpc — which is integer maths that clips at 1.0 — half float
   keeps brightness above 1.0 (a glow can genuinely overshoot) and negatives, which is
-  what people switch AE to 32bpc for. Full float (fp32) doubles every frame's memory
-  and roughly halves compositing throughput, so it's an opt-in per project/comp for
-  the rare cases that need the extra precision (extreme exposure pushes on deep
-  shadows); the heavy maths inside effects runs at full float anyway.
+  what people switch AE to 32bpc for. Depth is one project-wide switch (8 / 16 float /
+  32 float — K-069): flip it and every comp and effect in the project renders at that
+  depth, AE-style, via a small button at the foot of the Project panel. Full float
+  doubles every frame's memory and roughly halves compositing throughput, so 16-float
+  stays the default; the heavy maths inside effects can run wider internally either way.
 - `crates/kiriko-ui/src/theme.rs` — **the Aizome tokens.** The only file allowed to contain
   colour values. Change a colour here, it changes everywhere.
 - `crates/kiriko-ui/src/shell.rs` + `app_state.rs` — **the window**: panels, menus,

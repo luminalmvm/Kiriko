@@ -900,6 +900,11 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                     BlendMode::Add => "Add",
                     BlendMode::Multiply => "Multiply",
                     BlendMode::Screen => "Screen",
+                    BlendMode::Overlay => "Overlay",
+                    BlendMode::SoftLight => "Soft light",
+                    BlendMode::HardLight => "Hard light",
+                    BlendMode::Lighten => "Lighten",
+                    BlendMode::Darken => "Darken",
                 };
                 egui::ComboBox::from_id_salt(("blend", layer.id))
                     .selected_text(blend_name(layer.blend))
@@ -910,6 +915,11 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                             BlendMode::Add,
                             BlendMode::Multiply,
                             BlendMode::Screen,
+                            BlendMode::Overlay,
+                            BlendMode::SoftLight,
+                            BlendMode::HardLight,
+                            BlendMode::Lighten,
+                            BlendMode::Darken,
                         ] {
                             if ui
                                 .selectable_label(layer.blend == mode, blend_name(mode))
@@ -1888,11 +1898,17 @@ fn mask_space(
 
 #[cfg(feature = "media")]
 fn blend_of(b: kiriko_core::model::BlendMode) -> kiriko_gpu::Blend {
+    use kiriko_core::model::BlendMode;
     match b {
-        kiriko_core::model::BlendMode::Normal => kiriko_gpu::Blend::Normal,
-        kiriko_core::model::BlendMode::Add => kiriko_gpu::Blend::Add,
-        kiriko_core::model::BlendMode::Multiply => kiriko_gpu::Blend::Multiply,
-        kiriko_core::model::BlendMode::Screen => kiriko_gpu::Blend::Screen,
+        BlendMode::Normal => kiriko_gpu::Blend::Normal,
+        BlendMode::Add => kiriko_gpu::Blend::Add,
+        BlendMode::Multiply => kiriko_gpu::Blend::Multiply,
+        BlendMode::Screen => kiriko_gpu::Blend::Screen,
+        BlendMode::Overlay => kiriko_gpu::Blend::Overlay,
+        BlendMode::SoftLight => kiriko_gpu::Blend::SoftLight,
+        BlendMode::HardLight => kiriko_gpu::Blend::HardLight,
+        BlendMode::Lighten => kiriko_gpu::Blend::Lighten,
+        BlendMode::Darken => kiriko_gpu::Blend::Darken,
     }
 }
 

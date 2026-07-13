@@ -29,6 +29,33 @@ pub enum Blend {
     Multiply,
     /// Shader-computed via the dst snapshot (perceptual — 06 §blend domains).
     Screen,
+    Overlay,
+    SoftLight,
+    HardLight,
+    /// Per-channel max/min: domain-invariant, computed in linear (06 §blend
+    /// domains) — snapshot path so opacity and mattes mix correctly.
+    Lighten,
+    Darken,
+}
+
+impl Blend {
+    /// True for blends the fragment computes itself from a dst snapshot.
+    fn uses_snapshot(self) -> bool {
+        !matches!(self, Blend::Normal | Blend::Add | Blend::Multiply)
+    }
+
+    /// Shader selector (composite.wgsl blend_encoded / fs_layer_snapshot).
+    fn snapshot_mode(self) -> f32 {
+        match self {
+            Blend::Screen => 0.0,
+            Blend::Overlay => 1.0,
+            Blend::SoftLight => 2.0,
+            Blend::HardLight => 3.0,
+            Blend::Lighten => 4.0,
+            Blend::Darken => 5.0,
+            Blend::Normal | Blend::Add | Blend::Multiply => -1.0,
+        }
+    }
 }
 
 /// A comp-space matte gating a layer (docs/06-RENDER-PIPELINE.md mattes).
@@ -133,7 +160,7 @@ pub struct Compositor {
     pipeline: wgpu::RenderPipeline,
     pipeline_add: wgpu::RenderPipeline,
     pipeline_multiply: wgpu::RenderPipeline,
-    pipeline_screen: wgpu::RenderPipeline,
+    pipeline_snapshot: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// Bound at binding 3 when a layer has no matte.
@@ -266,35 +293,35 @@ impl Compositor {
         let pipeline = make_pipeline(blend, "composite-normal");
         let pipeline_add = make_pipeline(blend_add, "composite-add");
         let pipeline_multiply = make_pipeline(blend_multiply, "composite-multiply");
-        // Screen: no fixed-function blending — the fragment composites itself
-        // from the dst snapshot and writes the final value.
-        let pipeline_screen = ctx
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("composite-screen"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_layer"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_layer_screen"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: WORKING_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                multiview: None,
-                cache: None,
-            });
+        // Snapshot blends: no fixed-function blending — the fragment
+        // composites itself from the dst snapshot and writes the final value.
+        let pipeline_snapshot =
+            ctx.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("composite-snapshot"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_layer"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_layer_snapshot"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: WORKING_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview: None,
+                    cache: None,
+                });
         let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite-linear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -348,7 +375,7 @@ impl Compositor {
             pipeline,
             pipeline_add,
             pipeline_multiply,
-            pipeline_screen,
+            pipeline_snapshot,
             layout,
             sampler,
             white,
@@ -399,7 +426,7 @@ impl Compositor {
         let view = target.create_view(&Default::default());
         // Snapshot of the accumulation for shader-computed blends: one
         // per-frame scratch, copied into just before each such layer draws.
-        let needs_snapshot = layers.iter().any(|l| matches!(l.blend, Blend::Screen));
+        let needs_snapshot = layers.iter().any(|l| l.blend.uses_snapshot());
         let snapshot = needs_snapshot.then(|| {
             ctx.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("comp-dst-snapshot"),
@@ -431,7 +458,12 @@ impl Compositor {
                         f32::from(layer.matte.as_ref().is_some_and(|m| m.luma)),
                         f32::from(layer.matte.as_ref().is_some_and(|m| m.inverted)),
                     ],
-                    target: [width as f32, height as f32, 0.0, 0.0],
+                    target: [
+                        width as f32,
+                        height as f32,
+                        layer.blend.snapshot_mode(),
+                        0.0,
+                    ],
                 };
                 let buffer = wgpu::util::DeviceExt::create_buffer_init(
                     &ctx.device,
@@ -473,7 +505,7 @@ impl Compositor {
                         wgpu::BindGroupEntry {
                             binding: 4,
                             resource: wgpu::BindingResource::TextureView(
-                                &if matches!(layer.blend, Blend::Screen) {
+                                &if layer.blend.uses_snapshot() {
                                     snapshot.as_ref().unwrap_or(&self.black)
                                 } else {
                                     &self.black
@@ -503,7 +535,7 @@ impl Compositor {
         let mut first_pass = true;
         let mut i = 0usize;
         while i < layers.len() {
-            if matches!(layers[i].blend, Blend::Screen) {
+            if layers[i].blend.uses_snapshot() {
                 if let Some(snap) = &snapshot {
                     if first_pass {
                         // Materialise the background before snapshotting.
@@ -534,7 +566,7 @@ impl Compositor {
             }
             // One pass: this layer plus any following fixed-function layers.
             let mut end = i + 1;
-            while end < layers.len() && !matches!(layers[end].blend, Blend::Screen) {
+            while end < layers.len() && !layers[end].blend.uses_snapshot() {
                 end += 1;
             }
             {
@@ -560,7 +592,7 @@ impl Compositor {
                         Blend::Normal => &self.pipeline,
                         Blend::Add => &self.pipeline_add,
                         Blend::Multiply => &self.pipeline_multiply,
-                        Blend::Screen => &self.pipeline_screen,
+                        _ => &self.pipeline_snapshot,
                     });
                     rpass.set_bind_group(0, &binds[idx], &[]);
                     rpass.draw(0..6, 0..1);
@@ -873,6 +905,90 @@ mod tests {
             (i16::from(out) - expect).abs() <= 2,
             "screen {out} vs {expect}"
         );
+    }
+
+    /// Every snapshot blend matches its CPU oracle: Overlay/Soft/Hard light
+    /// perceptually (encoded W3C formulas), Lighten/Darken per-channel in
+    /// linear — the domain table of docs/06 §blend, pinned per mode.
+    #[test]
+    fn snapshot_blends_match_their_formulas() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let colour = ColourEngine::new(&ctx);
+        let compositor = Compositor::new(&ctx);
+        // src byte 200 over dst byte 64: exercises both formula branches.
+        let (s8, d8) = (200u8, 64u8);
+        let src_tex = solid_linear(&ctx, &colour, [s8, s8, s8, 255], 4, 4);
+        let d_lin = srgb_decode(f64::from(d8) / 255.0);
+        let read = |blend: Blend| {
+            let shown = render_for_display(
+                &ctx,
+                &colour,
+                &compositor,
+                4,
+                4,
+                [d_lin, d_lin, d_lin, 1.0],
+                &[CompositeLayer {
+                    texture: &src_tex,
+                    size: (4.0, 4.0),
+                    position: (0.0, 0.0),
+                    anchor: (0.0, 0.0),
+                    scale: (100.0, 100.0),
+                    rotation_deg: 0.0,
+                    opacity: 100.0,
+                    matte: None,
+                    blend,
+                    z: 0.0,
+                    rotation_x_deg: 0.0,
+                    rotation_y_deg: 0.0,
+                    three_d: false,
+                }],
+            );
+            colour.readback8(&ctx, &shown).unwrap()[0]
+        };
+        // CPU oracles in encoded space (display bytes ARE encoded space, so
+        // perceptual results compare directly).
+        let s = f64::from(s8) / 255.0;
+        let d = f64::from(d8) / 255.0;
+        let overlay = if d <= 0.5 {
+            2.0 * s * d
+        } else {
+            1.0 - 2.0 * (1.0 - s) * (1.0 - d)
+        };
+        let soft_d = if d <= 0.25 {
+            ((16.0 * d - 12.0) * d + 4.0) * d
+        } else {
+            d.sqrt()
+        };
+        let soft = if s <= 0.5 {
+            d - (1.0 - 2.0 * s) * d * (1.0 - d)
+        } else {
+            d + (2.0 * s - 1.0) * (soft_d - d)
+        };
+        let hard = if s <= 0.5 {
+            2.0 * s * d
+        } else {
+            1.0 - 2.0 * (1.0 - s) * (1.0 - d)
+        };
+        // Lighten/Darken run in linear; on solid colours per-channel max/min
+        // commutes with the transfer function, so the byte answer is plain.
+        let cases: [(Blend, f64, &str); 5] = [
+            (Blend::Overlay, overlay, "overlay"),
+            (Blend::SoftLight, soft, "soft light"),
+            (Blend::HardLight, hard, "hard light"),
+            (Blend::Lighten, s.max(d), "lighten"),
+            (Blend::Darken, s.min(d), "darken"),
+        ];
+        for (blend, expect, name) in cases {
+            let out = read(blend);
+            let expect = (expect * 255.0).round() as i16;
+            assert!(
+                (i16::from(out) - expect).abs() <= 3,
+                "{name}: {out} vs {expect}"
+            );
+        }
     }
 
     /// Add blend genuinely adds light: half-grey over half-grey doubles the

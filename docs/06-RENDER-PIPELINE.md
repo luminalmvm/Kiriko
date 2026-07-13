@@ -168,25 +168,27 @@ adjacent CPU nodes to avoid ping-ponging.
 
 ### 3.1 Working space (K-026)
 
-The working space is **scene-linear, premultiplied alpha, fp16 RGBA** per pixel, with **fp32 an
-opt-in per comp** for accumulation-sensitive work. All compositing, filtering, resampling, and
-motion-blur accumulation happen here. Effects that accumulate heavily (large iterative blurs,
-scopes accumulation) SHOULD use fp32 internally regardless of comp depth.
+The working space is **scene-linear, premultiplied alpha, fp16 RGBA** per pixel by
+default. All compositing, filtering, resampling, and motion-blur accumulation happen
+here.
 
-Two clarifications (2026-07-13, after review with Mack):
+**Depth is one project-wide switch (K-069, supersedes K-026's per-comp clause).** The
+project's working depth — 8 bpc integer, 16 bpc float (default), or 32 bpc float —
+applies to every comp, every effect buffer, and every inter-node texture in the
+project. There is no per-comp override: switching the project switches everything,
+exactly like AE's project bit depth. The control lives as a small depth button at the
+foot of the Project panel (AE's spot; click to cycle, dialogue for the long list
+later), and Application Settings holds only the *default for newly created projects*.
+Kernels MAY use wider internal accumulators where the algorithm needs them (large
+iterative blurs, scopes), but everything a node reads or writes is project depth.
 
-- **fp16 here is floating point, not AE's integer 16bpc.** It carries values above 1.0
-  (superwhites, glow overshoot — up to 65504) and negatives, in linear light. The
-  headroom and grading accuracy people switch AE to 32bpc for are the *default* in
-  Kiriko; fp32 buys extra mantissa (deep shadow gradients under extreme exposure pushes,
-  very long accumulation chains), not the ability to exceed 1.0.
-- **Where the depth choice lives**: the working depth default is a *project setting*
-  with a per-comp override — never an application setting. Always-fp32 was considered
-  and declined as the default: RGBA fp32 is 16 bytes/px (double the bandwidth on a
-  bandwidth-bound compositor, half the frames per cache byte, ~2× the VRAM per 4K
-  frame), while the precision-sensitive interiors already run fp32 accumulators
-  regardless of comp depth. Switch a comp (or the project default) to fp32 when the
-  work needs it; the cache keys the depth so both coexist.
+Why fp16 stays the default (2026-07-13, reviewed with Mack): fp16 here is floating
+point, not AE's integer 16bpc — it already carries values above 1.0 (superwhites, glow
+overshoot, up to 65504) and negatives, in linear light. fp32 buys extra mantissa (deep
+shadow gradients under extreme pushes, very long chains) at 16 bytes/px: double the
+bandwidth on a bandwidth-bound compositor and half the frames per cache byte. The
+depth is part of every cache key's quality field, so switching depth simply re-keys
+the project and the caches rebuild.
 
 ### 3.2 Input: decode and linearise
 

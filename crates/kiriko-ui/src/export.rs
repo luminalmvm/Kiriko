@@ -315,12 +315,7 @@ impl Renderer<'_> {
                         inverted: mr.inverted,
                     })
                 }),
-                blend: match l.blend {
-                    kiriko_core::model::BlendMode::Normal => kiriko_gpu::Blend::Normal,
-                    kiriko_core::model::BlendMode::Add => kiriko_gpu::Blend::Add,
-                    kiriko_core::model::BlendMode::Multiply => kiriko_gpu::Blend::Multiply,
-                    kiriko_core::model::BlendMode::Screen => kiriko_gpu::Blend::Screen,
-                },
+                blend: blend_of(l.blend),
             });
         }
 
@@ -404,6 +399,23 @@ fn run(
     }
     encoder.finish().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Model blend → GPU blend (export copy of the preview mapping; both paths
+/// must agree or preview and export diverge, K-031).
+fn blend_of(b: kiriko_core::model::BlendMode) -> kiriko_gpu::Blend {
+    use kiriko_core::model::BlendMode;
+    match b {
+        BlendMode::Normal => kiriko_gpu::Blend::Normal,
+        BlendMode::Add => kiriko_gpu::Blend::Add,
+        BlendMode::Multiply => kiriko_gpu::Blend::Multiply,
+        BlendMode::Screen => kiriko_gpu::Blend::Screen,
+        BlendMode::Overlay => kiriko_gpu::Blend::Overlay,
+        BlendMode::SoftLight => kiriko_gpu::Blend::SoftLight,
+        BlendMode::HardLight => kiriko_gpu::Blend::HardLight,
+        BlendMode::Lighten => kiriko_gpu::Blend::Lighten,
+        BlendMode::Darken => kiriko_gpu::Blend::Darken,
+    }
 }
 
 /// CameraPose (core model) -> GPU camera matrix: the single conversion both

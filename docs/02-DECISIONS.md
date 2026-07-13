@@ -296,3 +296,15 @@ pre-filled from that footage; comps created implicitly inside an active comp (fu
 precompose) inherit the parent's settings silently; settings stay editable later
 (Composition settings…, one invertible op). Multi-step creations commit as one
 `Op::Batch` — one undo step. Added 2026-07-13 at Mack's request.
+
+**K-069 · DECIDED · Working depth is one project-wide switch.** Supersedes the
+per-comp fp32 opt-in in K-026. The project renders everything — comps, effects,
+inter-node buffers — at a single depth: 8 bpc integer, 16 bpc float (default), or
+32 bpc float. No per-comp override; switching the project switches everything (the AE
+project-bit-depth model, which editors already understand). The control is a small
+depth button at the foot of the Project panel; Application Settings holds only the
+default for new projects. Kernel-internal accumulators may exceed the project depth
+where the algorithm needs it, but node inputs/outputs never do. Depth remains part of
+the cache key's quality field. Implementation lands with the depth-aware pipeline work
+in the effects phase; until then 16 bpc float is the only rendering depth. Decided
+2026-07-13 at Mack's request. Spec: [06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md) §3.1.

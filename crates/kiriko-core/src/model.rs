@@ -311,6 +311,11 @@ pub enum BlendMode {
     Add,
     Multiply,
     Screen,
+    Overlay,
+    SoftLight,
+    HardLight,
+    Lighten,
+    Darken,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
