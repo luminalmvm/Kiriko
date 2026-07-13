@@ -199,6 +199,18 @@ transforms (sRGB, Rec.709/BT.1886, linear). **OCIO v2 integration is post-v1 but
 an OCIO-backed `ColourTransform` generated from a config via OCIO's GPU shader API, transpiled
 to WGSL. Nothing else in the pipeline may assume the transform set is fixed.
 
+**Perceptual operations (K-034).** Linear RGB is correct for combining *light*; it is the
+wrong space for combining *colours as perceived*: a linear (or worse, gamma-space) lerp
+between saturated colours passes through muddy grey, and rotating hue in RGB changes
+brightness. Operations whose meaning is perceptual — gradient interpolation, keyframed
+colour properties, hue rotation, saturation — MUST convert linear RGB → Oklab (or its
+polar form OkLCh), operate, and convert back. The conversion pair lives in one module
+(`kiriko-gpu::oklab`, CPU + WGSL with byte-identical constants) and costs two 3×3 matrix
+multiplies and three cube roots per direction — cheap enough to inline per pixel in effect
+kernels. Hue rotation in OkLCh preserves the L axis by construction; the tests assert it.
+Compositing, blend modes' linear subset, and everything in §render-order stay in linear
+RGB — K-034 changes where *interpolation* happens, never where light is added.
+
 **The parity guarantee (K-031).** Preview and export MUST share one colour code path: the
 same input transforms, working space, and output transform implementations, in the same
 precision. At Full resolution and full quality, the frame presented in the Viewer is

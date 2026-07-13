@@ -149,6 +149,19 @@ workflows (Mac editors' mezzanine norm), the Metal branch of the OFX 1.5 GPU ren
 ([12-PLUGINS.md](12-PLUGINS.md) §2.4), and a notarised universal binary. Nothing in the
 engine may assume DX12-only. Added 2026-07-13 at Mack's request.
 
+**K-034 · DECIDED · Perceptual colour operations happen in Oklab.** Two colour domains,
+each doing the job it is correct for: **linear RGB** remains the compositing/working space
+(light adds physically there — blending, exposure, glow are correct and stay put), while
+**interpolation and hue-type operations** — gradient ramps, colour-property keyframe
+interpolation, hue rotation, saturation adjustments — convert through **Oklab/OkLCh** so
+gradients between two colours stay colourful instead of collapsing to grey, and altering
+hue genuinely preserves perceived lightness. Users interact in ordinary RGB throughout;
+conversion is engine-internal and cheap (two 3×3 matrices + three cube roots per
+direction, identical constants in the Rust CPU reference and the WGSL snippet, guarded by
+round-trip and hue-invariance tests). Effects declare which domain each parameter's maths
+runs in ([08-EFFECTS.md](08-EFFECTS.md)). Added 2026-07-13 at Mack's request. Spec:
+[06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md) §3.
+
 **K-031 · DECIDED · Colour spaces are selectable; preview always matches export.** Working
 colour space is selectable per comp (with app-level defaults, and OCIO joining post-v1 per
 06), like AE — but with a hard parity guarantee: **what the Viewer shows at Full resolution

@@ -146,6 +146,13 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   light — a test proves the result differs from the naive approach by exactly the amount
   physics predicts. This is the beginning of the evaluator: the thing that will one day
   render whole comps with effects.
+- `crates/kiriko-gpu/src/oklab.rs` — **perceptual colour.** Two colour worlds, two jobs:
+  linear RGB is where *light* combines correctly (layering, glow, exposure), and Oklab is
+  where *perception* behaves — a gradient interpolated in Oklab stays vivid where an RGB
+  gradient sags into grey, and rotating a hue in Oklab keeps its brightness. Kiriko
+  converts on the fly (a handful of multiplications per pixel), users never see anything
+  but normal RGB values, and tests pin both promises: round-trips are exact and hue
+  rotation provably never changes lightness.
 - `crates/kiriko-audio/` — **playback and the clock.** The sound card asks for samples on
   its own strict schedule through a "realtime callback" — a tiny function that must never
   wait for anything (if it's ever late, you hear a glitch). The count of samples it has
