@@ -970,6 +970,30 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                 theme.text_muted,
             );
         }
+        // Sequence layers show their clips as sub-bars; gaps show the darker
+        // base bar; each edit point gets a clay tick.
+        if let kiriko_core::model::LayerKind::Sequence { clips } = &layer.kind {
+            let off = layer.start_offset.0.to_f64();
+            for clip in clips {
+                let cs = x_of(off + clip.place_start.to_f64());
+                let ce = x_of(off + clip.place_end().to_f64());
+                ui.painter().rect(
+                    egui::Rect::from_min_max(
+                        egui::pos2(cs, bar.top() + 1.0),
+                        egui::pos2(ce, bar.bottom() - 1.0),
+                    ),
+                    2.0,
+                    theme.surface_2,
+                    egui::Stroke::new(1.0_f32, theme.hairline_strong),
+                    egui::StrokeKind::Inside,
+                );
+                // Edit point (clip boundary) — the beat-sync landmark.
+                ui.painter().line_segment(
+                    [egui::pos2(ce, bar.top()), egui::pos2(ce, bar.bottom())],
+                    egui::Stroke::new(1.0_f32, theme.accent),
+                );
+            }
+        }
 
         // Edge handles: drag to trim in/out (one SetLayerSpan op per release).
         for out_edge in [false, true] {
