@@ -55,6 +55,7 @@ pub fn default_layout() -> DockState<Panel> {
 struct PanelViewer<'a> {
     theme: &'a Theme,
     app: &'a mut AppState,
+    preview_tex: Option<&'a egui::TextureHandle>,
 }
 
 impl egui_dock::TabViewer for PanelViewer<'_> {
@@ -66,7 +67,7 @@ impl egui_dock::TabViewer for PanelViewer<'_> {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Panel) {
         match tab {
-            Panel::Viewer => viewer_panel(ui, self.theme, self.app),
+            Panel::Viewer => viewer_panel(ui, self.theme, self.app, self.preview_tex),
             Panel::Project => project_panel(ui, self.theme, self.app),
             Panel::Timeline => timeline_panel(ui, self.theme, self.app),
             Panel::EffectControls => empty_hint(
@@ -87,9 +88,21 @@ impl egui_dock::TabViewer for PanelViewer<'_> {
 }
 
 /// The Viewer: neutral surround + the empty-project card (docs/07-UI-SPEC.md §13.2).
-fn viewer_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
+#[cfg_attr(not(feature = "media"), allow(unused_variables))]
+fn viewer_panel(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    app: &mut AppState,
+    tex: Option<&egui::TextureHandle>,
+) {
     let rect = ui.available_rect_before_wrap();
     ui.painter().rect_filled(rect, 0.0, theme.viewer_surround);
+
+    #[cfg(feature = "media")]
+    if app.preview_item.is_some() {
+        viewer_footage(ui, theme, app, tex, rect);
+        return;
+    }
 
     let has_content = !app.store.snapshot().items.is_empty();
 
@@ -211,8 +224,15 @@ fn project_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
             colour,
         );
         if row.clicked() {
-            if let ProjectItem::Composition(_) = item {
-                select = Some(item.id());
+            match item {
+                ProjectItem::Composition(_) => select = Some(item.id()),
+                ProjectItem::Footage(_) => {
+                    app.preview_item = Some(item.id());
+                    app.preview_frame = 0;
+                    #[cfg(feature = "media")]
+                    app.refresh_preview();
+                }
+                _ => {}
             }
         }
         #[cfg(feature = "media")]
@@ -328,6 +348,108 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     }
 }
 
+/// Footage preview: the frame fit to the surround, scrub bar, resolution picker.
+#[cfg(feature = "media")]
+fn viewer_footage(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    app: &mut AppState,
+    tex: Option<&egui::TextureHandle>,
+    rect: egui::Rect,
+) {
+    use crate::app_state::media::MediaStatus;
+    let Some(id) = app.preview_item else { return };
+    let frames = match app.media.map.get(&id) {
+        Some(MediaStatus::Ready { frames, .. }) => *frames,
+        _ => 0,
+    };
+
+    let bar_h = 30.0;
+    let image_area = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.max.y - bar_h));
+
+    if let Some(tex) = tex {
+        let size = tex.size_vec2();
+        if size.x > 0.0 && size.y > 0.0 {
+            let scale = (image_area.width() / size.x)
+                .min(image_area.height() / size.y)
+                .min(1.0);
+            let draw = egui::Rect::from_center_size(image_area.center(), size * scale);
+            ui.painter().image(
+                tex.id(),
+                draw,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+    } else {
+        ui.painter().text(
+            image_area.center(),
+            egui::Align2::CENTER_CENTER,
+            if frames == 0 {
+                "probing…"
+            } else {
+                "decoding…"
+            },
+            egui::FontId::monospace(10.0),
+            theme.text_disabled,
+        );
+    }
+
+    // Viewer bar: resolution picker · scrub · frame readout (07-UI-SPEC §2).
+    let bar = egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - bar_h), rect.max);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
+        egui::Frame::new()
+            .fill(theme.surface_1)
+            .stroke(egui::Stroke::new(1.0_f32, theme.hairline))
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let labels = ["Full", "Half", "Third", "Quarter"];
+                    let current = labels[(app.preview_divisor as usize - 1).min(3)];
+                    egui::ComboBox::from_id_salt("preview-res")
+                        .selected_text(current)
+                        .width(72.0)
+                        .show_ui(ui, |ui| {
+                            for (i, label) in labels.iter().enumerate() {
+                                let div = i as u32 + 1;
+                                if ui
+                                    .selectable_label(app.preview_divisor == div, *label)
+                                    .clicked()
+                                {
+                                    app.preview_divisor = div;
+                                    app.refresh_preview();
+                                }
+                            }
+                        });
+                    if frames > 1 {
+                        let mut frame = app.preview_frame;
+                        let slider = egui::Slider::new(&mut frame, 0..=frames - 1)
+                            .show_value(false)
+                            .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.4 });
+                        let response =
+                            ui.add_sized(egui::vec2(ui.available_width() - 96.0, 18.0), slider);
+                        if response.changed() {
+                            app.preview_frame = frame;
+                            app.refresh_preview();
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} / {}",
+                                app.preview_frame,
+                                frames.saturating_sub(1)
+                            ))
+                            .monospace()
+                            .small()
+                            .color(theme.text_muted),
+                        );
+                    });
+                });
+            });
+    });
+}
+
 fn effects_panel(ui: &mut egui::Ui, theme: &Theme) {
     ui.add_space(6.0);
     let mut search = String::new();
@@ -364,6 +486,10 @@ pub struct Shell {
     /// Boot splash (K-008); None once the application window has expanded.
     #[serde(skip, default)]
     splash: Option<Splash>,
+    /// Current Viewer frame texture (uploaded on the UI thread from
+    /// background-decoded pixels; a memcpy, not a decode — K-017 holds).
+    #[serde(skip, default)]
+    preview_tex: Option<egui::TextureHandle>,
     /// Native macOS menu bar; None on other platforms (07-UI-SPEC).
     #[cfg(target_os = "macos")]
     #[serde(skip, default)]
@@ -377,6 +503,7 @@ impl Default for Shell {
             theme: Theme::dark(),
             app: AppState::default(),
             splash: None,
+            preview_tex: None,
             #[cfg(target_os = "macos")]
             native_menu: None,
         }
@@ -522,6 +649,26 @@ impl Shell {
             if self.app.media.any_probing() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(150));
             }
+            if self.app.preview_item.is_some() && self.preview_tex.is_none() {
+                // Selection made before probe finished: retry until Ready.
+                self.app.refresh_preview();
+            }
+            let mut newest = None;
+            while let Ok(result) = self.app.preview_engine.results.try_recv() {
+                newest = Some(result);
+            }
+            match newest {
+                Some(Ok(px)) if Some(px.item) == self.app.preview_item => {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [px.width as usize, px.height as usize],
+                        &px.rgba,
+                    );
+                    self.preview_tex =
+                        Some(ctx.load_texture("viewer-frame", image, egui::TextureOptions::LINEAR));
+                }
+                Some(Err(e)) => self.app.error = Some(format!("preview: {e}")),
+                _ => {}
+            }
         }
         #[cfg(target_os = "macos")]
         self.native_menu_frame();
@@ -619,10 +766,19 @@ impl Shell {
         style.tab_bar.hline_color = self.theme.hairline;
 
         let Shell {
-            dock, theme, app, ..
+            dock,
+            theme,
+            app,
+            preview_tex,
+            ..
         } = self;
-        DockArea::new(dock)
-            .style(style)
-            .show(ctx, &mut PanelViewer { theme, app });
+        DockArea::new(dock).style(style).show(
+            ctx,
+            &mut PanelViewer {
+                theme,
+                app,
+                preview_tex: preview_tex.as_ref(),
+            },
+        );
     }
 }

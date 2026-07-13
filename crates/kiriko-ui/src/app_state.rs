@@ -13,6 +13,120 @@ use uuid::Uuid;
 pub const AUTOSAVE_INTERVAL_SECS: u64 = 300;
 pub const AUTOSAVE_KEEP: usize = 5;
 
+/// Latest-wins background frame decoding for the Viewer (slice 5).
+/// In plain terms: the UI sends "show frame N of item X" requests down a
+/// channel; a worker thread owns the decoders and answers with pixels; stale
+/// requests are simply skipped (the epoch/latest-wins idea from
+/// docs/impl/playback-scheduler.md, in miniature).
+#[cfg(feature = "media")]
+pub mod preview {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    pub struct FramePixels {
+        pub width: u32,
+        pub height: u32,
+        pub rgba: Vec<u8>,
+        pub frame: usize,
+        pub item: Uuid,
+    }
+
+    struct Request {
+        generation: u64,
+        item: Uuid,
+        path: PathBuf,
+        frame: usize,
+        target_width: Option<u32>,
+    }
+
+    pub struct PreviewEngine {
+        tx: Sender<Request>,
+        pub results: Receiver<Result<FramePixels, String>>,
+        generation: Arc<AtomicU64>,
+    }
+
+    impl Default for PreviewEngine {
+        fn default() -> Self {
+            let (tx, rx) = channel::<Request>();
+            let (result_tx, results) = channel();
+            let generation = Arc::new(AtomicU64::new(0));
+            let live = generation.clone();
+            std::thread::spawn(move || {
+                let mut decoders: HashMap<Uuid, kiriko_media::VideoDecoder> = HashMap::new();
+                loop {
+                    // Block for one request, then drain to the newest (latest wins).
+                    let mut req = match rx.recv() {
+                        Ok(r) => r,
+                        Err(_) => return,
+                    };
+                    loop {
+                        match rx.try_recv() {
+                            Ok(newer) => req = newer,
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => return,
+                        }
+                    }
+                    if req.generation != live.load(Ordering::Relaxed) {
+                        continue; // superseded while queued
+                    }
+                    let result = decode(&mut decoders, &req);
+                    let _ = result_tx.send(result);
+                }
+            });
+            Self {
+                tx,
+                results,
+                generation,
+            }
+        }
+    }
+
+    fn decode(
+        decoders: &mut HashMap<Uuid, kiriko_media::VideoDecoder>,
+        req: &Request,
+    ) -> Result<FramePixels, String> {
+        let dec = match decoders.entry(req.item) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let index =
+                    kiriko_media::index::build_frame_index(&req.path).map_err(|e| e.to_string())?;
+                let dec = kiriko_media::VideoDecoder::open(&req.path, index)
+                    .map_err(|e| e.to_string())?;
+                e.insert(dec)
+            }
+        };
+        let frame = req.frame.min(dec.frame_count().saturating_sub(1));
+        let out = dec
+            .frame_rgba(frame, req.target_width)
+            .map_err(|e| e.to_string())?;
+        Ok(FramePixels {
+            width: out.width,
+            height: out.height,
+            rgba: out.rgba,
+            frame,
+            item: req.item,
+        })
+    }
+
+    impl PreviewEngine {
+        /// Ask for a frame; any not-yet-decoded older request is abandoned.
+        pub fn request(&self, item: Uuid, path: PathBuf, frame: usize, target_width: Option<u32>) {
+            let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+            let _ = self.tx.send(Request {
+                generation,
+                item,
+                path,
+                frame,
+                target_width,
+            });
+        }
+    }
+}
+
 /// Probe/index results for footage items, filled by background threads.
 #[cfg(feature = "media")]
 pub mod media {
@@ -132,6 +246,13 @@ pub struct AppState {
     pub error: Option<String>,
     #[cfg(feature = "media")]
     pub media: media::MediaRegistry,
+    #[cfg(feature = "media")]
+    pub preview_engine: preview::PreviewEngine,
+    /// Footage item currently shown in the Viewer, and the scrub position.
+    pub preview_item: Option<Uuid>,
+    pub preview_frame: usize,
+    /// Preview resolution divisor: 1 = Full, 2 = Half, 3 = Third, 4 = Quarter.
+    pub preview_divisor: u32,
     last_autosave: Instant,
     comp_counter: usize,
 }
@@ -150,6 +271,11 @@ impl Default for AppState {
             error: None,
             #[cfg(feature = "media")]
             media: media::MediaRegistry::default(),
+            #[cfg(feature = "media")]
+            preview_engine: preview::PreviewEngine::default(),
+            preview_item: None,
+            preview_frame: 0,
+            preview_divisor: 1,
             last_autosave: Instant::now(),
             comp_counter: 0,
         }
@@ -374,6 +500,33 @@ impl AppState {
             item: Box::new(ProjectItem::Composition(comp)),
         });
         self.selected_comp = Some(id);
+    }
+
+    /// Re-request the current preview frame (selection/scrub/resolution change).
+    #[cfg(feature = "media")]
+    pub fn refresh_preview(&mut self) {
+        let Some(id) = self.preview_item else { return };
+        let doc = self.store.snapshot();
+        let Some(ProjectItem::Footage(f)) = doc.item(id) else {
+            return;
+        };
+        let (width, frames) = match self.media.map.get(&id) {
+            Some(media::MediaStatus::Ready { probe, frames, .. }) => {
+                (probe.video.as_ref().map(|v| v.width).unwrap_or(0), *frames)
+            }
+            _ => return, // not probed yet; selection will refresh on Ready
+        };
+        if frames == 0 || width == 0 {
+            return;
+        }
+        self.preview_frame = self.preview_frame.min(frames - 1);
+        let target = (self.preview_divisor > 1).then(|| width / self.preview_divisor);
+        self.preview_engine.request(
+            id,
+            PathBuf::from(&f.media.absolute_path),
+            self.preview_frame,
+            target,
+        );
     }
 
     pub fn project_title(&self) -> String {
