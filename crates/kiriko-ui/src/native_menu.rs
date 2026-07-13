@@ -23,6 +23,7 @@ pub enum MenuAction {
     Undo,
     Redo,
     NewComposition,
+    AddSolidLayer,
     ResetWorkspace,
 }
 
@@ -97,7 +98,10 @@ impl NativeMenu {
         ])?;
 
         let comp = Submenu::new("Composition", true);
-        comp.append_items(&[&item("comp.new", "New composition", cmd_shift(Code::KeyN))])?;
+        comp.append_items(&[
+            &item("comp.new", "New composition", cmd_shift(Code::KeyN)),
+            &item("comp.solid", "Add solid layer", None),
+        ])?;
 
         let window = Submenu::new("Window", true);
         window.append_items(&[
@@ -132,6 +136,7 @@ impl NativeMenu {
                 "edit.undo" => Some(MenuAction::Undo),
                 "edit.redo" => Some(MenuAction::Redo),
                 "comp.new" => Some(MenuAction::NewComposition),
+                "comp.solid" => Some(MenuAction::AddSolidLayer),
                 "window.reset" => Some(MenuAction::ResetWorkspace),
                 _ => None,
             };

@@ -573,6 +573,32 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                         matte,
                     });
                 }
+                ui.separator();
+                ui.label(egui::RichText::new("Blend").small().color(theme.text_muted));
+                use kiriko_core::model::BlendMode;
+                let blend_name = |b: BlendMode| match b {
+                    BlendMode::Normal => "Normal",
+                    BlendMode::Add => "Add",
+                    BlendMode::Multiply => "Multiply",
+                };
+                egui::ComboBox::from_id_salt(("blend", layer.id))
+                    .selected_text(blend_name(layer.blend))
+                    .width(90.0)
+                    .show_ui(ui, |ui| {
+                        for mode in [BlendMode::Normal, BlendMode::Add, BlendMode::Multiply] {
+                            if ui
+                                .selectable_label(layer.blend == mode, blend_name(mode))
+                                .clicked()
+                                && layer.blend != mode
+                            {
+                                pending = Some(kiriko_core::Op::SetLayerBlend {
+                                    comp: comp_id,
+                                    layer: layer.id,
+                                    blend: mode,
+                                });
+                            }
+                        }
+                    });
             });
         });
         ui.indent(("transform", layer.id), |ui| {
@@ -1044,6 +1070,14 @@ fn graph_editor_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     }
 }
 
+fn blend_of(b: kiriko_core::model::BlendMode) -> kiriko_gpu::Blend {
+    match b {
+        kiriko_core::model::BlendMode::Normal => kiriko_gpu::Blend::Normal,
+        kiriko_core::model::BlendMode::Add => kiriko_gpu::Blend::Add,
+        kiriko_core::model::BlendMode::Multiply => kiriko_gpu::Blend::Multiply,
+    }
+}
+
 /// Layer time → rational on the flick grid (the only f64→rational route).
 fn rational_at(seconds: f64) -> kiriko_core::Rational {
     kiriko_core::Rational::from_f64_on_grid(seconds.max(0.0), kiriko_core::Rational::FLICK_DEN)
@@ -1107,6 +1141,10 @@ fn empty_hint(ui: &mut egui::Ui, theme: &Theme, title: &str, hint: &str) {
     });
 }
 
+/// Pixels + texture dims + natural size for any layer kind (preview path).
+#[cfg(feature = "media")]
+type LayerPixels = (Vec<u8>, u32, u32, (f32, f32));
+
 /// One decoded layer ready to composite (evaluator v0).
 #[cfg(feature = "media")]
 pub struct MatteDraw {
@@ -1137,6 +1175,7 @@ pub struct CompLayerDraw {
     pub rotation_deg: f32,
     pub opacity: f32,
     pub matte: Option<MatteDraw>,
+    pub blend: kiriko_gpu::Blend,
 }
 
 /// GPU display path (slice 5 completion): decoded sRGB bytes → linear fp16
@@ -1217,6 +1256,7 @@ impl GpuViewer {
                             rotation_deg: m.rotation_deg,
                             opacity: m.opacity,
                             matte: None,
+                            blend: kiriko_gpu::Blend::Normal,
                         }],
                     )
                 })
@@ -1239,6 +1279,7 @@ impl GpuViewer {
                     luma: l.matte.as_ref().is_some_and(|m| m.luma),
                     inverted: l.matte.as_ref().is_some_and(|m| m.inverted),
                 }),
+                blend: l.blend,
             })
             .collect();
         let linear = self
@@ -1427,6 +1468,7 @@ impl Shell {
                 MenuAction::Undo => self.app.undo(),
                 MenuAction::Redo => self.app.redo(),
                 MenuAction::NewComposition => self.app.new_composition(),
+                MenuAction::AddSolidLayer => self.app.add_solid_layer(),
                 MenuAction::ResetWorkspace => self.dock = default_layout(),
             }
         }
@@ -1674,45 +1716,57 @@ impl Shell {
                             // Matte sources decode too but draw only if visible.
                             let pixels_by_layer: std::collections::HashMap<_, _> =
                                 cf.layers.iter().map(|lp| (lp.layer, lp)).collect();
-                            let mut draws: Vec<CompLayerDraw> = Vec::new();
-                            for lp in cf.layers.iter().rev() {
-                                let Some(layer) = comp.layers.iter().find(|l| l.id == lp.layer)
-                                else {
-                                    continue;
+                            // Pixels for any layer kind: decoded footage or a
+                            // synthesised solid tile (stretched by natural size).
+                            let t_now = cf.frame as f64 / comp.frame_rate.fps().max(1.0);
+                            let pixels_for =
+                                |layer: &kiriko_core::model::Layer| -> Option<LayerPixels> {
+                                    match &layer.kind {
+                                        kiriko_core::model::LayerKind::Footage { .. } => {
+                                            pixels_by_layer.get(&layer.id).map(|lp| {
+                                                (
+                                                    lp.rgba.clone(),
+                                                    lp.width,
+                                                    lp.height,
+                                                    (lp.width as f32, lp.height as f32),
+                                                )
+                                            })
+                                        }
+                                        kiriko_core::model::LayerKind::Solid { colour } => {
+                                            let in_span = t_now >= layer.in_point.0.to_f64()
+                                                && t_now < layer.out_point.0.to_f64();
+                                            in_span.then(|| {
+                                                let px = crate::export::solid_rgba(*colour);
+                                                (
+                                                    crate::export::px_tile(&px, 8, 8),
+                                                    8,
+                                                    8,
+                                                    (comp.width as f32, comp.height as f32),
+                                                )
+                                            })
+                                        }
+                                    }
                                 };
+                            let mut draws: Vec<CompLayerDraw> = Vec::new();
+                            for layer in comp.layers.iter().rev() {
                                 if !layer.switches.visible {
                                     continue;
                                 }
+                                let Some((rgba, tex_w, tex_h, natural)) = pixels_for(layer) else {
+                                    continue;
+                                };
                                 let lt = t_comp - layer.start_offset.0.to_f64();
                                 let tr = &layer.transform;
-                                let natural = self
-                                    .app
-                                    .media
-                                    .map
-                                    .get(match &layer.kind {
-                                        kiriko_core::model::LayerKind::Footage { item } => item,
-                                    })
-                                    .and_then(|s| match s {
-                                        crate::app_state::media::MediaStatus::Ready {
-                                            probe,
-                                            ..
-                                        } => probe
-                                            .video
-                                            .as_ref()
-                                            .map(|v| (v.width as f32, v.height as f32)),
-                                        _ => None,
-                                    })
-                                    .unwrap_or((lp.width as f32, lp.height as f32));
                                 let matte = layer.matte.as_ref().and_then(|mr| {
                                     let src = comp.layers.iter().find(|l| l.id == mr.layer)?;
-                                    let mp = pixels_by_layer.get(&mr.layer)?;
+                                    let (m_rgba, m_w, m_h, m_nat) = pixels_for(src)?;
                                     let mlt = t_comp - src.start_offset.0.to_f64();
                                     let mtr = &src.transform;
                                     Some(MatteDraw {
-                                        rgba: mp.rgba.clone(),
-                                        tex_w: mp.width,
-                                        tex_h: mp.height,
-                                        natural_size: (mp.width as f32, mp.height as f32),
+                                        rgba: m_rgba,
+                                        tex_w: m_w,
+                                        tex_h: m_h,
+                                        natural_size: m_nat,
                                         position: (
                                             mtr.position_x.value_at(mlt) as f32,
                                             mtr.position_y.value_at(mlt) as f32,
@@ -1735,9 +1789,9 @@ impl Shell {
                                     })
                                 });
                                 draws.push(CompLayerDraw {
-                                    rgba: lp.rgba.clone(),
-                                    tex_w: lp.width,
-                                    tex_h: lp.height,
+                                    rgba,
+                                    tex_w,
+                                    tex_h,
                                     natural_size: natural,
                                     position: (
                                         tr.position_x.value_at(lt) as f32,
@@ -1754,6 +1808,7 @@ impl Shell {
                                     rotation_deg: tr.rotation.value_at(lt) as f32,
                                     opacity: tr.opacity.value_at(lt) as f32,
                                     matte,
+                                    blend: blend_of(layer.blend),
                                 });
                             }
                             let bg = comp.background.0;
@@ -1863,6 +1918,10 @@ impl Shell {
                 ui.menu_button("Composition", |ui| {
                     if ui.button("New composition").clicked() {
                         self.app.new_composition();
+                        ui.close_menu();
+                    }
+                    if ui.button("Add solid layer").clicked() {
+                        self.app.add_solid_layer();
                         ui.close_menu();
                     }
                 });

@@ -178,9 +178,26 @@ impl Default for Switches {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LayerKind {
-    Footage { item: Uuid },
+    Footage {
+        item: Uuid,
+    },
+    /// Flat colour at the comp's size (docs/01-GLOSSARY.md: Solid layer).
+    Solid {
+        colour: LinearColour,
+    },
+}
+
+/// Per-layer composite operator — the linear subset first
+/// (docs/06-RENDER-PIPELINE.md §blend domains; the perceptual set joins with
+/// the ping-pong compositing pass).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Add,
+    Multiply,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -200,6 +217,8 @@ pub struct Layer {
     /// (docs/03-DATA-MODEL.md §5.1 invariants), never an error.
     #[serde(default)]
     pub matte: Option<MatteRef>,
+    #[serde(default)]
+    pub blend: BlendMode,
     pub switches: Switches,
     /// Unknown fields from newer Kiriko versions, preserved on load/save
     /// (docs/10-FILE-FORMAT.md §1.1 — mandatory forward compatibility).

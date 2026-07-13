@@ -3,7 +3,7 @@
 //! of (op, inverse) pairs is the undo/redo stack and the crash-recovery log.
 
 use crate::anim::Animation;
-use crate::model::{Document, Layer, MatteRef, ProjectItem, TransformProp};
+use crate::model::{BlendMode, Document, Layer, MatteRef, ProjectItem, TransformProp};
 use crate::time::CompTime;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -58,6 +58,11 @@ pub enum Op {
         comp: Uuid,
         layer: Uuid,
         name: String,
+    },
+    SetLayerBlend {
+        comp: Uuid,
+        layer: Uuid,
+        blend: BlendMode,
     },
     /// Point a layer at another layer as its matte (or clear it).
     SetLayerMatte {
@@ -162,6 +167,20 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Op, OpError> {
             l.out_point = *out_point;
             l.start_offset = *start_offset;
             Ok(inverse)
+        }
+        Op::SetLayerBlend { comp, layer, blend } => {
+            let c = doc.comp_mut(*comp).ok_or(OpError::UnknownComp)?;
+            let l = c
+                .layers
+                .iter_mut()
+                .find(|l| l.id == *layer)
+                .ok_or(OpError::UnknownLayer)?;
+            let previous = std::mem::replace(&mut l.blend, *blend);
+            Ok(Op::SetLayerBlend {
+                comp: *comp,
+                layer: *layer,
+                blend: previous,
+            })
         }
         Op::SetLayerMatte { comp, layer, matte } => {
             let c = doc.comp_mut(*comp).ok_or(OpError::UnknownComp)?;

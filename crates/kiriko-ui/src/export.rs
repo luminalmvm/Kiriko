@@ -130,7 +130,21 @@ fn run(
             if t < l.in_point.0.to_f64() || t >= l.out_point.0.to_f64() {
                 continue;
             }
-            let LayerKind::Footage { item } = &l.kind;
+            let item = match &l.kind {
+                LayerKind::Footage { item } => item,
+                LayerKind::Solid { colour } => {
+                    let px = solid_rgba(*colour);
+                    pixels.insert(
+                        l.id,
+                        kiriko_media::DecodedFrame {
+                            width: comp.width,
+                            height: comp.height,
+                            rgba: px_tile(&px, comp.width, comp.height),
+                        },
+                    );
+                    continue;
+                }
+            };
             let Some(info) = items.get(item) else {
                 continue;
             };
@@ -198,6 +212,7 @@ fn run(
                             rotation_deg: mtr.rotation.value_at(mlt) as f32,
                             opacity: mtr.opacity.value_at(mlt) as f32,
                             matte: None,
+                            blend: kiriko_gpu::Blend::Normal,
                         }],
                     );
                     matte_textures.push((l.id, rendered));
@@ -241,6 +256,11 @@ fn run(
                             inverted: mr.inverted,
                         })
                 }),
+                blend: match l.blend {
+                    kiriko_core::model::BlendMode::Normal => kiriko_gpu::Blend::Normal,
+                    kiriko_core::model::BlendMode::Add => kiriko_gpu::Blend::Add,
+                    kiriko_core::model::BlendMode::Multiply => kiriko_gpu::Blend::Multiply,
+                },
             });
         }
 
@@ -268,6 +288,31 @@ fn run(
     }
     encoder.finish().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+pub fn srgb_encode(v: f32) -> u8 {
+    let v = v.clamp(0.0, 1.0);
+    let e = if v <= 0.003_130_8 {
+        12.92 * v
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    };
+    (e * 255.0).round() as u8
+}
+
+pub fn solid_rgba(c: kiriko_core::model::LinearColour) -> [u8; 4] {
+    [
+        srgb_encode(c.0[0]),
+        srgb_encode(c.0[1]),
+        srgb_encode(c.0[2]),
+        (c.0[3].clamp(0.0, 1.0) * 255.0).round() as u8,
+    ]
+}
+
+pub fn px_tile(px: &[u8; 4], w: u32, h: u32) -> Vec<u8> {
+    std::iter::repeat_n(*px, (w * h) as usize)
+        .flatten()
+        .collect()
 }
 
 /// Collect the ItemInfo map from probed media (UI thread, cheap).

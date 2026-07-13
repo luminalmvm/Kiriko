@@ -147,6 +147,7 @@ mod tests {
             start_offset: t(0, 1),
             transform: TransformGroup::default(),
             matte: None,
+            blend: Default::default(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         }

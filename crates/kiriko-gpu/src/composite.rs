@@ -20,6 +20,15 @@ struct LayerUniform {
     target: [f32; 4],
 }
 
+/// Composite operator (linear subset — docs/06-RENDER-PIPELINE.md §blend).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Blend {
+    #[default]
+    Normal,
+    Add,
+    Multiply,
+}
+
 /// A comp-space matte gating a layer (docs/06-RENDER-PIPELINE.md mattes).
 pub struct MatteInput<'a> {
     /// The matte layer rendered alone at comp size (linear fp16).
@@ -44,6 +53,7 @@ pub struct CompositeLayer<'a> {
     /// 0..100 (UI percent; folded to 0..1 in the uniform).
     pub opacity: f32,
     pub matte: Option<MatteInput<'a>>,
+    pub blend: Blend,
 }
 
 impl CompositeLayer<'_> {
@@ -74,6 +84,8 @@ fn half_bits(v: f32) -> u16 {
 
 pub struct Compositor {
     pipeline: wgpu::RenderPipeline,
+    pipeline_add: wgpu::RenderPipeline,
+    pipeline_multiply: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// Bound at binding 3 when a layer has no matte.
@@ -135,46 +147,65 @@ impl Compositor {
                 bind_group_layouts: &[&layout],
                 push_constant_ranges: &[],
             });
-        // Premultiplied over, in linear light.
+        // Linear-light blend states (docs/06-RENDER-PIPELINE.md §blend):
+        // Normal = premultiplied over; Add = pure light addition; Multiply
+        // via DstColor (with over-style alpha accumulation).
+        let over = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
         let blend = wgpu::BlendState {
+            color: over,
+            alpha: over,
+        };
+        let blend_add = wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                dst_factor: wgpu::BlendFactor::One,
                 operation: wgpu::BlendOperation::Add,
             },
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
+            alpha: over,
         };
-        let pipeline = ctx
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("composite"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_layer"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_layer"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: WORKING_FORMAT,
-                        blend: Some(blend),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                multiview: None,
-                cache: None,
-            });
+        let blend_multiply = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Dst,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: over,
+        };
+        let make_pipeline = |state: wgpu::BlendState, label: &str| {
+            ctx.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_layer"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_layer"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: WORKING_FORMAT,
+                            blend: Some(state),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview: None,
+                    cache: None,
+                })
+        };
+        let pipeline = make_pipeline(blend, "composite-normal");
+        let pipeline_add = make_pipeline(blend_add, "composite-add");
+        let pipeline_multiply = make_pipeline(blend_multiply, "composite-multiply");
         let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite-linear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -212,6 +243,8 @@ impl Compositor {
         );
         Self {
             pipeline,
+            pipeline_add,
+            pipeline_multiply,
             layout,
             sampler,
             white,
@@ -323,8 +356,12 @@ impl Compositor {
                 })],
                 ..Default::default()
             });
-            rpass.set_pipeline(&self.pipeline);
-            for bind in &binds {
+            for (bind, layer) in binds.iter().zip(layers) {
+                rpass.set_pipeline(match layer.blend {
+                    Blend::Normal => &self.pipeline,
+                    Blend::Add => &self.pipeline_add,
+                    Blend::Multiply => &self.pipeline_multiply,
+                });
                 rpass.set_bind_group(0, bind, &[]);
                 rpass.draw(0..6, 0..1);
             }
@@ -404,6 +441,7 @@ mod tests {
             rotation_deg: 0.0,
             opacity: 50.0,
             matte: None,
+            blend: Blend::Normal,
         };
         // Background: linear green = sRGB 0,255,0 decoded.
         let g_lin = srgb_decode(1.0);
@@ -458,6 +496,7 @@ mod tests {
                 rotation_deg: 0.0,
                 opacity: 100.0,
                 matte: None,
+                blend: Blend::Normal,
             }],
         );
 
@@ -476,6 +515,7 @@ mod tests {
                 luma: false,
                 inverted,
             }),
+            blend: Blend::Normal,
         };
 
         let shown = render_for_display(
@@ -511,6 +551,46 @@ mod tests {
         );
     }
 
+    /// Add blend genuinely adds light: half-grey over half-grey doubles the
+    /// linear value where Normal-over would darken toward the top layer.
+    #[test]
+    fn add_blend_adds_light_linearly() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let colour = ColourEngine::new(&ctx);
+        let compositor = Compositor::new(&ctx);
+        let grey = solid_linear(&ctx, &colour, [128, 128, 128, 255], 4, 4);
+        let layer = |blend: Blend| CompositeLayer {
+            texture: &grey,
+            size: (4.0, 4.0),
+            position: (0.0, 0.0),
+            anchor: (0.0, 0.0),
+            scale: (100.0, 100.0),
+            rotation_deg: 0.0,
+            opacity: 100.0,
+            matte: None,
+            blend,
+        };
+        let g_lin = srgb_decode(128.0 / 255.0);
+        let bg = [g_lin, g_lin, g_lin, 1.0];
+        let read = |blend: Blend| {
+            let shown = render_for_display(&ctx, &colour, &compositor, 4, 4, bg, &[layer(blend)]);
+            colour.readback8(&ctx, &shown).unwrap()[0]
+        };
+        let normal = read(Blend::Normal);
+        let added = read(Blend::Add);
+        // Normal over: result == the top layer (opaque) == 128.
+        assert!((i16::from(normal) - 128).abs() <= 1, "normal {normal}");
+        // Add: linear doubles → sRGB-encode(2·linear(0.5)) ≈ 188.
+        let expect = (srgb_encode(2.0 * g_lin).min(1.0) * 255.0).round() as i16;
+        assert!(
+            (i16::from(added) - expect).abs() <= 2,
+            "add {added} vs {expect}"
+        );
+    }
+
     /// A quarter-size quad placed at the centre covers exactly the centre
     /// quarter: transforms map comp pixels correctly (and the rest of the
     /// frame keeps the background).
@@ -532,6 +612,7 @@ mod tests {
             rotation_deg: 0.0,
             opacity: 100.0,
             matte: None,
+            blend: Blend::Normal,
         };
         let shown = render_for_display(
             &ctx,

@@ -699,6 +699,45 @@ impl AppState {
             start_offset: CompTime(Rational::ZERO),
             transform: TransformGroup::default(),
             matte: None,
+            blend: Default::default(),
+            switches: Switches::default(),
+            extra: serde_json::Map::new(),
+        };
+        self.commit(Op::AddLayer {
+            comp: comp_id,
+            index: 0,
+            layer: Box::new(layer),
+        });
+        self.preview_comp = Some(comp_id);
+        #[cfg(feature = "media")]
+        self.refresh_preview();
+    }
+
+    /// Add a white comp-sized Solid layer (colour editing joins the layer
+    /// properties panel).
+    pub fn add_solid_layer(&mut self) {
+        use kiriko_core::model::{Layer, LayerKind, LinearColour, Switches, TransformGroup};
+        use kiriko_core::time::CompTime;
+        let Some(comp_id) = self.preview_comp.or(self.selected_comp) else {
+            self.error = Some("select a composition first".into());
+            return;
+        };
+        let doc = self.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let layer = Layer {
+            id: Uuid::now_v7(),
+            name: "Solid".into(),
+            kind: LayerKind::Solid {
+                colour: LinearColour([1.0, 1.0, 1.0, 1.0]),
+            },
+            in_point: CompTime(Rational::ZERO),
+            out_point: CompTime(comp.duration.0),
+            start_offset: CompTime(Rational::ZERO),
+            transform: TransformGroup::default(),
+            matte: None,
+            blend: Default::default(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };
@@ -784,7 +823,10 @@ impl AppState {
             if t < layer.in_point.0.to_f64() || t >= layer.out_point.0.to_f64() {
                 continue;
             }
-            let LayerKind::Footage { item } = &layer.kind;
+            let item = match &layer.kind {
+                LayerKind::Footage { item } => item,
+                LayerKind::Solid { .. } => continue, // no decode: drawn directly
+            };
             let Some(ProjectItem::Footage(f)) = doc.item(*item) else {
                 continue;
             };
