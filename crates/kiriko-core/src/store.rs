@@ -132,6 +132,7 @@ mod tests {
             frame_rate: FrameRate::new(60, 1).unwrap(),
             duration: Duration(Rational::new(30, 1).unwrap()),
             background: LinearColour::BLACK,
+            work_area: None,
             layers: Vec::new(),
             extra: serde_json::Map::new(),
         }

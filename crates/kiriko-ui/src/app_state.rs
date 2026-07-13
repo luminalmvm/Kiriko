@@ -782,6 +782,7 @@ impl AppState {
             },
             duration: Duration(rat(30, 1)),
             background: LinearColour::BLACK,
+            work_area: None,
             layers: Vec::new(),
             extra: serde_json::Map::new(),
         };
@@ -792,6 +793,66 @@ impl AppState {
             item: Box::new(ProjectItem::Composition(comp)),
         });
         self.selected_comp = Some(id);
+    }
+
+    /// Work-area frame span of a comp (start, end-exclusive); full when unset.
+    pub fn work_area_frames(&self, comp: &Composition) -> (usize, usize) {
+        let total = self.comp_frame_count(comp);
+        let fps = comp.frame_rate.fps().max(1.0);
+        match comp.work_area {
+            Some((a, b)) => {
+                let s = ((a.0.to_f64() * fps).round() as usize).min(total.saturating_sub(1));
+                let e = ((b.0.to_f64() * fps).round() as usize).clamp(s + 1, total);
+                (s, e)
+            }
+            None => (0, total),
+        }
+    }
+
+    /// AE's B/N: set the work-area start or end at the playhead.
+    pub fn set_work_area_edge(&mut self, end_edge: bool) {
+        use kiriko_core::time::CompTime;
+        let Some(comp_id) = self.preview_comp else {
+            return;
+        };
+        let doc = self.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let fps = comp.frame_rate.fps().max(1.0);
+        let t = self.preview_frame as f64 / fps;
+        let dur = comp.duration.0.to_f64();
+        let (mut a, mut b) = comp
+            .work_area
+            .map(|(a, b)| (a.0.to_f64(), b.0.to_f64()))
+            .unwrap_or((0.0, dur));
+        if end_edge {
+            b = (t + 1.0 / fps).min(dur);
+            if a >= b {
+                a = 0.0;
+            }
+        } else {
+            a = t.min(dur - 1.0 / fps);
+            if b <= a {
+                b = dur;
+            }
+        }
+        let wa = if a <= 0.0 && (b - dur).abs() < 1e-9 {
+            None // full span = no work area
+        } else {
+            Some((
+                CompTime(
+                    Rational::from_f64_on_grid(a, Rational::FLICK_DEN).unwrap_or(Rational::ZERO),
+                ),
+                CompTime(
+                    Rational::from_f64_on_grid(b, Rational::FLICK_DEN).unwrap_or(comp.duration.0),
+                ),
+            ))
+        };
+        self.commit(Op::SetWorkArea {
+            comp: comp_id,
+            work_area: wa,
+        });
     }
 
     /// Frame count of the comp preview (comp duration × comp rate).
@@ -1008,14 +1069,15 @@ impl AppState {
             self.comp_playback = None;
             return false;
         };
-        let frames = self.comp_frame_count(comp);
+        let (wa_start, wa_end) = self.work_area_frames(comp);
         let fps = comp.frame_rate.fps();
         let frame = start_frame + (started.elapsed().as_secs_f64() * fps) as usize;
-        if frame >= frames {
-            self.preview_frame = frames.saturating_sub(1);
-            self.comp_playback = None;
+        if frame >= wa_end {
+            // Loop the work area (07-UI-SPEC transport: loop work area default).
+            self.comp_playback = Some((Instant::now(), wa_start));
+            self.preview_frame = wa_start;
             self.refresh_preview();
-            return false;
+            return true;
         }
         if frame != self.preview_frame {
             self.preview_frame = frame;

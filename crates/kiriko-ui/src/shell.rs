@@ -382,6 +382,13 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
         egui::Sense::click_and_drag(),
     );
     ui.painter().rect_filled(ruler_rect, 0.0, theme.surface_2);
+    if let Some((a, b)) = comp.work_area {
+        let band = egui::Rect::from_min_max(
+            egui::pos2(x_of(a.0.to_f64()), ruler_rect.top()),
+            egui::pos2(x_of(b.0.to_f64()), ruler_rect.top() + 4.0),
+        );
+        ui.painter().rect_filled(band, 0.0, theme.success);
+    }
     let label_every = (duration / 10.0).ceil().max(1.0) as usize;
     for s in 0..=duration.floor() as usize {
         let x = x_of(s as f64);
@@ -1633,7 +1640,10 @@ impl Shell {
         let Some(comp) = doc.comp(comp_id) else {
             return;
         };
-        let duration = comp.duration.0.to_f64().max(0.1);
+        let duration = match comp.work_area {
+            Some((a, b)) => (b.0.to_f64() - a.0.to_f64()).max(0.1),
+            None => comp.duration.0.to_f64().max(0.1),
+        };
         // 8% container/overhead headroom; audio joins the budget when comps
         // gain audio. Work area replaces whole-comp when it lands.
         let bits = target_mb * 1_000_000.0 * 8.0 * 0.92;
@@ -1760,6 +1770,14 @@ impl Shell {
                 }
                 if l && !self.app.is_playing() {
                     self.app.toggle_play();
+                }
+                let (b, n) =
+                    ctx.input(|i| (i.key_pressed(egui::Key::B), i.key_pressed(egui::Key::N)));
+                if b {
+                    self.app.set_work_area_edge(false);
+                }
+                if n {
+                    self.app.set_work_area_edge(true);
                 }
                 let step: i64 = i64::from(right) - i64::from(left || j);
                 if step != 0 || home {

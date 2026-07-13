@@ -60,6 +60,9 @@ pub struct Composition {
     pub frame_rate: FrameRate,
     pub duration: Duration,
     pub background: LinearColour,
+    /// Preview/export span (docs/01-GLOSSARY.md: work area); None = full comp.
+    #[serde(default)]
+    pub work_area: Option<(CompTime, CompTime)>,
     /// Index 0 = top of the stack.
     pub layers: Vec<Layer>,
     /// Unknown fields from newer Kiriko versions, preserved on load/save

@@ -85,7 +85,17 @@ fn run(
 ) -> Result<(), String> {
     let comp = doc.comp(comp_id).ok_or("composition missing")?;
     let fps = comp.frame_rate.fps().max(1.0);
-    let total = (comp.duration.0.to_f64() * fps).round().max(1.0) as usize;
+    let comp_frames = (comp.duration.0.to_f64() * fps).round().max(1.0) as usize;
+    // The work area is the export range (docs/01-GLOSSARY.md; K-037 relies on it).
+    let (first, end) = match comp.work_area {
+        Some((a, b)) => {
+            let s = ((a.0.to_f64() * fps).round() as usize).min(comp_frames.saturating_sub(1));
+            let e = ((b.0.to_f64() * fps).round() as usize).clamp(s + 1, comp_frames);
+            (s, e)
+        }
+        None => (0, comp_frames),
+    };
+    let total = end - first;
 
     let colour = kiriko_gpu::ColourEngine::new(gpu);
     let compositor = kiriko_gpu::Compositor::new(gpu);
@@ -105,7 +115,7 @@ fn run(
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let t = frame_n as f64 / fps;
+        let t = (first + frame_n) as f64 / fps;
 
         // Layers needed at t: visible ones plus their matte sources.
         let mut wanted: Vec<Uuid> = Vec::new();

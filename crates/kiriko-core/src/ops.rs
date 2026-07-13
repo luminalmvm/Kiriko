@@ -59,6 +59,10 @@ pub enum Op {
         layer: Uuid,
         name: String,
     },
+    SetWorkArea {
+        comp: Uuid,
+        work_area: Option<(CompTime, CompTime)>,
+    },
     SetLayerBlend {
         comp: Uuid,
         layer: Uuid,
@@ -167,6 +171,19 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Op, OpError> {
             l.out_point = *out_point;
             l.start_offset = *start_offset;
             Ok(inverse)
+        }
+        Op::SetWorkArea { comp, work_area } => {
+            if let Some((a, b)) = work_area {
+                if b <= a {
+                    return Err(OpError::InvalidSpan);
+                }
+            }
+            let c = doc.comp_mut(*comp).ok_or(OpError::UnknownComp)?;
+            let previous = std::mem::replace(&mut c.work_area, *work_area);
+            Ok(Op::SetWorkArea {
+                comp: *comp,
+                work_area: previous,
+            })
         }
         Op::SetLayerBlend { comp, layer, blend } => {
             let c = doc.comp_mut(*comp).ok_or(OpError::UnknownComp)?;
