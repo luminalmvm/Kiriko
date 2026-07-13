@@ -386,6 +386,10 @@ pub struct CompDialog {
     pub height: u32,
     pub fps: f64,
     pub duration_s: f64,
+    /// Keep width:height fixed: editing one dimension rescales the other.
+    pub lock_ratio: bool,
+    /// The locked aspect (width / height), captured when the lock engages.
+    pub aspect: f64,
     /// Item to add as the first layer once the comp exists (drag-drop with
     /// no comp yet).
     pub pending_item: Option<Uuid>,
@@ -1163,6 +1167,8 @@ impl AppState {
             height: 1080,
             fps: 60.0,
             duration_s: 30.0,
+            lock_ratio: true,
+            aspect: 1920.0 / 1080.0,
             pending_item,
         };
         #[cfg(feature = "media")]
@@ -1172,6 +1178,7 @@ impl AppState {
                 if let Some(v) = &probe.video {
                     dialog.width = v.width;
                     dialog.height = v.height;
+                    dialog.aspect = f64::from(v.width) / f64::from(v.height).max(1.0);
                     dialog.fps = v.fps();
                     dialog.duration_s = *frames as f64 / v.fps().max(1.0);
                 }
@@ -1193,6 +1200,8 @@ impl AppState {
             height: comp.height,
             fps: comp.frame_rate.fps(),
             duration_s: comp.duration.0.to_f64(),
+            lock_ratio: true,
+            aspect: f64::from(comp.width) / f64::from(comp.height).max(1.0),
             pending_item: None,
         });
     }

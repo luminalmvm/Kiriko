@@ -63,6 +63,35 @@ impl Mask {
         }
     }
 
+    /// An `n`-point star with straight edges (corner vertices only), outer
+    /// radius `outer`, inner radius `inner`. Points start at the top.
+    pub fn star(cx: f64, cy: f64, outer: f64, inner: f64, n: usize) -> Self {
+        let n = n.max(3);
+        let mut vertices = Vec::with_capacity(n * 2);
+        for i in 0..n * 2 {
+            let r = if i % 2 == 0 { outer } else { inner };
+            // -PI/2 puts the first outer point at the top.
+            let a = std::f64::consts::PI * f64::from(i as u32) / f64::from(n as u32)
+                - std::f64::consts::FRAC_PI_2;
+            vertices.push(Vertex {
+                pos: (cx + r * a.cos(), cy + r * a.sin()),
+                tan_in: (0.0, 0.0),
+                tan_out: (0.0, 0.0),
+            });
+        }
+        Self {
+            id: Uuid::now_v7(),
+            name: "Star".into(),
+            path: BezierPath {
+                vertices,
+                closed: true,
+            },
+            inverted: false,
+            opacity: 100.0,
+            extra: serde_json::Map::new(),
+        }
+    }
+
     /// Ellipse via the standard 4-vertex cubic approximation (kappa).
     pub fn ellipse(cx: f64, cy: f64, rx: f64, ry: f64) -> Self {
         const K: f64 = 0.552_284_749_830_793_4;
@@ -230,6 +259,25 @@ mod tests {
         assert_eq!(cov[(2 * 16 + 2) as usize], 0, "outside");
         let sum: f64 = cov.iter().map(|c| f64::from(*c) / 255.0).sum();
         assert!((sum - 64.0).abs() < 1.5, "area {sum} vs 64");
+    }
+
+    #[test]
+    fn star_has_alternating_radii_and_closes() {
+        let m = Mask::star(50.0, 50.0, 40.0, 16.0, 5);
+        assert_eq!(m.path.vertices.len(), 10);
+        assert!(m.path.closed);
+        // Outer points sit ~40 from centre, inner ~16 — alternating.
+        for (i, v) in m.path.vertices.iter().enumerate() {
+            let r = ((v.pos.0 - 50.0).powi(2) + (v.pos.1 - 50.0).powi(2)).sqrt();
+            let want = if i % 2 == 0 { 40.0 } else { 16.0 };
+            assert!((r - want).abs() < 1e-9, "vertex {i} radius {r} vs {want}");
+        }
+        // First outer point is at the top (y < centre).
+        assert!(m.path.vertices[0].pos.1 < 50.0);
+        // Rasterises to a sensible non-zero, sub-bounding-box area.
+        let cov = rasterise(&m.path, 100, 100, 1.0, 1.0);
+        let sum: f64 = cov.iter().map(|c| f64::from(*c) / 255.0).sum();
+        assert!(sum > 500.0 && sum < 5000.0, "star area {sum}");
     }
 
     #[test]

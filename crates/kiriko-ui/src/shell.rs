@@ -42,20 +42,106 @@ pub fn default_layout() -> DockState<Panel> {
     let surface = state.main_surface_mut();
     let [centre, _timeline] = surface.split_below(
         NodeIndex::root(),
-        0.65,
+        0.68,
         vec![Panel::Timeline, Panel::GraphEditor],
     );
-    let [centre, _project] = surface.split_left(centre, 0.22, vec![Panel::Project]);
-    let [_centre, _right] = surface.split_right(
-        centre,
-        0.78,
-        vec![
-            Panel::EffectControls,
-            Panel::EffectsAndPresets,
-            Panel::Scopes,
-        ],
-    );
+    // Project and Effect controls share the top-left dock (the AE model):
+    // Project is front until an effect is added. Effects & Presets stays out
+    // of the default layout until a layer actually has effects (K-068 style).
+    let [centre, _left] =
+        surface.split_left(centre, 0.22, vec![Panel::Project, Panel::EffectControls]);
+    let [_centre, _right] = surface.split_right(centre, 0.80, vec![Panel::Scopes]);
     state
+}
+
+/// A text field that mirrors a model value when idle and holds the user's
+/// keystrokes while focused (so partial entry like "29.99" isn't clobbered
+/// mid-type). Returns the response plus the buffer as it stands this frame;
+/// the caller parses on `lost_focus()`.
+fn text_field(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    model_str: &str,
+    width: f32,
+) -> (egui::Response, String) {
+    let mut buf = ui
+        .data_mut(|d| d.get_temp::<String>(id))
+        .unwrap_or_else(|| model_str.to_owned());
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut buf)
+            .id(id)
+            .desired_width(width),
+    );
+    // While editing, remember the keystrokes; otherwise mirror the model so
+    // an external change (e.g. the ratio lock) shows immediately.
+    let keep = if resp.has_focus() {
+        buf.clone()
+    } else {
+        model_str.to_owned()
+    };
+    ui.data_mut(|d| d.insert_temp(id, keep));
+    (resp, buf)
+}
+
+/// A dropdown that shows just its label — no down-caret (the house style).
+/// Returns whatever the menu closure produces.
+fn bare_dropdown<R>(
+    ui: &mut egui::Ui,
+    label: impl Into<egui::WidgetText>,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
+    ui.menu_button(label, add).inner
+}
+
+/// `HH:MM:SS:mmm` from seconds (docs: composition duration display).
+fn fmt_duration(secs: f64) -> String {
+    let total_ms = (secs.max(0.0) * 1000.0).round() as u64;
+    let ms = total_ms % 1000;
+    let s = (total_ms / 1000) % 60;
+    let m = (total_ms / 60_000) % 60;
+    let h = total_ms / 3_600_000;
+    format!("{h:02}:{m:02}:{s:02}:{ms:03}")
+}
+
+/// Parse a flexible duration: `SS(.sss)`, `MM:SS`, `HH:MM:SS`, or
+/// `HH:MM:SS:mmm`. None on anything unparseable.
+fn parse_duration(text: &str) -> Option<f64> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = t.split(':').collect();
+    let (h, m, s, ms) = match parts.as_slice() {
+        [s] => (0.0, 0.0, s.parse::<f64>().ok()?, 0.0),
+        [m, s] => (0.0, m.parse::<f64>().ok()?, s.parse::<f64>().ok()?, 0.0),
+        [h, m, s] => (
+            h.parse::<f64>().ok()?,
+            m.parse::<f64>().ok()?,
+            s.parse::<f64>().ok()?,
+            0.0,
+        ),
+        [h, m, s, ms] => (
+            h.parse::<f64>().ok()?,
+            m.parse::<f64>().ok()?,
+            s.parse::<f64>().ok()?,
+            ms.parse::<f64>().ok()?,
+        ),
+        _ => return None,
+    };
+    Some(h * 3600.0 + m * 60.0 + s + ms / 1000.0)
+}
+
+/// Simplify a width:height pair for display (e.g. 1920×1080 → 16:9).
+fn aspect_ratio_label(w: u32, h: u32) -> String {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 {
+            a
+        } else {
+            gcd(b, a % b)
+        }
+    }
+    let g = gcd(w.max(1), h.max(1)).max(1);
+    format!("{}:{}", w / g, h / g)
 }
 
 struct PanelViewer<'a> {
@@ -68,7 +154,19 @@ impl egui_dock::TabViewer for PanelViewer<'_> {
     type Tab = Panel;
 
     fn title(&mut self, tab: &mut Panel) -> egui::WidgetText {
-        tab.title().into()
+        match tab {
+            // The Viewer and Timeline are the workspace itself, not one view
+            // among several — their tabs carry no label (the Timeline instead
+            // shows the open comp's name, so comps read as tabs).
+            Panel::Viewer => "".into(),
+            Panel::Timeline => self
+                .app
+                .selected_comp
+                .and_then(|id| self.app.store.snapshot().comp(id).map(|c| c.name.clone()))
+                .unwrap_or_else(|| "Timeline".into())
+                .into(),
+            _ => tab.title().into(),
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Panel) {
@@ -628,21 +726,48 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
         );
         return;
     };
-    ui.add_space(4.0);
+    let comp_id = comp.id;
+    ui.add_space(2.0);
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(&comp.name).color(theme.text_primary));
+        // A compact comp switcher (the tab already names the open comp).
+        let comps: Vec<(uuid::Uuid, String)> = doc
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ProjectItem::Composition(c) => Some((c.id, c.name.clone())),
+                _ => None,
+            })
+            .collect();
+        bare_dropdown(
+            ui,
+            egui::RichText::new(&comp.name)
+                .small()
+                .strong()
+                .color(theme.text_secondary),
+            |ui| {
+                for (id, name) in &comps {
+                    if ui.selectable_label(*id == comp_id, name).clicked() {
+                        app.selected_comp = Some(*id);
+                        app.preview_comp = Some(*id);
+                        app.preview_frame = 0;
+                        #[cfg(feature = "media")]
+                        app.refresh_preview();
+                        ui.close_menu();
+                    }
+                }
+            },
+        );
         ui.label(
             egui::RichText::new(format!(
-                "{}×{}  {:.2} fps",
+                "{}×{} · {:.2} fps",
                 comp.width,
                 comp.height,
                 comp.frame_rate.fps()
             ))
             .small()
-            .color(theme.text_muted),
+            .color(theme.text_disabled),
         );
     });
-    ui.separator();
     if comp.layers.is_empty() {
         ui.label(
             egui::RichText::new("Drag footage here to create the first layer.")
@@ -653,11 +778,10 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     }
     use kiriko_core::anim::Animation;
     use kiriko_core::model::TransformProp;
-    let comp_id = comp.id;
     let mut pending: Option<kiriko_core::Op> = None;
 
     // ---- ruler + time geometry (07-UI-SPEC Timeline) --------------------
-    let name_w = 180.0_f32;
+    let name_w = 230.0_f32;
     let duration = comp.duration.0.to_f64().max(1e-6);
     let frames = app.comp_frame_count(comp).max(1);
     let panel_left = ui.max_rect().left();
@@ -739,6 +863,75 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
         if row_resp.clicked() {
             app.selected_layer = Some(layer.id);
         }
+        // Right-click a layer to add things (the house pattern: right-click or
+        // menu, never scattered buttons).
+        let mut ctx_op: Option<kiriko_core::Op> = None;
+        row_resp.context_menu(|ui| {
+            ui.menu_button("Add mask", |ui| {
+                let (w, h) = mask_space(layer, app, comp);
+                let mut new_mask = None;
+                if ui.button("Rectangle").clicked() {
+                    new_mask = Some(kiriko_core::mask::Mask::rectangle(
+                        w * 0.25,
+                        h * 0.25,
+                        w * 0.5,
+                        h * 0.5,
+                    ));
+                    ui.close_menu();
+                }
+                if ui.button("Ellipse").clicked() {
+                    new_mask = Some(kiriko_core::mask::Mask::ellipse(
+                        w * 0.5,
+                        h * 0.5,
+                        w * 0.3,
+                        h * 0.3,
+                    ));
+                    ui.close_menu();
+                }
+                if ui.button("Star").clicked() {
+                    new_mask = Some(kiriko_core::mask::Mask::star(
+                        w * 0.5,
+                        h * 0.5,
+                        w * 0.32,
+                        w * 0.14,
+                        5,
+                    ));
+                    ui.close_menu();
+                }
+                if let Some(m) = new_mask {
+                    let mut masks = layer.masks.clone();
+                    masks.push(m);
+                    ctx_op = Some(kiriko_core::Op::SetLayerMasks {
+                        comp: comp_id,
+                        layer: layer.id,
+                        masks,
+                    });
+                }
+            });
+        });
+        if ctx_op.is_some() {
+            pending = ctx_op;
+            app.selected_layer = Some(layer.id);
+        }
+        // Disclosure twirl: layer options hide until opened (AE behaviour).
+        let twirl_id = ui.id().with(("twirl", layer.id));
+        let mut expanded = ui.data(|d| d.get_temp::<bool>(twirl_id).unwrap_or(false));
+        let tri = egui::Rect::from_min_size(
+            egui::pos2(row_rect.left() + 2.0, row_rect.top()),
+            egui::vec2(16.0, row_rect.height()),
+        );
+        let tri_resp = ui.interact(tri, twirl_id.with("hit"), egui::Sense::click());
+        if tri_resp.clicked() {
+            expanded = !expanded;
+            ui.data_mut(|d| d.insert_temp(twirl_id, expanded));
+        }
+        ui.painter().text(
+            tri.center(),
+            egui::Align2::CENTER_CENTER,
+            if expanded { "▾" } else { "▸" },
+            egui::FontId::proportional(11.0),
+            theme.text_muted,
+        );
         if app.selected_layer == Some(layer.id) {
             ui.painter().rect_filled(
                 egui::Rect::from_min_max(
@@ -751,7 +944,7 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
         }
         let seconds_of = |x: f32| ((x - track_left) / track_w).clamp(0.0, 1.0) as f64 * duration;
         ui.painter().text(
-            egui::pos2(row_rect.left() + 4.0, row_rect.center().y),
+            egui::pos2(row_rect.left() + 20.0, row_rect.center().y),
             egui::Align2::LEFT_CENTER,
             &layer.name,
             egui::FontId::proportional(12.0),
@@ -832,303 +1025,291 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                 );
             }
         }
-        ui.indent(("matte", layer.id), |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Matte").small().color(theme.text_muted));
-                let current_name = layer
-                    .matte
-                    .as_ref()
-                    .and_then(|m| comp.layers.iter().find(|l| l.id == m.layer))
-                    .map(|l| l.name.clone())
-                    .unwrap_or_else(|| "None".into());
-                let mut set: Option<Option<kiriko_core::model::MatteRef>> = None;
-                egui::ComboBox::from_id_salt(("matte-src", layer.id))
-                    .selected_text(current_name)
-                    .width(120.0)
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(layer.matte.is_none(), "None").clicked() {
-                            set = Some(None);
-                        }
-                        for other in comp.layers.iter().filter(|l| l.id != layer.id) {
-                            let selected = layer.matte.is_some_and(|m| m.layer == other.id);
-                            if ui.selectable_label(selected, &other.name).clicked() {
-                                set = Some(Some(kiriko_core::model::MatteRef {
-                                    layer: other.id,
-                                    channel: layer
-                                        .matte
-                                        .map(|m| m.channel)
-                                        .unwrap_or(kiriko_core::model::MatteChannel::Alpha),
-                                    inverted: layer.matte.is_some_and(|m| m.inverted),
-                                }));
+        if expanded {
+            // Layer options live in the left column only — the track area to
+            // the right of the separator stays for the bar and keyframes.
+            ui.scope(|ui| {
+                ui.set_max_width(name_w - 10.0);
+                ui.indent(("matte", layer.id), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Matte").small().color(theme.text_muted));
+                        let current_name = layer
+                            .matte
+                            .as_ref()
+                            .and_then(|m| comp.layers.iter().find(|l| l.id == m.layer))
+                            .map(|l| l.name.clone())
+                            .unwrap_or_else(|| "None".into());
+                        let mut set: Option<Option<kiriko_core::model::MatteRef>> = None;
+                        bare_dropdown(ui, current_name, |ui| {
+                            if ui.selectable_label(layer.matte.is_none(), "None").clicked() {
+                                set = Some(None);
+                                ui.close_menu();
                             }
-                        }
-                    });
-                if let Some(mut m) = layer.matte {
-                    let luma = matches!(m.channel, kiriko_core::model::MatteChannel::Luma);
-                    if ui
-                        .selectable_label(luma, egui::RichText::new("luma").small())
-                        .on_hover_text("Luma matte (else alpha)")
-                        .clicked()
-                    {
-                        m.channel = if luma {
-                            kiriko_core::model::MatteChannel::Alpha
-                        } else {
-                            kiriko_core::model::MatteChannel::Luma
-                        };
-                        set = Some(Some(m));
-                    }
-                    if ui
-                        .selectable_label(m.inverted, egui::RichText::new("invert").small())
-                        .clicked()
-                    {
-                        m.inverted = !m.inverted;
-                        set = Some(Some(m));
-                    }
-                }
-                if let Some(matte) = set {
-                    pending = Some(kiriko_core::Op::SetLayerMatte {
-                        comp: comp_id,
-                        layer: layer.id,
-                        matte,
-                    });
-                }
-                ui.separator();
-                ui.label(egui::RichText::new("Blend").small().color(theme.text_muted));
-                use kiriko_core::model::BlendMode;
-                let blend_name = |b: BlendMode| match b {
-                    BlendMode::Normal => "Normal",
-                    BlendMode::Add => "Add",
-                    BlendMode::Multiply => "Multiply",
-                    BlendMode::Screen => "Screen",
-                    BlendMode::Overlay => "Overlay",
-                    BlendMode::SoftLight => "Soft light",
-                    BlendMode::HardLight => "Hard light",
-                    BlendMode::Lighten => "Lighten",
-                    BlendMode::Darken => "Darken",
-                };
-                egui::ComboBox::from_id_salt(("blend", layer.id))
-                    .selected_text(blend_name(layer.blend))
-                    .width(90.0)
-                    .show_ui(ui, |ui| {
-                        for mode in [
-                            BlendMode::Normal,
-                            BlendMode::Add,
-                            BlendMode::Multiply,
-                            BlendMode::Screen,
-                            BlendMode::Overlay,
-                            BlendMode::SoftLight,
-                            BlendMode::HardLight,
-                            BlendMode::Lighten,
-                            BlendMode::Darken,
-                        ] {
+                            for other in comp.layers.iter().filter(|l| l.id != layer.id) {
+                                let selected = layer.matte.is_some_and(|m| m.layer == other.id);
+                                if ui.selectable_label(selected, &other.name).clicked() {
+                                    set = Some(Some(kiriko_core::model::MatteRef {
+                                        layer: other.id,
+                                        channel: layer
+                                            .matte
+                                            .map(|m| m.channel)
+                                            .unwrap_or(kiriko_core::model::MatteChannel::Alpha),
+                                        inverted: layer.matte.is_some_and(|m| m.inverted),
+                                    }));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        if let Some(mut m) = layer.matte {
+                            let luma = matches!(m.channel, kiriko_core::model::MatteChannel::Luma);
                             if ui
-                                .selectable_label(layer.blend == mode, blend_name(mode))
+                                .selectable_label(luma, egui::RichText::new("luma").small())
+                                .on_hover_text("Luma matte (else alpha)")
                                 .clicked()
-                                && layer.blend != mode
                             {
-                                pending = Some(kiriko_core::Op::SetLayerBlend {
-                                    comp: comp_id,
-                                    layer: layer.id,
-                                    blend: mode,
-                                });
+                                m.channel = if luma {
+                                    kiriko_core::model::MatteChannel::Alpha
+                                } else {
+                                    kiriko_core::model::MatteChannel::Luma
+                                };
+                                set = Some(Some(m));
+                            }
+                            if ui
+                                .selectable_label(m.inverted, egui::RichText::new("invert").small())
+                                .clicked()
+                            {
+                                m.inverted = !m.inverted;
+                                set = Some(Some(m));
                             }
                         }
-                    });
-                ui.separator();
-                if ui
-                    .selectable_label(layer.switches.three_d, egui::RichText::new("3D").small())
-                    .on_hover_text(
-                        "Place this layer in z-space (needs a Camera layer to show depth)",
-                    )
-                    .clicked()
-                {
-                    pending = Some(kiriko_core::Op::SetLayerThreeD {
-                        comp: comp_id,
-                        layer: layer.id,
-                        three_d: !layer.switches.three_d,
-                    });
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Masks").small().color(theme.text_muted));
-                if ui.small_button("+ Rect").clicked() {
-                    let mut masks = layer.masks.clone();
-                    let (w, h) = mask_space(layer, app, comp);
-                    masks.push(kiriko_core::mask::Mask::rectangle(
-                        w * 0.25,
-                        h * 0.25,
-                        w * 0.5,
-                        h * 0.5,
-                    ));
-                    pending = Some(kiriko_core::Op::SetLayerMasks {
-                        comp: comp_id,
-                        layer: layer.id,
-                        masks,
-                    });
-                }
-                if ui.small_button("+ Ellipse").clicked() {
-                    let mut masks = layer.masks.clone();
-                    let (w, h) = mask_space(layer, app, comp);
-                    masks.push(kiriko_core::mask::Mask::ellipse(
-                        w * 0.5,
-                        h * 0.5,
-                        w * 0.3,
-                        h * 0.3,
-                    ));
-                    pending = Some(kiriko_core::Op::SetLayerMasks {
-                        comp: comp_id,
-                        layer: layer.id,
-                        masks,
-                    });
-                }
-                for (mi, mask) in layer.masks.iter().enumerate() {
-                    let mut masks = layer.masks.clone();
-                    if ui
-                        .selectable_label(
-                            mask.inverted,
-                            egui::RichText::new(format!("{} inv", mask.name)).small(),
-                        )
-                        .clicked()
-                    {
-                        masks[mi].inverted = !masks[mi].inverted;
-                        pending = Some(kiriko_core::Op::SetLayerMasks {
-                            comp: comp_id,
-                            layer: layer.id,
-                            masks,
-                        });
-                    } else if ui.small_button("×").on_hover_text("Remove mask").clicked() {
-                        masks.remove(mi);
-                        pending = Some(kiriko_core::Op::SetLayerMasks {
-                            comp: comp_id,
-                            layer: layer.id,
-                            masks,
-                        });
-                    }
-                }
-            });
-        });
-        if let kiriko_core::model::LayerKind::Text { document } = &layer.kind {
-            ui.indent(("text", layer.id), |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Text").small().color(theme.text_muted));
-                    let mut text = document.text.clone();
-                    let resp = ui.add(egui::TextEdit::singleline(&mut text).desired_width(180.0));
-                    let mut size = document.size;
-                    let size_resp = ui.add(
-                        egui::DragValue::new(&mut size)
-                            .speed(1.0)
-                            .range(4.0..=512.0)
-                            .suffix(" px"),
-                    );
-                    if (resp.lost_focus() && text != document.text)
-                        || (size_resp.drag_stopped() || size_resp.lost_focus())
-                            && (size - document.size).abs() > f64::EPSILON
-                    {
-                        let mut doc_new = document.clone();
-                        doc_new.text = text;
-                        doc_new.size = size;
-                        pending = Some(kiriko_core::Op::SetTextDocument {
-                            comp: comp_id,
-                            layer: layer.id,
-                            document: doc_new,
-                        });
-                    }
-                });
-            });
-        }
-        if let kiriko_core::model::LayerKind::Camera { zoom } = &layer.kind {
-            ui.indent(("camera", layer.id), |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("Zoom px")
-                            .small()
-                            .color(theme.text_muted),
-                    );
-                    let fps = comp.frame_rate.fps().max(1.0);
-                    let lt = app.preview_frame as f64 / fps - layer.start_offset.0.to_f64();
-                    let committed = zoom.value_at(lt);
-                    let id = egui::Id::new(("zoom_edit", layer.id));
-                    let mut value = ui.data(|d| d.get_temp::<f64>(id)).unwrap_or(committed);
-                    let resp = ui.add(
-                        egui::DragValue::new(&mut value)
-                            .speed(4.0)
-                            .range(1.0..=100_000.0)
-                            .max_decimals(1),
-                    );
-                    if resp.dragged() || resp.has_focus() {
-                        ui.data_mut(|d| d.insert_temp(id, value));
-                    }
-                    if resp.drag_stopped() || resp.lost_focus() {
-                        if (value - committed).abs() > f64::EPSILON {
-                            let animation = if zoom.is_animated() {
-                                Animation::Keyframed(upsert_key(zoom, lt, value))
-                            } else {
-                                Animation::Static(value)
-                            };
-                            pending = Some(kiriko_core::Op::SetCameraZoom {
+                        if let Some(matte) = set {
+                            pending = Some(kiriko_core::Op::SetLayerMatte {
                                 comp: comp_id,
                                 layer: layer.id,
-                                animation,
+                                matte,
                             });
                         }
-                        ui.data_mut(|d| d.remove::<f64>(id));
+                        ui.separator();
+                        ui.label(egui::RichText::new("Blend").small().color(theme.text_muted));
+                        use kiriko_core::model::BlendMode;
+                        let blend_name = |b: BlendMode| match b {
+                            BlendMode::Normal => "Normal",
+                            BlendMode::Add => "Add",
+                            BlendMode::Multiply => "Multiply",
+                            BlendMode::Screen => "Screen",
+                            BlendMode::Overlay => "Overlay",
+                            BlendMode::SoftLight => "Soft light",
+                            BlendMode::HardLight => "Hard light",
+                            BlendMode::Lighten => "Lighten",
+                            BlendMode::Darken => "Darken",
+                        };
+                        bare_dropdown(ui, blend_name(layer.blend), |ui| {
+                            for mode in [
+                                BlendMode::Normal,
+                                BlendMode::Add,
+                                BlendMode::Multiply,
+                                BlendMode::Screen,
+                                BlendMode::Overlay,
+                                BlendMode::SoftLight,
+                                BlendMode::HardLight,
+                                BlendMode::Lighten,
+                                BlendMode::Darken,
+                            ] {
+                                if ui
+                                    .selectable_label(layer.blend == mode, blend_name(mode))
+                                    .clicked()
+                                {
+                                    if layer.blend != mode {
+                                        pending = Some(kiriko_core::Op::SetLayerBlend {
+                                            comp: comp_id,
+                                            layer: layer.id,
+                                            blend: mode,
+                                        });
+                                    }
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        ui.separator();
+                        if ui
+                            .selectable_label(
+                                layer.switches.three_d,
+                                egui::RichText::new("3D").small(),
+                            )
+                            .on_hover_text(
+                                "Place this layer in z-space (needs a Camera layer to show depth)",
+                            )
+                            .clicked()
+                        {
+                            pending = Some(kiriko_core::Op::SetLayerThreeD {
+                                comp: comp_id,
+                                layer: layer.id,
+                                three_d: !layer.switches.three_d,
+                            });
+                        }
+                    });
+                    // Masks only appear once the layer has one (add via right-click or
+                    // the toolbar's mask tool).
+                    if !layer.masks.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new("Masks").small().color(theme.text_muted));
+                            for (mi, mask) in layer.masks.iter().enumerate() {
+                                let mut masks = layer.masks.clone();
+                                if ui
+                                    .selectable_label(
+                                        mask.inverted,
+                                        egui::RichText::new(format!("{} inv", mask.name)).small(),
+                                    )
+                                    .clicked()
+                                {
+                                    masks[mi].inverted = !masks[mi].inverted;
+                                    pending = Some(kiriko_core::Op::SetLayerMasks {
+                                        comp: comp_id,
+                                        layer: layer.id,
+                                        masks,
+                                    });
+                                } else if ui
+                                    .small_button("×")
+                                    .on_hover_text("Remove mask")
+                                    .clicked()
+                                {
+                                    masks.remove(mi);
+                                    pending = Some(kiriko_core::Op::SetLayerMasks {
+                                        comp: comp_id,
+                                        layer: layer.id,
+                                        masks,
+                                    });
+                                }
+                            }
+                        });
                     }
                 });
-            });
-        }
-        ui.indent(("transform", layer.id), |ui| {
-            ui.collapsing(
-                egui::RichText::new("Transform")
-                    .small()
-                    .color(theme.text_muted),
-                |ui| {
-                    egui::Grid::new(("txgrid", layer.id))
-                        .num_columns(2)
-                        .spacing(egui::vec2(12.0, 2.0))
-                        .show(ui, |ui| {
-                            let mut rows: Vec<(&str, TransformProp, f64)> = vec![
-                                ("Position x", TransformProp::PositionX, 1.0),
-                                ("Position y", TransformProp::PositionY, 1.0),
-                                ("Scale x %", TransformProp::ScaleX, 0.5),
-                                ("Scale y %", TransformProp::ScaleY, 0.5),
-                                ("Rotation °", TransformProp::Rotation, 0.5),
-                                ("Opacity %", TransformProp::Opacity, 0.5),
-                            ];
-                            let is_camera =
-                                matches!(layer.kind, kiriko_core::model::LayerKind::Camera { .. });
-                            if layer.switches.three_d || is_camera {
-                                rows.extend([
-                                    ("Position z", TransformProp::PositionZ, 1.0),
-                                    ("Rotation x °", TransformProp::RotationX, 0.5),
-                                    ("Rotation y °", TransformProp::RotationY, 0.5),
-                                ]);
+                if let kiriko_core::model::LayerKind::Text { document } = &layer.kind {
+                    ui.indent(("text", layer.id), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Text").small().color(theme.text_muted));
+                            let mut text = document.text.clone();
+                            let resp =
+                                ui.add(egui::TextEdit::singleline(&mut text).desired_width(180.0));
+                            let mut size = document.size;
+                            let size_resp = ui.add(
+                                egui::DragValue::new(&mut size)
+                                    .speed(1.0)
+                                    .range(4.0..=512.0)
+                                    .suffix(" px"),
+                            );
+                            if (resp.lost_focus() && text != document.text)
+                                || (size_resp.drag_stopped() || size_resp.lost_focus())
+                                    && (size - document.size).abs() > f64::EPSILON
+                            {
+                                let mut doc_new = document.clone();
+                                doc_new.text = text;
+                                doc_new.size = size;
+                                pending = Some(kiriko_core::Op::SetTextDocument {
+                                    comp: comp_id,
+                                    layer: layer.id,
+                                    document: doc_new,
+                                });
                             }
-                            // Layer time at the playhead: where keyframes land
-                            // (AE behaviour: editing an animated value writes a
-                            // key at the current time).
+                        });
+                    });
+                }
+                if let kiriko_core::model::LayerKind::Camera { zoom } = &layer.kind {
+                    ui.indent(("camera", layer.id), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Zoom px")
+                                    .small()
+                                    .color(theme.text_muted),
+                            );
                             let fps = comp.frame_rate.fps().max(1.0);
                             let lt = app.preview_frame as f64 / fps - layer.start_offset.0.to_f64();
-                            for (label, prop, speed) in rows {
-                                let slot = layer.transform.get(prop);
-                                let animated = slot.is_animated();
-                                ui.horizontal(|ui| {
-                                    let clock = if animated { "⏱" } else { "◦" };
-                                    if ui
-                                        .selectable_label(
-                                            animated,
-                                            egui::RichText::new(clock).small(),
-                                        )
-                                        .on_hover_text(if animated {
-                                            "Remove animation (freeze current value)"
-                                        } else {
-                                            "Animate: keyframe at the playhead"
-                                        })
-                                        .clicked()
-                                    {
-                                        let animation = if animated {
-                                            Animation::Static(slot.value_at(lt))
-                                        } else {
-                                            Animation::Keyframed(vec![
+                            let committed = zoom.value_at(lt);
+                            let id = egui::Id::new(("zoom_edit", layer.id));
+                            let mut value = ui.data(|d| d.get_temp::<f64>(id)).unwrap_or(committed);
+                            let resp = ui.add(
+                                egui::DragValue::new(&mut value)
+                                    .speed(4.0)
+                                    .range(1.0..=100_000.0)
+                                    .max_decimals(1),
+                            );
+                            if resp.dragged() || resp.has_focus() {
+                                ui.data_mut(|d| d.insert_temp(id, value));
+                            }
+                            if resp.drag_stopped() || resp.lost_focus() {
+                                if (value - committed).abs() > f64::EPSILON {
+                                    let animation = if zoom.is_animated() {
+                                        Animation::Keyframed(upsert_key(zoom, lt, value))
+                                    } else {
+                                        Animation::Static(value)
+                                    };
+                                    pending = Some(kiriko_core::Op::SetCameraZoom {
+                                        comp: comp_id,
+                                        layer: layer.id,
+                                        animation,
+                                    });
+                                }
+                                ui.data_mut(|d| d.remove::<f64>(id));
+                            }
+                        });
+                    });
+                }
+                ui.indent(("transform", layer.id), |ui| {
+                    ui.collapsing(
+                        egui::RichText::new("Transform")
+                            .small()
+                            .color(theme.text_muted),
+                        |ui| {
+                            egui::Grid::new(("txgrid", layer.id))
+                                .num_columns(2)
+                                .spacing(egui::vec2(12.0, 2.0))
+                                .show(ui, |ui| {
+                                    let mut rows: Vec<(&str, TransformProp, f64)> = vec![
+                                        ("Position x", TransformProp::PositionX, 1.0),
+                                        ("Position y", TransformProp::PositionY, 1.0),
+                                        ("Scale x %", TransformProp::ScaleX, 0.5),
+                                        ("Scale y %", TransformProp::ScaleY, 0.5),
+                                        ("Rotation °", TransformProp::Rotation, 0.5),
+                                        ("Opacity %", TransformProp::Opacity, 0.5),
+                                    ];
+                                    let is_camera = matches!(
+                                        layer.kind,
+                                        kiriko_core::model::LayerKind::Camera { .. }
+                                    );
+                                    if layer.switches.three_d || is_camera {
+                                        rows.extend([
+                                            ("Position z", TransformProp::PositionZ, 1.0),
+                                            ("Rotation x °", TransformProp::RotationX, 0.5),
+                                            ("Rotation y °", TransformProp::RotationY, 0.5),
+                                        ]);
+                                    }
+                                    // Layer time at the playhead: where keyframes land
+                                    // (AE behaviour: editing an animated value writes a
+                                    // key at the current time).
+                                    let fps = comp.frame_rate.fps().max(1.0);
+                                    let lt = app.preview_frame as f64 / fps
+                                        - layer.start_offset.0.to_f64();
+                                    for (label, prop, speed) in rows {
+                                        let slot = layer.transform.get(prop);
+                                        let animated = slot.is_animated();
+                                        ui.horizontal(|ui| {
+                                            let clock = if animated { "⏱" } else { "◦" };
+                                            if ui
+                                                .selectable_label(
+                                                    animated,
+                                                    egui::RichText::new(clock).small(),
+                                                )
+                                                .on_hover_text(if animated {
+                                                    "Remove animation (freeze current value)"
+                                                } else {
+                                                    "Animate: keyframe at the playhead"
+                                                })
+                                                .clicked()
+                                            {
+                                                let animation = if animated {
+                                                    Animation::Static(slot.value_at(lt))
+                                                } else {
+                                                    Animation::Keyframed(vec![
                                                 kiriko_core::anim::Keyframe {
                                                     time: rational_at(lt),
                                                     value: slot.value_at(lt),
@@ -1138,56 +1319,73 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                                                         kiriko_core::anim::SideInterp::Linear,
                                                 },
                                             ])
-                                        };
-                                        pending = Some(kiriko_core::Op::SetTransformProperty {
-                                            comp: comp_id,
-                                            layer: layer.id,
-                                            prop,
-                                            animation,
+                                                };
+                                                pending =
+                                                    Some(kiriko_core::Op::SetTransformProperty {
+                                                        comp: comp_id,
+                                                        layer: layer.id,
+                                                        prop,
+                                                        animation,
+                                                    });
+                                            }
+                                            ui.label(
+                                                egui::RichText::new(label)
+                                                    .small()
+                                                    .color(theme.text_muted),
+                                            );
                                         });
-                                    }
-                                    ui.label(
-                                        egui::RichText::new(label).small().color(theme.text_muted),
-                                    );
-                                });
-                                {
-                                    let committed = slot.value_at(lt);
-                                    let mut value = match app.prop_edit {
-                                        Some((l, p, v)) if l == layer.id && p == prop => v,
-                                        _ => committed,
-                                    };
-                                    let resp = ui.add(
-                                        egui::DragValue::new(&mut value)
-                                            .speed(speed)
-                                            .max_decimals(2),
-                                    );
-                                    if resp.dragged() || resp.has_focus() {
-                                        app.prop_edit = Some((layer.id, prop, value));
-                                    }
-                                    if resp.drag_stopped() || resp.lost_focus() {
-                                        if (value - committed).abs() > f64::EPSILON {
-                                            let animation = if animated {
-                                                Animation::Keyframed(upsert_key(slot, lt, value))
-                                            } else {
-                                                Animation::Static(value)
+                                        {
+                                            let committed = slot.value_at(lt);
+                                            let mut value = match app.prop_edit {
+                                                Some((l, p, v)) if l == layer.id && p == prop => v,
+                                                _ => committed,
                                             };
-                                            pending = Some(kiriko_core::Op::SetTransformProperty {
-                                                comp: comp_id,
-                                                layer: layer.id,
-                                                prop,
-                                                animation,
-                                            });
+                                            let resp = ui.add(
+                                                egui::DragValue::new(&mut value)
+                                                    .speed(speed)
+                                                    .max_decimals(2),
+                                            );
+                                            if resp.dragged() || resp.has_focus() {
+                                                app.prop_edit = Some((layer.id, prop, value));
+                                            }
+                                            if resp.drag_stopped() || resp.lost_focus() {
+                                                if (value - committed).abs() > f64::EPSILON {
+                                                    let animation = if animated {
+                                                        Animation::Keyframed(upsert_key(
+                                                            slot, lt, value,
+                                                        ))
+                                                    } else {
+                                                        Animation::Static(value)
+                                                    };
+                                                    pending = Some(
+                                                        kiriko_core::Op::SetTransformProperty {
+                                                            comp: comp_id,
+                                                            layer: layer.id,
+                                                            prop,
+                                                            animation,
+                                                        },
+                                                    );
+                                                }
+                                                app.prop_edit = None;
+                                            }
                                         }
-                                        app.prop_edit = None;
+                                        ui.end_row();
                                     }
-                                }
-                                ui.end_row();
-                            }
-                        });
-                },
-            );
-        });
+                                });
+                        },
+                    );
+                });
+            });
+        }
     }
+    // Vertical separator: layer options (left) from the track area (right).
+    ui.painter().line_segment(
+        [
+            egui::pos2(track_left - 4.0, rows_top),
+            egui::pos2(track_left - 4.0, ui.cursor().top()),
+        ],
+        egui::Stroke::new(1.0_f32, theme.hairline),
+    );
     // Playhead over ruler and rows (clay, the one accent).
     if app.preview_comp == Some(comp_id) {
         let x = x_of(app.preview_frame as f64 / comp.frame_rate.fps().max(1.0));
@@ -1618,28 +1816,27 @@ fn viewer_footage(
                     } else {
                         labels[(app.preview_divisor as usize - 1).min(3)]
                     };
-                    egui::ComboBox::from_id_salt("preview-res")
-                        .selected_text(current)
-                        .width(72.0)
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_label(app.preview_auto_res, "Auto")
-                                .on_hover_text("Decode at the displayed size, capped at 100%")
-                                .clicked()
-                            {
-                                app.preview_auto_res = true;
+                    bare_dropdown(ui, current, |ui| {
+                        if ui
+                            .selectable_label(app.preview_auto_res, "Auto")
+                            .on_hover_text("Decode at the displayed size, capped at 100%")
+                            .clicked()
+                        {
+                            app.preview_auto_res = true;
+                            app.refresh_preview();
+                            ui.close_menu();
+                        }
+                        for (i, label) in labels.iter().enumerate() {
+                            let div = i as u32 + 1;
+                            let selected = !app.preview_auto_res && app.preview_divisor == div;
+                            if ui.selectable_label(selected, *label).clicked() {
+                                app.preview_auto_res = false;
+                                app.preview_divisor = div;
                                 app.refresh_preview();
+                                ui.close_menu();
                             }
-                            for (i, label) in labels.iter().enumerate() {
-                                let div = i as u32 + 1;
-                                let selected = !app.preview_auto_res && app.preview_divisor == div;
-                                if ui.selectable_label(selected, *label).clicked() {
-                                    app.preview_auto_res = false;
-                                    app.preview_divisor = div;
-                                    app.refresh_preview();
-                                }
-                            }
-                        });
+                        }
+                    });
                     ui.label(
                         egui::RichText::new(format!("{:.0}%", app.last_display_scale * 100.0))
                             .monospace()
@@ -1749,21 +1946,19 @@ fn graph_editor_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     let mut set_sides: Option<SideInterp> = None;
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(&layer.name).color(theme.text_secondary));
-        egui::ComboBox::from_id_salt("graph-prop")
-            .selected_text(
-                animated
-                    .iter()
-                    .find(|(p, _)| *p == current)
-                    .map(|(_, n)| *n)
-                    .unwrap_or("?"),
-            )
-            .show_ui(ui, |ui| {
-                for (p, name) in &animated {
-                    if ui.selectable_label(*p == current, *name).clicked() {
-                        app.graph_prop = Some(*p);
-                    }
+        let current_name = animated
+            .iter()
+            .find(|(p, _)| *p == current)
+            .map(|(_, n)| *n)
+            .unwrap_or("?");
+        bare_dropdown(ui, current_name, |ui| {
+            for (p, name) in &animated {
+                if ui.selectable_label(*p == current, *name).clicked() {
+                    app.graph_prop = Some(*p);
+                    ui.close_menu();
                 }
-            });
+            }
+        });
         ui.separator();
         if ui
             .selectable_label(!app.graph_speed_view, "Value")
@@ -2835,43 +3030,123 @@ impl Shell {
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
+            let theme = &self.theme;
             egui::Grid::new("comp-dialog")
                 .num_columns(2)
-                .spacing(egui::vec2(12.0, 6.0))
+                .spacing(egui::vec2(12.0, 8.0))
                 .show(ui, |ui| {
                     ui.label("Name");
-                    ui.text_edit_singleline(&mut dialog.name);
+                    ui.add(egui::TextEdit::singleline(&mut dialog.name).desired_width(220.0));
                     ui.end_row();
-                    ui.label("Width");
-                    ui.add(egui::DragValue::new(&mut dialog.width).range(16..=16384));
-                    ui.end_row();
-                    ui.label("Height");
-                    ui.add(egui::DragValue::new(&mut dialog.height).range(16..=16384));
-                    ui.end_row();
-                    ui.label("Frame rate");
+
+                    // Width × Height on one line, with a ratio lock.
+                    ui.label("Size");
                     ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut dialog.fps)
-                                .range(1.0..=1000.0)
-                                .max_decimals(3)
-                                .suffix(" fps"),
+                        let (w_resp, w_buf) = text_field(
+                            ui,
+                            egui::Id::new("comp-w"),
+                            &dialog.width.to_string(),
+                            60.0,
                         );
-                        for preset in [24.0, 30.0, 60.0] {
-                            if ui.small_button(format!("{preset:.0}")).clicked() {
-                                dialog.fps = preset;
+                        ui.label(egui::RichText::new("×").color(theme.text_muted));
+                        let (h_resp, h_buf) = text_field(
+                            ui,
+                            egui::Id::new("comp-h"),
+                            &dialog.height.to_string(),
+                            60.0,
+                        );
+                        if w_resp.lost_focus() {
+                            if let Ok(w) = w_buf.trim().parse::<u32>() {
+                                dialog.width = w.clamp(16, 16384);
+                                if dialog.lock_ratio {
+                                    dialog.height =
+                                        ((f64::from(dialog.width) / dialog.aspect).round() as u32)
+                                            .clamp(16, 16384);
+                                } else {
+                                    dialog.aspect =
+                                        f64::from(dialog.width) / f64::from(dialog.height).max(1.0);
+                                }
                             }
                         }
+                        if h_resp.lost_focus() {
+                            if let Ok(h) = h_buf.trim().parse::<u32>() {
+                                dialog.height = h.clamp(16, 16384);
+                                if dialog.lock_ratio {
+                                    dialog.width =
+                                        ((f64::from(dialog.height) * dialog.aspect).round() as u32)
+                                            .clamp(16, 16384);
+                                } else {
+                                    dialog.aspect =
+                                        f64::from(dialog.width) / f64::from(dialog.height).max(1.0);
+                                }
+                            }
+                        }
+                        let lock = dialog.lock_ratio;
+                        if ui
+                            .selectable_label(lock, if lock { "🔒" } else { "🔓" })
+                            .on_hover_text("Lock aspect ratio")
+                            .clicked()
+                        {
+                            dialog.lock_ratio = !lock;
+                            dialog.aspect =
+                                f64::from(dialog.width) / f64::from(dialog.height).max(1.0);
+                        }
+                        ui.label(
+                            egui::RichText::new(aspect_ratio_label(dialog.width, dialog.height))
+                                .small()
+                                .monospace()
+                                .color(theme.text_muted),
+                        );
                     });
                     ui.end_row();
+
+                    // Frame rate: free text, plus a preset dropdown (arbitrary
+                    // values such as 29.9997 are accepted).
+                    ui.label("Frame rate");
+                    ui.horizontal(|ui| {
+                        let shown = format!("{:.4}", dialog.fps);
+                        let shown = shown.trim_end_matches('0').trim_end_matches('.');
+                        let (resp, buf) = text_field(ui, egui::Id::new("comp-fps"), shown, 72.0);
+                        if resp.lost_focus() {
+                            if let Ok(f) = buf.trim().parse::<f64>() {
+                                dialog.fps = f.clamp(1.0, 1000.0);
+                            }
+                        }
+                        ui.label(egui::RichText::new("fps").small().color(theme.text_muted));
+                        bare_dropdown(ui, "Presets", |ui| {
+                            for preset in
+                                [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0, 120.0]
+                            {
+                                if ui.button(format!("{preset}")).clicked() {
+                                    dialog.fps = preset;
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    });
+                    ui.end_row();
+
+                    // Duration as HH:MM:SS:mmm.
                     ui.label("Duration");
-                    ui.add(
-                        egui::DragValue::new(&mut dialog.duration_s)
-                            .range(0.04..=86400.0)
-                            .max_decimals(2)
-                            .suffix(" s"),
+                    let (d_resp, d_buf) = text_field(
+                        ui,
+                        egui::Id::new("comp-dur"),
+                        &fmt_duration(dialog.duration_s),
+                        110.0,
                     );
+                    if d_resp.lost_focus() {
+                        if let Some(secs) = parse_duration(&d_buf) {
+                            dialog.duration_s = secs.clamp(0.04, 86_400.0);
+                        }
+                    }
                     ui.end_row();
                 });
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Duration is HH:MM:SS:mmm.")
+                    .small()
+                    .color(self.theme.text_disabled),
+            );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
