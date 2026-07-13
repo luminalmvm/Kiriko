@@ -34,6 +34,19 @@ impl Encoder {
         fps_num: i32,
         fps_den: i32,
     ) -> Result<Self, MediaError> {
+        Self::open_with_bitrate(path, width, height, fps_num, fps_den, None)
+    }
+
+    /// As [`Self::open`], with an explicit average bitrate in bits/second
+    /// (size-targeted share exports, K-037).
+    pub fn open_with_bitrate(
+        path: &Path,
+        width: u32,
+        height: u32,
+        fps_num: i32,
+        fps_den: i32,
+        bit_rate: Option<i64>,
+    ) -> Result<Self, MediaError> {
         let cpath = CString::new(path.to_str().ok_or(MediaError::BadPath)?)
             .map_err(|_| MediaError::BadPath)?;
         let mut output = AVFormatContextOutput::create(&cpath)?;
@@ -55,6 +68,9 @@ impl Encoder {
         });
         encoder.set_pix_fmt(ffi::AV_PIX_FMT_YUV420P);
         encoder.set_gop_size(30);
+        if let Some(rate) = bit_rate {
+            encoder.set_bit_rate(rate);
+        }
         // Sensible default quality; the export dialogue's rate controls land
         // with the queue (07-UI-SPEC export settings).
         let mut opts = None;

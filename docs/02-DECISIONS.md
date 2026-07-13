@@ -159,6 +159,22 @@ author writes masking code; it composes with everything. AE needs per-effect "co
 on original"/precomp workarounds for this. Lands with the effect suite (phase 3). Added
 2026-07-13 at Mack's request. Spec: [08-EFFECTS.md](08-EFFECTS.md) §effect model.
 
+**K-036 · DECIDED · A node view is a planned lens over the evaluation graph.** Kiriko's
+layer stack already compiles to a DAG (K-015), so a Nuke-style node editor is a *view*,
+not a second engine: post-parity (phase 6 alongside the 3D ambitions), Kiriko exposes the
+graph for node-based compositing, starting where nodes earn their keep first — a
+Resolve-style grading node chain in the Colour workspace. Layers and nodes stay two lenses
+on one document; neither is a mode you convert into. Added 2026-07-13 at Mack's request.
+
+**K-037 · DECIDED · Share export: size-targeted clips for the community workflow.**
+Editors share previews (usually Discord, 50 MB free-tier cap): a one-click export mode
+takes the active playback area (work area; whole comp until it exists), computes the
+bitrate from the size budget ((target bytes × 8 ÷ duration) less audio/container
+overhead), optionally caps resolution, and writes a compressed H.264 clip. Presets:
+Discord 50 MB (default), 10 MB, custom size, plus a quality-first slider for people who
+prefer choosing compression over size. Added 2026-07-13 at Mack's request. Spec:
+export sections of [06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md)/[07-UI-SPEC.md](07-UI-SPEC.md).
+
 **K-034 · DECIDED · Perceptual colour operations happen in Oklab.** Two colour domains,
 each doing the job it is correct for: **linear RGB** remains the compositing/working space
 (light adds physically there — blending, exposure, glow are correct and stay put), while

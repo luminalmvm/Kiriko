@@ -44,18 +44,20 @@ pub struct ItemInfo {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn start(
     doc: Arc<Document>,
     comp_id: Uuid,
     items: HashMap<Uuid, ItemInfo>,
     gpu: kiriko_gpu::GpuContext,
     out_path: PathBuf,
+    bit_rate: Option<i64>,
 ) -> ExportHandle {
     let (tx, events) = channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let flag = cancel.clone();
     std::thread::spawn(move || {
-        let result = run(&doc, comp_id, &items, &gpu, &out_path, &tx, &flag);
+        let result = run(&doc, comp_id, &items, &gpu, &out_path, bit_rate, &tx, &flag);
         let _ = match result {
             Ok(()) if flag.load(Ordering::Relaxed) => {
                 let _ = std::fs::remove_file(&out_path); // no half files
@@ -71,12 +73,14 @@ pub fn start(
     ExportHandle { events, cancel }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     doc: &Document,
     comp_id: Uuid,
     items: &HashMap<Uuid, ItemInfo>,
     gpu: &kiriko_gpu::GpuContext,
     out_path: &std::path::Path,
+    bit_rate: Option<i64>,
     tx: &Sender<ExportEvent>,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
@@ -86,12 +90,13 @@ fn run(
 
     let colour = kiriko_gpu::ColourEngine::new(gpu);
     let compositor = kiriko_gpu::Compositor::new(gpu);
-    let mut encoder = kiriko_media::Encoder::open(
+    let mut encoder = kiriko_media::Encoder::open_with_bitrate(
         out_path,
         comp.width,
         comp.height,
         i32::try_from(comp.frame_rate.fps().round() as i64).unwrap_or(60),
         1,
+        bit_rate,
     )
     .map_err(|e| e.to_string())?;
 

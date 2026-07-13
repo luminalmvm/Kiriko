@@ -1416,6 +1416,14 @@ impl Shell {
                     #[cfg(feature = "media")]
                     self.start_export();
                 }
+                MenuAction::ShareExport50 => {
+                    #[cfg(feature = "media")]
+                    self.start_share_export(50.0);
+                }
+                MenuAction::ShareExport10 => {
+                    #[cfg(feature = "media")]
+                    self.start_share_export(10.0);
+                }
                 MenuAction::Undo => self.app.undo(),
                 MenuAction::Redo => self.app.redo(),
                 MenuAction::NewComposition => self.app.new_composition(),
@@ -1442,8 +1450,32 @@ impl Shell {
         }
     }
 
+    /// Size-targeted share export (K-037): bitrate from the byte budget.
+    #[cfg(feature = "media")]
+    fn start_share_export(&mut self, target_mb: f64) {
+        let Some(comp_id) = self.app.preview_comp.or(self.app.selected_comp) else {
+            self.app.error = Some("select a composition to export".into());
+            return;
+        };
+        let doc = self.app.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let duration = comp.duration.0.to_f64().max(0.1);
+        // 8% container/overhead headroom; audio joins the budget when comps
+        // gain audio. Work area replaces whole-comp when it lands.
+        let bits = target_mb * 1_000_000.0 * 8.0 * 0.92;
+        let bit_rate = (bits / duration) as i64;
+        self.start_export_with(Some(bit_rate), &format!("share-{}mb.mp4", target_mb as u64));
+    }
+
     #[cfg(feature = "media")]
     fn start_export(&mut self) {
+        self.start_export_with(None, "export.mp4");
+    }
+
+    #[cfg(feature = "media")]
+    fn start_export_with(&mut self, bit_rate: Option<i64>, default_name: &str) {
         if self.export.is_some() {
             return;
         }
@@ -1457,7 +1489,7 @@ impl Shell {
         };
         let picked = rfd::FileDialog::new()
             .add_filter("MP4 video", &["mp4"])
-            .set_file_name("export.mp4")
+            .set_file_name(default_name)
             .save_file();
         let Some(path) = picked else { return };
         let doc = self.app.store.snapshot();
@@ -1468,6 +1500,7 @@ impl Shell {
             items,
             gpu.export_context(),
             path,
+            bit_rate,
         ));
         self.export_progress = Some((0, 0));
     }
@@ -1799,6 +1832,17 @@ impl Shell {
                         self.start_export();
                         ui.close_menu();
                     }
+                    #[cfg(feature = "media")]
+                    ui.menu_button("Export for sharing", |ui| {
+                        if ui.button("Discord 50 MB").clicked() {
+                            self.start_share_export(50.0);
+                            ui.close_menu();
+                        }
+                        if ui.button("Small 10 MB").clicked() {
+                            self.start_share_export(10.0);
+                            ui.close_menu();
+                        }
+                    });
                 });
                 ui.menu_button("Edit", |ui| {
                     if ui
