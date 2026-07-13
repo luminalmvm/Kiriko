@@ -14,6 +14,8 @@ use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+pub mod mix;
+
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
     #[error("no audio output device")]

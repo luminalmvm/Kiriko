@@ -3472,9 +3472,12 @@ impl Shell {
         #[cfg(feature = "media")]
         {
             self.app.poll_audio();
+            self.app.poll_comp_audio();
             // Transport keys (07-UI-SPEC keymap; shuttle speeds arrive with
             // the ring buffer — J/left step back, L plays, K/Space pause).
-            if self.app.preview_item.is_some() && !ctx.wants_keyboard_input() {
+            if (self.app.preview_item.is_some() || self.app.preview_comp.is_some())
+                && !ctx.wants_keyboard_input()
+            {
                 let (space, k, l, left, right, j, home) = ctx.input(|i| {
                     (
                         i.key_pressed(egui::Key::Space),

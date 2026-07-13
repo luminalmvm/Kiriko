@@ -177,6 +177,15 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   played *is* the playback clock: video asks "what time is it?" every frame and shows
   whatever frame matches. One clock, owned by the audio hardware — that's why picture and
   sound can't drift apart, and it's the same design the full engine keeps forever.
+- **Composition audio and playback** (`kiriko-audio::mix`) — pressing Space on a comp now
+  plays it. A comp can have many layers that make sound, each starting at its own moment;
+  to play it, Kiriko decodes each one and lays them on a single strip at the right offset
+  and trim, then adds them together (a mixing desk summing channels — `mix_stereo`). That
+  one mixed track goes to the sound card, and its clock drives the picture, so a comp's
+  video and audio stay locked exactly like a single clip's. The mixing happens on a
+  background thread so pressing Space never stalls; a silent comp just plays on a plain
+  timer instead. This retires the old stopgap where comp playback guessed the time from a
+  wall clock.
 - The **graph editor** (tabbed with the Timeline) — click a layer, and its animated
   properties draw as live curves: drag the square keyframes (value and time together, one
   undo per drag), double-click the background to add a key, right-click to remove one.

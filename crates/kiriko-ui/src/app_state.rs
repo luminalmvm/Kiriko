@@ -553,6 +553,14 @@ pub struct AppState {
     audio_rx: std::sync::mpsc::Receiver<(Uuid, Result<kiriko_media::AudioBuffer, String>)>,
     #[cfg(feature = "media")]
     audio_tx: std::sync::mpsc::Sender<(Uuid, Result<kiriko_media::AudioBuffer, String>)>,
+    /// The comp whose mixed audio is loaded in the engine (drives its clock).
+    #[cfg(feature = "media")]
+    audio_loaded_comp: Option<Uuid>,
+    /// Background-mixed comp audio arriving from the prepare thread.
+    #[cfg(feature = "media")]
+    comp_audio_rx: std::sync::mpsc::Receiver<(Uuid, kiriko_media::AudioBuffer)>,
+    #[cfg(feature = "media")]
+    comp_audio_tx: std::sync::mpsc::Sender<(Uuid, kiriko_media::AudioBuffer)>,
     /// In-flight property drag (layer, property, provisional value): commits
     /// once on release so a drag is ONE undo step, not hundreds.
     pub prop_edit: Option<(Uuid, kiriko_core::model::TransformProp, f64)>,
@@ -628,6 +636,8 @@ impl Default for AppState {
         let journal = JournalFile::for_document(doc.id);
         #[cfg(feature = "media")]
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        #[cfg(feature = "media")]
+        let (comp_audio_tx, comp_audio_rx) = std::sync::mpsc::channel();
         Self {
             store: DocumentStore::new(doc),
             path: None,
@@ -646,6 +656,12 @@ impl Default for AppState {
             audio_cache: std::collections::HashMap::new(),
             #[cfg(feature = "media")]
             audio_loaded: None,
+            #[cfg(feature = "media")]
+            audio_loaded_comp: None,
+            #[cfg(feature = "media")]
+            comp_audio_rx,
+            #[cfg(feature = "media")]
+            comp_audio_tx,
             #[cfg(feature = "media")]
             audio_rx,
             #[cfg(feature = "media")]
@@ -1943,17 +1959,135 @@ impl AppState {
         }
     }
 
+    /// Kick off background decode + mix of a comp's audio layers into one
+    /// buffer (Hibiki mix): the layers' sound laid on the comp timeline at
+    /// their offsets and trims. The result arrives via [`Self::poll_comp_audio`].
+    /// A comp with no audio layers prepares nothing (it plays on the fallback
+    /// wall clock).
+    #[cfg(feature = "media")]
+    pub fn prepare_comp_audio(&mut self, comp_id: Uuid) {
+        use kiriko_core::model::LayerKind;
+        let doc = self.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let rate = self
+            .ensure_audio_engine()
+            .map(|e| e.device_rate())
+            .unwrap_or(48_000);
+        // (path, in_s, out_s, offset_s) for every footage layer that has audio.
+        let mut jobs: Vec<(PathBuf, f64, f64, f64)> = Vec::new();
+        for layer in &comp.layers {
+            if !layer.switches.audible {
+                continue;
+            }
+            let LayerKind::Footage { item } = &layer.kind else {
+                continue;
+            };
+            let has_audio = matches!(
+                self.media.map.get(item),
+                Some(media::MediaStatus::Ready { probe, .. }) if probe.audio.is_some()
+            );
+            if !has_audio {
+                continue;
+            }
+            let Some(ProjectItem::Footage(f)) = doc.item(*item) else {
+                continue;
+            };
+            jobs.push((
+                PathBuf::from(&f.media.absolute_path),
+                layer.in_point.0.to_f64(),
+                layer.out_point.0.to_f64(),
+                layer.start_offset.0.to_f64(),
+            ));
+        }
+        if jobs.is_empty() {
+            return; // silent comp: wall-clock fallback drives playback
+        }
+        let duration_s = comp.duration.0.to_f64();
+        let tx = self.comp_audio_tx.clone();
+        std::thread::spawn(move || {
+            // Decode every layer's audio (resampled to the device rate), then
+            // lay each on the strip and sum.
+            let decoded: Vec<(kiriko_media::AudioBuffer, f64, f64, f64)> = jobs
+                .into_iter()
+                .filter_map(|(path, in_s, out_s, off_s)| {
+                    kiriko_media::audio::decode_all(&path, rate)
+                        .ok()
+                        .map(|buf| (buf, in_s, out_s, off_s))
+                })
+                .collect();
+            let total_frames = (duration_s * f64::from(rate)).round().max(0.0) as usize;
+            let placements: Vec<kiriko_audio::mix::PlacedAudio> = decoded
+                .iter()
+                .filter_map(|(buf, in_s, out_s, off_s)| {
+                    let (start_frame, src_start, len) = kiriko_audio::mix::place_on_timeline(
+                        *in_s,
+                        *out_s,
+                        *off_s,
+                        buf.samples.len() / 2,
+                        rate,
+                    )?;
+                    Some(kiriko_audio::mix::PlacedAudio {
+                        start_frame,
+                        samples: &buf.samples[src_start * 2..(src_start + len) * 2],
+                        gain: 1.0,
+                    })
+                })
+                .collect();
+            let samples = kiriko_audio::mix::mix_stereo(&placements, total_frames);
+            let _ = tx.send((comp_id, kiriko_media::AudioBuffer { rate, samples }));
+        });
+    }
+
+    /// Drain any finished comp-audio mix; load it into the engine and, if the
+    /// comp is playing, start its clock at the current playhead.
+    #[cfg(feature = "media")]
+    pub fn poll_comp_audio(&mut self) {
+        let mut newest = None;
+        while let Ok(msg) = self.comp_audio_rx.try_recv() {
+            newest = Some(msg);
+        }
+        let Some((comp_id, buffer)) = newest else {
+            return;
+        };
+        if self.preview_comp != Some(comp_id) {
+            return; // the user moved on before the mix finished
+        }
+        let doc = self.store.snapshot();
+        let Some(fps) = doc.comp(comp_id).map(|c| c.frame_rate.fps().max(1.0)) else {
+            return;
+        };
+        if self.ensure_audio_engine().is_none() {
+            return;
+        }
+        let playing = self.comp_playback.is_some();
+        let start_s = self.preview_frame as f64 / fps;
+        if let Some(engine) = &self.audio_engine {
+            engine.load(std::sync::Arc::new(buffer));
+            engine.seek_seconds(start_s);
+            if playing {
+                engine.play();
+            }
+        }
+        self.audio_loaded_comp = Some(comp_id);
+        self.audio_loaded = None; // the footage buffer is no longer loaded
+    }
+
     #[cfg(feature = "media")]
     pub fn is_playing(&self) -> bool {
         self.comp_playback.is_some() || self.audio_engine.as_ref().is_some_and(|e| e.is_playing())
     }
 
-    /// Advance v0 comp playback; returns true while playing (UI keeps repainting).
+    /// Advance comp playback; returns true while playing (UI keeps repainting).
+    /// Audio-clock-driven when this comp's mixed audio is loaded and running
+    /// (the audio card's sample count is the one clock — docs/impl §4), else a
+    /// wall-clock fallback so silent comps and the pre-mix moment still play.
     #[cfg(feature = "media")]
     pub fn comp_playback_tick(&mut self) -> bool {
-        let Some((started, start_frame)) = self.comp_playback else {
+        if self.comp_playback.is_none() {
             return false;
-        };
+        }
         let Some(comp_id) = self.preview_comp else {
             self.comp_playback = None;
             return false;
@@ -1964,11 +2098,36 @@ impl AppState {
             return false;
         };
         let (wa_start, wa_end) = self.work_area_frames(comp);
-        let fps = comp.frame_rate.fps();
-        let frame = start_frame + (started.elapsed().as_secs_f64() * fps) as usize;
+        let fps = comp.frame_rate.fps().max(1.0);
+
+        let clock_driven = self.audio_loaded_comp == Some(comp_id)
+            && self.audio_engine.as_ref().is_some_and(|e| e.is_playing());
+        // The audio clock IS comp time (mix sample 0 = comp time 0).
+        let frame = if clock_driven {
+            let t = self
+                .audio_engine
+                .as_ref()
+                .map(|e| e.clock_seconds())
+                .unwrap_or(0.0);
+            (t * fps).round().max(0.0) as usize
+        } else if let Some((started, start_frame)) = self.comp_playback {
+            start_frame + (started.elapsed().as_secs_f64() * fps) as usize
+        } else {
+            return false;
+        };
+
         if frame >= wa_end {
             // Loop the work area (07-UI-SPEC transport: loop work area default).
-            self.comp_playback = Some((Instant::now(), wa_start));
+            // Re-seek AND re-play the mix so a loop that reached the buffer's
+            // end (which pauses the stream) restarts cleanly.
+            if self.audio_loaded_comp == Some(comp_id) {
+                if let Some(engine) = &self.audio_engine {
+                    engine.seek_seconds(wa_start as f64 / fps);
+                    engine.play();
+                }
+            } else {
+                self.comp_playback = Some((Instant::now(), wa_start));
+            }
             self.preview_frame = wa_start;
             self.refresh_preview();
             return true;
@@ -1985,19 +2144,43 @@ impl AppState {
         self.audio_engine.as_ref().map(|e| e.clock_seconds())
     }
 
-    /// Space: play/pause the previewed footage from the current frame.
+    /// Space: play/pause. Plays the open composition (audio-synced, mixing its
+    /// audio layers) or the previewed footage, from the current frame.
     #[cfg(feature = "media")]
     pub fn toggle_play(&mut self) {
-        let Some(id) = self.preview_item else { return };
-        let Some(fps) = self.preview_fps() else {
-            return;
-        };
+        // Any second press pauses.
         if self.is_playing() {
             if let Some(engine) = &self.audio_engine {
                 engine.pause();
             }
+            self.comp_playback = None;
             return;
         }
+
+        // Composition playback.
+        if let Some(comp_id) = self.preview_comp {
+            let doc = self.store.snapshot();
+            let Some(fps) = doc.comp(comp_id).map(|c| c.frame_rate.fps().max(1.0)) else {
+                return;
+            };
+            // Start on the wall clock immediately; audio joins when mixed.
+            self.comp_playback = Some((Instant::now(), self.preview_frame));
+            if self.audio_loaded_comp == Some(comp_id) {
+                if let Some(engine) = &self.audio_engine {
+                    engine.seek_seconds(self.preview_frame as f64 / fps);
+                    engine.play();
+                }
+            } else {
+                self.prepare_comp_audio(comp_id);
+            }
+            return;
+        }
+
+        // Footage playback.
+        let Some(id) = self.preview_item else { return };
+        let Some(fps) = self.preview_fps() else {
+            return;
+        };
         let Some(buffer) = self.audio_cache.get(&id).cloned() else {
             self.request_preview_audio(); // will be ready on a later press
             return;
@@ -2009,6 +2192,7 @@ impl AppState {
         let needs_load = self.audio_loaded != Some(id);
         if needs_load {
             self.audio_loaded = Some(id);
+            self.audio_loaded_comp = None; // a footage buffer is loaded now
         }
         if let Some(engine) = &self.audio_engine {
             if needs_load {
