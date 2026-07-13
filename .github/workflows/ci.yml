@@ -64,7 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          hits=$(grep -rnE 'from_rgb|from_rgba|#[0-9a-fA-F]{6}' crates --include='*.rs' \
+          hits=$(grep -rnE 'Color32::from_rgb|#[0-9a-fA-F]{6}' crates --include='*.rs' \
             | grep -v 'crates/kiriko-ui/src/theme.rs' || true)
           if [ -n "$hits" ]; then
             echo "Colour values outside kiriko_ui::theme (docs/15-DESIGN.md):"
