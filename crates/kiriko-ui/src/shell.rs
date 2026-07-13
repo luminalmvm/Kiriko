@@ -649,8 +649,42 @@ impl Shell {
         #[cfg(feature = "media")]
         {
             self.app.poll_audio();
-            if self.app.preview_item.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-                self.app.toggle_play();
+            // Transport keys (07-UI-SPEC keymap; shuttle speeds arrive with
+            // the ring buffer — J/left step back, L plays, K/Space pause).
+            if self.app.preview_item.is_some() && !ctx.wants_keyboard_input() {
+                let (space, k, l, left, right, j, home) = ctx.input(|i| {
+                    (
+                        i.key_pressed(egui::Key::Space),
+                        i.key_pressed(egui::Key::K),
+                        i.key_pressed(egui::Key::L),
+                        i.key_pressed(egui::Key::ArrowLeft),
+                        i.key_pressed(egui::Key::ArrowRight),
+                        i.key_pressed(egui::Key::J),
+                        i.key_pressed(egui::Key::Home),
+                    )
+                });
+                if space {
+                    self.app.toggle_play();
+                }
+                if k && self.app.is_playing() {
+                    self.app.toggle_play();
+                }
+                if l && !self.app.is_playing() {
+                    self.app.toggle_play();
+                }
+                let step: i64 = i64::from(right) - i64::from(left || j);
+                if step != 0 || home {
+                    if self.app.is_playing() {
+                        self.app.toggle_play(); // stepping implies pause
+                    }
+                    let frame = if home {
+                        0
+                    } else {
+                        self.app.preview_frame.saturating_add_signed(step as isize)
+                    };
+                    self.app.preview_frame = frame;
+                    self.app.refresh_preview();
+                }
             }
             if self.app.is_playing() {
                 if let (Some(clock), Some(fps)) =
