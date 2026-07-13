@@ -407,7 +407,17 @@ pub struct AppState {
     pub preview_item: Option<Uuid>,
     pub preview_frame: usize,
     /// Preview resolution divisor: 1 = Full, 2 = Half, 3 = Third, 4 = Quarter.
+    /// Ignored while `preview_auto_res` is on.
     pub preview_divisor: u32,
+    /// Auto resolution (K-030 family): decode at the size actually displayed,
+    /// capped at 100% — zooming past 1:1 never upsamples the decode.
+    pub preview_auto_res: bool,
+    /// View zoom (1.0 = fit) and pan, in screen pixels. View controls only —
+    /// never part of any render (07-UI-SPEC: Viewer).
+    pub view_zoom: f32,
+    pub view_pan: egui::Vec2,
+    /// Screen pixels per native image pixel at last paint (Auto res input).
+    pub last_display_scale: f32,
     last_autosave: Instant,
     comp_counter: usize,
 }
@@ -450,6 +460,10 @@ impl Default for AppState {
             preview_item: None,
             preview_frame: 0,
             preview_divisor: 1,
+            preview_auto_res: false,
+            view_zoom: 1.0,
+            view_pan: egui::Vec2::ZERO,
+            last_display_scale: 1.0,
             last_autosave: Instant::now(),
             comp_counter: 0,
         }
@@ -844,7 +858,7 @@ impl AppState {
             let lt = t - layer.start_offset.0.to_f64();
             let source_frame =
                 ((lt * video.fps()).round().max(0.0) as usize).min(src_frames.saturating_sub(1));
-            let target = (self.preview_divisor > 1).then(|| video.width / self.preview_divisor);
+            let target = self.target_width_for(video.width);
             jobs.push(preview::CompJob {
                 layer: layer.id,
                 item: *item,
@@ -855,6 +869,19 @@ impl AppState {
         }
         self.preview_engine
             .request_comp(comp_id, self.preview_frame, jobs);
+    }
+
+    /// Decode target width for a source of `natural_w` px under the current
+    /// resolution mode. Auto: displayed size, capped at 100% (never above
+    /// native, however far the view is zoomed in).
+    pub fn target_width_for(&self, natural_w: u32) -> Option<u32> {
+        if self.preview_auto_res {
+            let scale = self.last_display_scale.clamp(0.05, 1.0);
+            let w = (natural_w as f32 * scale).round() as u32;
+            (w < natural_w).then_some(w.max(16))
+        } else {
+            (self.preview_divisor > 1).then(|| natural_w / self.preview_divisor)
+        }
     }
 
     /// Re-request the current preview frame (selection/scrub/resolution change).
@@ -879,7 +906,7 @@ impl AppState {
             return;
         }
         self.preview_frame = self.preview_frame.min(frames - 1);
-        let target = (self.preview_divisor > 1).then(|| width / self.preview_divisor);
+        let target = self.target_width_for(width);
         self.preview_engine.request(
             id,
             PathBuf::from(&f.media.absolute_path),

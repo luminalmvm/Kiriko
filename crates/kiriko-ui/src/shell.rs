@@ -750,10 +750,63 @@ fn viewer_footage(
 
     if let Some((id, size)) = tex {
         if size.x > 0.0 && size.y > 0.0 {
-            let scale = (image_area.width() / size.x)
-                .min(image_area.height() / size.y)
+            // Natural size drives layout: dropping decode resolution keeps the
+            // image the same size on screen, just softer (07-UI-SPEC §Viewer).
+            let natural = if let Some(comp_id) = app.preview_comp {
+                app.store
+                    .snapshot()
+                    .comp(comp_id)
+                    .map(|c| egui::vec2(c.width as f32, c.height as f32))
+                    .unwrap_or(size)
+            } else if let Some(item) = app.preview_item {
+                match app.media.map.get(&item) {
+                    Some(MediaStatus::Ready { probe, .. }) => probe
+                        .video
+                        .as_ref()
+                        .map(|v| egui::vec2(v.width as f32, v.height as f32))
+                        .unwrap_or(size),
+                    _ => size,
+                }
+            } else {
+                size
+            };
+
+            // View controls: scroll zooms, drag pans (the hand — object tools
+            // arrive later), double-click resets to fit. View-only: never part
+            // of any render.
+            let view = ui.interact(
+                image_area,
+                ui.id().with("viewer-view"),
+                egui::Sense::click_and_drag(),
+            );
+            if view.hovered() {
+                let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
+                if scroll.abs() > 0.1 {
+                    let factor = (scroll * 0.003).exp();
+                    app.view_zoom = (app.view_zoom * factor).clamp(0.05, 32.0);
+                    if app.preview_auto_res {
+                        app.refresh_preview();
+                    }
+                }
+            }
+            if view.dragged() {
+                app.view_pan += view.drag_delta();
+            }
+            if view.double_clicked() {
+                app.view_zoom = 1.0;
+                app.view_pan = egui::Vec2::ZERO;
+                if app.preview_auto_res {
+                    app.refresh_preview();
+                }
+            }
+
+            let fit = (image_area.width() / natural.x)
+                .min(image_area.height() / natural.y)
                 .min(1.0);
-            let draw = egui::Rect::from_center_size(image_area.center(), size * scale);
+            let scale = fit * app.view_zoom;
+            app.last_display_scale = scale;
+            let draw =
+                egui::Rect::from_center_size(image_area.center() + app.view_pan, natural * scale);
             ui.painter().image(
                 id,
                 draw,
@@ -785,22 +838,39 @@ fn viewer_footage(
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let labels = ["Full", "Half", "Third", "Quarter"];
-                    let current = labels[(app.preview_divisor as usize - 1).min(3)];
+                    let current = if app.preview_auto_res {
+                        "Auto"
+                    } else {
+                        labels[(app.preview_divisor as usize - 1).min(3)]
+                    };
                     egui::ComboBox::from_id_salt("preview-res")
                         .selected_text(current)
                         .width(72.0)
                         .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(app.preview_auto_res, "Auto")
+                                .on_hover_text("Decode at the displayed size, capped at 100%")
+                                .clicked()
+                            {
+                                app.preview_auto_res = true;
+                                app.refresh_preview();
+                            }
                             for (i, label) in labels.iter().enumerate() {
                                 let div = i as u32 + 1;
-                                if ui
-                                    .selectable_label(app.preview_divisor == div, *label)
-                                    .clicked()
-                                {
+                                let selected = !app.preview_auto_res && app.preview_divisor == div;
+                                if ui.selectable_label(selected, *label).clicked() {
+                                    app.preview_auto_res = false;
                                     app.preview_divisor = div;
                                     app.refresh_preview();
                                 }
                             }
                         });
+                    ui.label(
+                        egui::RichText::new(format!("{:.0}%", app.last_display_scale * 100.0))
+                            .monospace()
+                            .small()
+                            .color(theme.text_muted),
+                    );
                     if frames > 1 {
                         let mut frame = app.preview_frame;
                         let slider = egui::Slider::new(&mut frame, 0..=frames - 1)
@@ -1070,6 +1140,7 @@ fn graph_editor_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     }
 }
 
+#[cfg(feature = "media")]
 fn blend_of(b: kiriko_core::model::BlendMode) -> kiriko_gpu::Blend {
     match b {
         kiriko_core::model::BlendMode::Normal => kiriko_gpu::Blend::Normal,
