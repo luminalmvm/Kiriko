@@ -99,7 +99,7 @@ fn viewer_panel(
     ui.painter().rect_filled(rect, 0.0, theme.viewer_surround);
 
     #[cfg(feature = "media")]
-    if app.preview_item.is_some() {
+    if app.preview_item.is_some() || app.preview_comp.is_some() {
         viewer_footage(ui, theme, app, tex, rect);
         return;
     }
@@ -225,7 +225,14 @@ fn project_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
         );
         if row.clicked() {
             match item {
-                ProjectItem::Composition(_) => select = Some(item.id()),
+                ProjectItem::Composition(_) => {
+                    select = Some(item.id());
+                    app.preview_comp = Some(item.id());
+                    app.preview_item = None;
+                    app.preview_frame = 0;
+                    #[cfg(feature = "media")]
+                    app.refresh_preview();
+                }
                 ProjectItem::Footage(_) => {
                     app.preview_item = Some(item.id());
                     app.preview_frame = 0;
@@ -430,10 +437,19 @@ fn viewer_footage(
     rect: egui::Rect,
 ) {
     use crate::app_state::media::MediaStatus;
-    let Some(id) = app.preview_item else { return };
-    let frames = match app.media.map.get(&id) {
-        Some(MediaStatus::Ready { frames, .. }) => *frames,
-        _ => 0,
+    let frames = if let Some(comp_id) = app.preview_comp {
+        app.store
+            .snapshot()
+            .comp(comp_id)
+            .map(|c| app.comp_frame_count(c))
+            .unwrap_or(0)
+    } else if let Some(id) = app.preview_item {
+        match app.media.map.get(&id) {
+            Some(MediaStatus::Ready { frames, .. }) => *frames,
+            _ => 0,
+        }
+    } else {
+        return;
     };
 
     let bar_h = 30.0;
@@ -546,6 +562,22 @@ fn empty_hint(ui: &mut egui::Ui, theme: &Theme, title: &str, hint: &str) {
     });
 }
 
+/// One decoded layer ready to composite (evaluator v0).
+#[cfg(feature = "media")]
+pub struct CompLayerDraw {
+    pub rgba: Vec<u8>,
+    pub tex_w: u32,
+    pub tex_h: u32,
+    /// The layer's natural pixel size — transforms act in comp pixels even
+    /// when the texture was decoded at a reduced preview resolution.
+    pub natural_size: (f32, f32),
+    pub position: (f32, f32),
+    pub anchor: (f32, f32),
+    pub scale: (f32, f32),
+    pub rotation_deg: f32,
+    pub opacity: f32,
+}
+
 /// GPU display path (slice 5 completion): decoded sRGB bytes → linear fp16
 /// working texture → display texture registered with egui. Falls back to the
 /// CPU/egui-texture path when no wgpu render state exists.
@@ -553,6 +585,7 @@ fn empty_hint(ui: &mut egui::Ui, theme: &Theme, title: &str, hint: &str) {
 pub struct GpuViewer {
     ctx: kiriko_gpu::GpuContext,
     engine: kiriko_gpu::ColourEngine,
+    compositor: kiriko_gpu::Compositor,
     render_state: egui_wgpu::RenderState,
     /// Keep the display texture alive while egui samples it.
     current: Option<(egui_wgpu::wgpu::Texture, egui::TextureId)>,
@@ -566,12 +599,61 @@ impl GpuViewer {
             render_state.queue.clone(),
         );
         let engine = kiriko_gpu::ColourEngine::new(&ctx);
+        let compositor = kiriko_gpu::Compositor::new(&ctx);
         Self {
             ctx,
             engine,
+            compositor,
             render_state,
             current: None,
         }
+    }
+
+    /// Composite a comp frame (evaluator v0) and register it for painting.
+    /// `layers` is bottom-up draw order.
+    fn present_comp(
+        &mut self,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        layers: &[CompLayerDraw],
+    ) -> (egui::TextureId, egui::Vec2) {
+        let linear_textures: Vec<egui_wgpu::wgpu::Texture> = layers
+            .iter()
+            .map(|l| {
+                let src = self
+                    .engine
+                    .upload_srgb8(&self.ctx, &l.rgba, l.tex_w, l.tex_h);
+                self.engine.linearise(&self.ctx, &src)
+            })
+            .collect();
+        let comp_layers: Vec<kiriko_gpu::CompositeLayer> = linear_textures
+            .iter()
+            .zip(layers)
+            .map(|(texture, l)| kiriko_gpu::CompositeLayer {
+                texture,
+                size: l.natural_size,
+                position: l.position,
+                anchor: l.anchor,
+                scale: l.scale,
+                rotation_deg: l.rotation_deg,
+                opacity: l.opacity,
+            })
+            .collect();
+        let linear = self
+            .compositor
+            .composite(&self.ctx, width, height, background, &comp_layers);
+        let shown = self.engine.display(&self.ctx, &linear);
+        let view = shown.create_view(&Default::default());
+        let id = self.render_state.renderer.write().register_native_texture(
+            &self.ctx.device,
+            &view,
+            egui_wgpu::wgpu::FilterMode::Linear,
+        );
+        if let Some((_, old)) = self.current.replace((shown, id)) {
+            self.render_state.renderer.write().free_texture(&old);
+        }
+        (id, egui::vec2(width as f32, height as f32))
     }
 
     /// Upload a decoded frame through the colour pipeline; returns the egui
@@ -614,6 +696,8 @@ pub struct Shell {
     #[cfg(feature = "media")]
     #[serde(skip, default)]
     gpu: Option<GpuViewer>,
+    #[serde(skip, default)]
+    last_doc_ptr: usize,
     /// Native macOS menu bar; None on other platforms (07-UI-SPEC).
     #[cfg(target_os = "macos")]
     #[serde(skip, default)]
@@ -631,6 +715,7 @@ impl Default for Shell {
             preview_display: None,
             #[cfg(feature = "media")]
             gpu: None,
+            last_doc_ptr: 0,
             #[cfg(target_os = "macos")]
             native_menu: None,
         }
@@ -844,7 +929,9 @@ impl Shell {
             if self.app.media.any_probing() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(150));
             }
-            if self.app.preview_item.is_some() && self.preview_display.is_none() {
+            if (self.app.preview_item.is_some() || self.app.preview_comp.is_some())
+                && self.preview_display.is_none()
+            {
                 // Selection made before probe finished: retry until Ready.
                 self.app.refresh_preview();
             }
@@ -852,8 +939,80 @@ impl Shell {
             while let Ok(result) = self.app.preview_engine.results.try_recv() {
                 newest = Some(result);
             }
+            use crate::app_state::preview::PreviewResult;
             match newest {
-                Some(Ok(px)) if Some(px.item) == self.app.preview_item => {
+                Some(Ok(PreviewResult::Comp(cf))) if Some(cf.comp) == self.app.preview_comp => {
+                    if let Some(gpu) = &mut self.gpu {
+                        let doc = self.app.store.snapshot();
+                        if let Some(comp) = doc.comp(cf.comp) {
+                            let t_comp = cf.frame as f64 / comp.frame_rate.fps().max(1.0);
+                            // Bottom-up: document order is top-first.
+                            let mut draws: Vec<CompLayerDraw> = Vec::new();
+                            for lp in cf.layers.iter().rev() {
+                                let Some(layer) = comp.layers.iter().find(|l| l.id == lp.layer)
+                                else {
+                                    continue;
+                                };
+                                let lt = t_comp - layer.start_offset.0.to_f64();
+                                let tr = &layer.transform;
+                                let natural = self
+                                    .app
+                                    .media
+                                    .map
+                                    .get(match &layer.kind {
+                                        kiriko_core::model::LayerKind::Footage { item } => item,
+                                    })
+                                    .and_then(|s| match s {
+                                        crate::app_state::media::MediaStatus::Ready {
+                                            probe,
+                                            ..
+                                        } => probe
+                                            .video
+                                            .as_ref()
+                                            .map(|v| (v.width as f32, v.height as f32)),
+                                        _ => None,
+                                    })
+                                    .unwrap_or((lp.width as f32, lp.height as f32));
+                                draws.push(CompLayerDraw {
+                                    rgba: lp.rgba.clone(),
+                                    tex_w: lp.width,
+                                    tex_h: lp.height,
+                                    natural_size: natural,
+                                    position: (
+                                        tr.position_x.value_at(lt) as f32,
+                                        tr.position_y.value_at(lt) as f32,
+                                    ),
+                                    anchor: (
+                                        tr.anchor_x.value_at(lt) as f32,
+                                        tr.anchor_y.value_at(lt) as f32,
+                                    ),
+                                    scale: (
+                                        tr.scale_x.value_at(lt) as f32,
+                                        tr.scale_y.value_at(lt) as f32,
+                                    ),
+                                    rotation_deg: tr.rotation.value_at(lt) as f32,
+                                    opacity: tr.opacity.value_at(lt) as f32,
+                                });
+                            }
+                            let bg = comp.background.0;
+                            self.preview_display = Some(gpu.present_comp(
+                                comp.width,
+                                comp.height,
+                                [
+                                    f64::from(bg[0]),
+                                    f64::from(bg[1]),
+                                    f64::from(bg[2]),
+                                    f64::from(bg[3]),
+                                ],
+                                &draws,
+                            ));
+                        }
+                    }
+                }
+                Some(Ok(PreviewResult::Footage(px)))
+                    if Some(px.item) == self.app.preview_item
+                        && self.app.preview_comp.is_none() =>
+                {
                     if let Some(gpu) = &mut self.gpu {
                         self.preview_display = Some(gpu.present(&px.rgba, px.width, px.height));
                     } else {
@@ -869,6 +1028,14 @@ impl Shell {
                 }
                 Some(Err(e)) => self.app.error = Some(format!("preview: {e}")),
                 _ => {}
+            }
+            // Edits (commits/undo) re-render the comp preview automatically.
+            let doc_ptr = std::sync::Arc::as_ptr(&self.app.store.snapshot()) as usize;
+            if self.app.preview_comp.is_some() && self.last_doc_ptr != doc_ptr {
+                self.last_doc_ptr = doc_ptr;
+                self.app.refresh_preview();
+            } else {
+                self.last_doc_ptr = doc_ptr;
             }
         }
         #[cfg(target_os = "macos")]

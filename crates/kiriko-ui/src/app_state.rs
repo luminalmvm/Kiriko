@@ -43,15 +43,53 @@ pub mod preview {
         target_width: Option<u32>,
     }
 
+    /// One layer's decode job inside a comp render request.
+    pub struct CompJob {
+        pub layer: Uuid,
+        pub item: Uuid,
+        pub path: PathBuf,
+        pub source_frame: usize,
+        pub target_width: Option<u32>,
+    }
+
+    pub struct CompLayerPixels {
+        pub layer: Uuid,
+        pub width: u32,
+        pub height: u32,
+        pub rgba: Vec<u8>,
+    }
+
+    pub struct CompFrame {
+        pub comp: Uuid,
+        pub frame: usize,
+        /// Top-of-stack first (document order); the renderer draws bottom-up.
+        pub layers: Vec<CompLayerPixels>,
+    }
+
+    pub enum PreviewResult {
+        Footage(FramePixels),
+        Comp(CompFrame),
+    }
+
     pub struct PreviewEngine {
-        tx: Sender<Request>,
-        pub results: Receiver<Result<FramePixels, String>>,
+        tx: Sender<Message>,
+        pub results: Receiver<Result<PreviewResult, String>>,
         generation: Arc<AtomicU64>,
+    }
+
+    enum Message {
+        Footage(Request),
+        Comp {
+            generation: u64,
+            comp: Uuid,
+            frame: usize,
+            jobs: Vec<CompJob>,
+        },
     }
 
     impl Default for PreviewEngine {
         fn default() -> Self {
-            let (tx, rx) = channel::<Request>();
+            let (tx, rx) = channel::<Message>();
             let (result_tx, results) = channel();
             let generation = Arc::new(AtomicU64::new(0));
             let live = generation.clone();
@@ -70,10 +108,23 @@ pub mod preview {
                             Err(TryRecvError::Disconnected) => return,
                         }
                     }
-                    if req.generation != live.load(Ordering::Relaxed) {
+                    let generation = match &req {
+                        Message::Footage(r) => r.generation,
+                        Message::Comp { generation, .. } => *generation,
+                    };
+                    if generation != live.load(Ordering::Relaxed) {
                         continue; // superseded while queued
                     }
-                    let result = decode(&mut decoders, &req);
+                    let result = match req {
+                        Message::Footage(r) => {
+                            decode(&mut decoders, &r).map(PreviewResult::Footage)
+                        }
+                        Message::Comp {
+                            comp, frame, jobs, ..
+                        } => {
+                            decode_comp(&mut decoders, comp, frame, &jobs).map(PreviewResult::Comp)
+                        }
+                    };
                     let _ = result_tx.send(result);
                 }
             });
@@ -116,14 +167,55 @@ pub mod preview {
         /// Ask for a frame; any not-yet-decoded older request is abandoned.
         pub fn request(&self, item: Uuid, path: PathBuf, frame: usize, target_width: Option<u32>) {
             let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-            let _ = self.tx.send(Request {
+            let _ = self.tx.send(Message::Footage(Request {
                 generation,
                 item,
                 path,
                 frame,
                 target_width,
+            }));
+        }
+
+        /// Ask for every layer frame of a comp at one comp frame (latest wins).
+        pub fn request_comp(&self, comp: Uuid, frame: usize, jobs: Vec<CompJob>) {
+            let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+            let _ = self.tx.send(Message::Comp {
+                generation,
+                comp,
+                frame,
+                jobs,
             });
         }
+    }
+
+    fn decode_comp(
+        decoders: &mut HashMap<Uuid, kiriko_media::VideoDecoder>,
+        comp: Uuid,
+        frame: usize,
+        jobs: &[CompJob],
+    ) -> Result<CompFrame, String> {
+        let mut layers = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let req = Request {
+                generation: 0,
+                item: job.item,
+                path: job.path.clone(),
+                frame: job.source_frame,
+                target_width: job.target_width,
+            };
+            let px = decode(decoders, &req)?;
+            layers.push(CompLayerPixels {
+                layer: job.layer,
+                width: px.width,
+                height: px.height,
+                rgba: px.rgba,
+            });
+        }
+        Ok(CompFrame {
+            comp,
+            frame,
+            layers,
+        })
     }
 }
 
@@ -261,6 +353,8 @@ pub struct AppState {
     /// In-flight property drag (layer, property, provisional value): commits
     /// once on release so a drag is ONE undo step, not hundreds.
     pub prop_edit: Option<(Uuid, kiriko_core::model::TransformProp, f64)>,
+    /// Comp shown in the Viewer (takes precedence over preview_item).
+    pub preview_comp: Option<Uuid>,
     /// Footage item currently shown in the Viewer, and the scrub position.
     pub preview_item: Option<Uuid>,
     pub preview_frame: usize,
@@ -299,6 +393,7 @@ impl Default for AppState {
             #[cfg(feature = "media")]
             audio_tx,
             prop_edit: None,
+            preview_comp: None,
             preview_item: None,
             preview_frame: 0,
             preview_divisor: 1,
@@ -528,9 +623,74 @@ impl AppState {
         self.selected_comp = Some(id);
     }
 
+    /// Frame count of the comp preview (comp duration × comp rate).
+    pub fn comp_frame_count(&self, comp: &Composition) -> usize {
+        let dur = comp.duration.0.to_f64();
+        (dur * comp.frame_rate.fps()).round().max(1.0) as usize
+    }
+
+    /// Build and send the batch request rendering `preview_comp` at the
+    /// current frame (evaluator v0: footage layers, no retime yet).
+    #[cfg(feature = "media")]
+    pub fn refresh_comp_preview(&mut self) {
+        use kiriko_core::model::LayerKind;
+        let Some(comp_id) = self.preview_comp else {
+            return;
+        };
+        let doc = self.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let frames = self.comp_frame_count(comp);
+        self.preview_frame = self.preview_frame.min(frames.saturating_sub(1));
+        let t = self.preview_frame as f64 / comp.frame_rate.fps();
+
+        let mut jobs = Vec::new();
+        for layer in &comp.layers {
+            if !layer.switches.visible {
+                continue;
+            }
+            if t < layer.in_point.0.to_f64() || t >= layer.out_point.0.to_f64() {
+                continue;
+            }
+            let LayerKind::Footage { item } = &layer.kind;
+            let Some(ProjectItem::Footage(f)) = doc.item(*item) else {
+                continue;
+            };
+            let Some(media::MediaStatus::Ready {
+                probe,
+                frames: src_frames,
+                ..
+            }) = self.media.map.get(item)
+            else {
+                continue; // not probed yet; retried once Ready
+            };
+            let Some(video) = probe.video.as_ref() else {
+                continue;
+            };
+            let lt = t - layer.start_offset.0.to_f64();
+            let source_frame =
+                ((lt * video.fps()).round().max(0.0) as usize).min(src_frames.saturating_sub(1));
+            let target = (self.preview_divisor > 1).then(|| video.width / self.preview_divisor);
+            jobs.push(preview::CompJob {
+                layer: layer.id,
+                item: *item,
+                path: PathBuf::from(&f.media.absolute_path),
+                source_frame,
+                target_width: target,
+            });
+        }
+        self.preview_engine
+            .request_comp(comp_id, self.preview_frame, jobs);
+    }
+
     /// Re-request the current preview frame (selection/scrub/resolution change).
     #[cfg(feature = "media")]
     pub fn refresh_preview(&mut self) {
+        if self.preview_comp.is_some() {
+            self.refresh_comp_preview();
+            return;
+        }
         let Some(id) = self.preview_item else { return };
         let doc = self.store.snapshot();
         let Some(ProjectItem::Footage(f)) = doc.item(id) else {
@@ -782,11 +942,14 @@ mod preview_tests {
         let engine = PreviewEngine::default();
         let id = uuid::Uuid::now_v7();
         engine.request(id, file, 45, Some(160));
-        let px = engine
+        let result = engine
             .results
             .recv_timeout(Duration::from_secs(20))
             .expect("engine replied")
             .expect("decode succeeded");
+        let super::preview::PreviewResult::Footage(px) = result else {
+            panic!("expected a footage frame");
+        };
         assert_eq!(px.item, id);
         assert_eq!(px.frame, 45);
         assert_eq!((px.width, px.height), (160, 120));
@@ -811,12 +974,13 @@ mod preview_tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
             match engine.results.recv_timeout(Duration::from_millis(500)) {
-                Ok(Ok(px)) => {
+                Ok(Ok(super::preview::PreviewResult::Footage(px))) => {
                     last = Some(px.frame);
                     if px.frame == 59 {
                         break;
                     }
                 }
+                Ok(Ok(_)) => {}
                 Ok(Err(e)) => panic!("decode failed: {e}"),
                 Err(_) => {
                     if last == Some(59) {
