@@ -282,6 +282,18 @@ fn moved_span(
     (shift(in_point), shift(out_point), shift(start_offset))
 }
 
+/// The lane-area horizontal view (07-UI-SPEC §4): pixels-per-second and the
+/// clamped left-edge comp time, from a zoom (1.0 = the whole comp fits `track_w`;
+/// larger zooms in) and a desired left time. The view never scrolls past the
+/// comp ends, so at zoom 1 it always shows the whole comp from 0.
+fn lane_view(track_w: f32, duration: f64, zoom: f64, view_start: f64) -> (f64, f64) {
+    let zoom = zoom.clamp(1.0, 400.0);
+    let px_per_sec = track_w as f64 * zoom / duration.max(1e-6);
+    let visible = duration / zoom;
+    let start = view_start.clamp(0.0, (duration - visible).max(0.0));
+    (px_per_sec, start)
+}
+
 /// Parse a flexible duration: `SS(.sss)`, `MM:SS`, `HH:MM:SS`, or
 /// `HH:MM:SS:mmm`. None on anything unparseable.
 fn parse_duration(text: &str) -> Option<f64> {
@@ -1095,13 +1107,55 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     let frames = app.comp_frame_count(comp).max(1);
     let track_left = panel_left + name_w;
     let track_w = (panel_right - track_left - 8.0).max(40.0);
-    let x_of = |seconds: f64| track_left + (seconds / duration) as f32 * track_w;
+    // Horizontal view model (07-UI-SPEC §4): zoom + scrolled left edge. At zoom 1
+    // this is exactly the old whole-comp-across-the-track mapping.
+    let (px_per_sec, view_start) = lane_view(
+        track_w,
+        duration,
+        app.timeline_zoom,
+        app.timeline_view_start,
+    );
+    app.timeline_view_start = view_start; // persist the clamp
+    let x_of = |seconds: f64| track_left + ((seconds - view_start) * px_per_sec) as f32;
+    let seconds_of = |x: f32| view_start + (x - track_left) as f64 / px_per_sec.max(1e-6);
+
+    // AE wheel shortcuts over the lane area: Alt = zoom (around the cursor),
+    // Shift = scroll through time. Plain wheel falls through to the vertical
+    // ScrollArea. Alt/Shift consume the scroll so it does not also scroll lanes.
+    let lane_area = egui::Rect::from_min_max(
+        egui::pos2(track_left, ui.max_rect().top()),
+        egui::pos2(panel_right, ui.max_rect().bottom()),
+    );
+    let (scroll_y, mods, hover) =
+        ui.input(|i| (i.raw_scroll_delta.y, i.modifiers, i.pointer.hover_pos()));
+    if scroll_y.abs() > 0.01 && hover.is_some_and(|p| lane_area.contains(p)) {
+        let cursor_x = hover.map(|p| p.x).unwrap_or(track_left);
+        if mods.alt {
+            let cursor_t = view_start + (cursor_x - track_left) as f64 / px_per_sec.max(1e-6);
+            let factor = (scroll_y as f64 * 0.004).exp();
+            app.timeline_zoom = (app.timeline_zoom * factor).clamp(1.0, 400.0);
+            let (new_ppx, _) = lane_view(track_w, duration, app.timeline_zoom, view_start);
+            app.timeline_view_start = cursor_t - (cursor_x - track_left) as f64 / new_ppx.max(1e-6);
+            ui.input_mut(|i| i.raw_scroll_delta = egui::Vec2::ZERO);
+            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+        } else if mods.shift {
+            app.timeline_view_start = view_start - scroll_y as f64 / px_per_sec.max(1e-6);
+            ui.input_mut(|i| i.raw_scroll_delta = egui::Vec2::ZERO);
+            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+        }
+    }
 
     let (ruler_rect, ruler_resp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 20.0),
         egui::Sense::click_and_drag(),
     );
     ui.painter().rect_filled(ruler_rect, 0.0, theme.surface_2);
+    // Clip everything time-positioned (ruler ticks, bars, keyframes, markers,
+    // playhead) to the lane area so a zoomed/scrolled view never bleeds left over
+    // the layer outline. The outline columns replace this clip with their own
+    // (via `place`), so they draw unaffected.
+    let saved_clip = ui.clip_rect();
+    ui.set_clip_rect(saved_clip.intersect(lane_area));
     if let Some((a, b)) = comp.work_area {
         let band = egui::Rect::from_min_max(
             egui::pos2(x_of(a.0.to_f64()), ruler_rect.top()),
@@ -1370,7 +1424,6 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                 theme.surface_2,
             );
         }
-        let seconds_of = |x: f32| ((x - track_left) / track_w).clamp(0.0, 1.0) as f64 * duration;
         // Left-column subcolumns (Mack): [visibility][title…][matte][blend][3D]
         // [mute]. Switches are right-anchored so they align across every row;
         // the title flexes and truncates. Each is clipped to its slot, so a
@@ -1596,8 +1649,14 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
             }
         }
 
+        // Only bars visible in the (possibly zoomed/scrolled) lane area take
+        // pointer interaction, so an off-screen bar can't steal outline clicks.
+        let bar_visible = bar.right() > track_left + 0.5 && bar.left() < panel_right;
         // Edge handles: drag to trim in/out (one SetLayerSpan op per release).
         for out_edge in [false, true] {
+            if !bar_visible {
+                continue;
+            }
             let edge_x = if out_edge { bar.right() } else { bar.left() };
             let handle = egui::Rect::from_center_size(
                 egui::pos2(edge_x, bar.center().y),
@@ -1652,7 +1711,7 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
         // Body drag: move the whole layer in comp time — shift in/out and
         // start_offset together so the bar and its content move as one. Sequence
         // layers keep their bodies for clip selection.
-        if !matches!(layer.kind, kiriko_core::model::LayerKind::Sequence { .. }) {
+        if bar_visible && !matches!(layer.kind, kiriko_core::model::LayerKind::Sequence { .. }) {
             let body = bar.shrink2(egui::vec2(6.0, 0.0));
             if body.width() > 2.0 {
                 let resp = ui.interact(
@@ -2099,6 +2158,7 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     if let Some(interp) = clip_interp_edit {
         app.set_selected_clip_interp(interp);
     }
+    ui.set_clip_rect(saved_clip); // release the lane clip for the bottom bar
     timeline_mode_toggle(ui, theme, app);
 }
 
@@ -7006,5 +7066,22 @@ mod dock_tests {
         assert!(((o.0.to_f64() - i.0.to_f64()) - 3.0).abs() < 1e-6);
         // in→start_offset alignment preserved (content moves with the bar).
         assert!(((i.0.to_f64() - so.0.to_f64()) - 1.0).abs() < 1e-6);
+    }
+
+    // The lane-area view (07-UI-SPEC §4): zoom scales pixels-per-second and the
+    // view never scrolls past the comp ends.
+    #[test]
+    fn lane_view_zooms_and_clamps_the_scroll() {
+        // Zoom 1: the whole comp fits; no scroll possible.
+        let (ppx, start) = lane_view(1000.0, 10.0, 1.0, 5.0);
+        assert!((ppx - 100.0).abs() < 1e-6);
+        assert!(start.abs() < 1e-6);
+        // Zoom 2: half visible, pixels double, scroll clamps to [0, dur - visible].
+        let (ppx2, start2) = lane_view(1000.0, 10.0, 2.0, 100.0);
+        assert!((ppx2 - 200.0).abs() < 1e-6);
+        assert!((start2 - 5.0).abs() < 1e-6);
+        // Zoom below 1 is clamped to 1 (can't zoom out past the whole comp).
+        let (ppx3, _) = lane_view(1000.0, 10.0, 0.2, 0.0);
+        assert!((ppx3 - 100.0).abs() < 1e-6);
     }
 }

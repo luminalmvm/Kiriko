@@ -750,6 +750,11 @@ pub struct AppState {
     pub last_display_scale: f32,
     /// Draggable width of the timeline's left (layer-controls) column, px.
     pub timeline_name_w: f32,
+    /// Lane-area horizontal view (07-UI-SPEC §4): zoom (1.0 = the whole comp fits
+    /// the track width; larger zooms in) and the comp time at the left edge.
+    /// Alt-wheel zooms, Shift-wheel scrolls; vertical scroll is the ScrollArea's.
+    pub timeline_zoom: f64,
+    pub timeline_view_start: f64,
     /// Timeline right area shows the graph editor (curves) instead of the
     /// layer bars — a mode of the Timeline, not a separate panel (K-070).
     pub timeline_graph_mode: bool,
@@ -847,6 +852,8 @@ impl Default for AppState {
             view_pan: egui::Vec2::ZERO,
             last_display_scale: 1.0,
             timeline_name_w: 300.0,
+            timeline_zoom: 1.0,
+            timeline_view_start: 0.0,
             timeline_graph_mode: false,
             #[cfg(feature = "media")]
             comp_frame_cache: kiriko_cache::ByteLru::new(512 * 1024 * 1024),
