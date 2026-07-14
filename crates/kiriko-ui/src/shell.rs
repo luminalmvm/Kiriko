@@ -294,6 +294,14 @@ fn lane_view(track_w: f32, duration: f64, zoom: f64, view_start: f64) -> (f64, f
     (px_per_sec, start)
 }
 
+/// A horizontal pixel distance in the lane area, as seconds — at the *displayed*
+/// zoom. Every lane drag and snap tolerance must convert through this: the naive
+/// `dx / track_w * duration` is only right at zoom 1, and makes a drag run
+/// `zoom×` faster than the cursor once zoomed in.
+fn drag_secs(dx_px: f64, px_per_sec: f64) -> f64 {
+    dx_px / px_per_sec.max(1e-6)
+}
+
 /// Parse a flexible duration: `SS(.sss)`, `MM:SS`, `HH:MM:SS`, or
 /// `HH:MM:SS:mmm`. None on anything unparseable.
 fn parse_duration(text: &str) -> Option<f64> {
@@ -1270,11 +1278,12 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     }
     if ruler_resp.clicked() || ruler_resp.dragged() {
         if let Some(pos) = ruler_resp.interact_pointer_pos() {
-            let frac = ((pos.x - track_left) / track_w).clamp(0.0, 1.0) as f64;
+            // Map the cursor through the displayed (zoomed, scrolled) time axis,
+            // so the playhead lands under the pointer at any zoom.
+            let raw = seconds_of(pos.x).clamp(0.0, duration);
             // Snap the scrub to a nearby marker (within ~6 px) so the playhead
             // lands on the beat (docs/impl/beat-detection.md grid assist).
-            let raw = frac * duration;
-            let threshold = 6.0 / track_w as f64 * duration;
+            let threshold = drag_secs(6.0, px_per_sec);
             let secs = kiriko_core::markers::snap_time(
                 rational_at(raw),
                 &comp.markers,
@@ -1466,7 +1475,14 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                     expanded = !expanded;
                     ui.data_mut(|d| d.insert_temp(twirl_id, expanded));
                 }
-                crate::icons::disclosure(&outline_painter, tri, expanded, theme.text_muted);
+                // Secondary (not muted) so the twirl reads as a control against
+                // the dark outline; brightens under the cursor like other glyphs.
+                let twirl_col = if tri_resp.hovered() {
+                    theme.text_primary
+                } else {
+                    theme.text_secondary
+                };
+                crate::icons::disclosure(&outline_painter, tri, expanded, twirl_col);
                 // Left-column subcolumns (Mack): [visibility][title…][matte][blend][3D]
                 // [mute]. Switches are right-anchored so they align across every row;
                 // the title flexes and truncates. Each is clipped to its slot, so a
@@ -1554,7 +1570,7 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                 // the snapped landing is what draws.
                 let move_dx = match app.move_edit {
                     Some((id, raw_in)) if id == layer.id => {
-                        let thr = 6.0 / track_w as f64 * duration;
+                        let thr = drag_secs(6.0, px_per_sec);
                         let snapped = kiriko_core::markers::snap_time(
                             rational_at(raw_in.max(0.0)),
                             &comp.markers,
@@ -1741,7 +1757,7 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                         if let Some(pos) = resp.interact_pointer_pos() {
                             // Snap the trimmed edge to a nearby beat/marker (~6 px) so
                             // clips cut on the beat.
-                            let threshold = 6.0 / track_w as f64 * duration;
+                            let threshold = drag_secs(6.0, px_per_sec);
                             let secs = kiriko_core::markers::snap_time(
                                 rational_at(seconds_of(pos.x)),
                                 &comp.markers,
@@ -1799,7 +1815,7 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                             app.selected_layer = Some(layer.id);
                         }
                         if resp.dragged() {
-                            let dx_secs = resp.drag_delta().x as f64 / track_w as f64 * duration;
+                            let dx_secs = drag_secs(resp.drag_delta().x as f64, px_per_sec);
                             let base = match app.move_edit {
                                 Some((id, s)) if id == layer.id => s,
                                 _ => layer.in_point.0.to_f64(),
@@ -1809,7 +1825,7 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                         if resp.drag_stopped() {
                             if let Some((id, raw_in)) = app.move_edit.take() {
                                 if id == layer.id {
-                                    let thr = 6.0 / track_w as f64 * duration;
+                                    let thr = drag_secs(6.0, px_per_sec);
                                     let snapped = kiriko_core::markers::snap_time(
                                         rational_at(raw_in.max(0.0)),
                                         &comp.markers,
@@ -2168,7 +2184,8 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                             name_w,
                             track_left,
                             track_w,
-                            duration,
+                            px_per_sec,
+                            view_start,
                             viewport,
                             &mut pending,
                         );
@@ -4417,7 +4434,10 @@ struct RowCtx<'a> {
     viewport: egui::Rect,
     track_left: f32,
     track_w: f32,
-    duration: f64,
+    /// The displayed time axis (zoom + scroll), so property-row keyframe
+    /// diamonds sit exactly under the layer bars at any zoom.
+    px_per_sec: f64,
+    view_start: f64,
 }
 
 /// New (scale_x, scale_y) when the linked Scale control is dragged so x becomes
@@ -4485,7 +4505,8 @@ fn transform_property_rows(
     _name_w: f32,
     track_left: f32,
     track_w: f32,
-    duration: f64,
+    px_per_sec: f64,
+    view_start: f64,
     viewport: egui::Rect,
     pending: &mut Option<kiriko_core::Op>,
 ) {
@@ -4504,7 +4525,8 @@ fn transform_property_rows(
         viewport,
         track_left,
         track_w,
-        duration,
+        px_per_sec,
+        view_start,
     };
 
     // Footage speed is a keyframable property too (K-072): its own row above
@@ -4674,7 +4696,9 @@ fn draw_key_diamonds(
     keys: &[kiriko_core::anim::Keyframe],
 ) {
     let cy = row_rect.center().y;
-    let x_of = |s: f64| ctx.track_left + (s / ctx.duration.max(1e-6)) as f32 * ctx.track_w;
+    // The same displayed (zoomed, scrolled) axis as the layer bars, so a
+    // property's diamonds stay under its layer's keys at any zoom.
+    let x_of = |s: f64| ctx.track_left + ((s - ctx.view_start) * ctx.px_per_sec) as f32;
     for k in keys {
         let x = x_of(ctx.off + k.time.to_f64());
         if x >= ctx.track_left - 1.0 && x <= ctx.track_left + ctx.track_w + 1.0 {
@@ -7425,5 +7449,29 @@ mod dock_tests {
         // Zoom below 1 is clamped to 1 (can't zoom out past the whole comp).
         let (ppx3, _) = lane_view(1000.0, 10.0, 0.2, 0.0);
         assert!((ppx3 - 100.0).abs() < 1e-6);
+    }
+
+    // Regression (layer move outran the cursor): a lane drag converts pixels to
+    // seconds at the *displayed* zoom. The same pixel delta must yield half the
+    // seconds at zoom 2 as at zoom 1 — the old `dx / track_w * duration` ignored
+    // zoom and made drags (and 6 px snap tolerances) run zoom× too fast.
+    #[test]
+    fn drag_secs_follows_the_displayed_zoom() {
+        let (ppx1, _) = lane_view(1000.0, 10.0, 1.0, 0.0);
+        let (ppx2, _) = lane_view(1000.0, 10.0, 2.0, 0.0);
+        let at_zoom_1 = drag_secs(50.0, ppx1);
+        let at_zoom_2 = drag_secs(50.0, ppx2);
+        assert!(
+            (at_zoom_1 - 0.5).abs() < 1e-9,
+            "zoom 1: 50 px over 100 px/s"
+        );
+        assert!(
+            (at_zoom_2 - at_zoom_1 / 2.0).abs() < 1e-9,
+            "zoom 2 shows twice the pixels per second, so the same drag is half the time"
+        );
+        // The unzoomed conversion would have (wrongly) said 0.5 s at any zoom.
+        assert!((at_zoom_2 - 0.25).abs() < 1e-9);
+        // A degenerate px_per_sec never divides by zero.
+        assert!(drag_secs(50.0, 0.0).is_finite());
     }
 }

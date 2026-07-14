@@ -311,15 +311,26 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32, width: f
 /// rather than a font glyph (`▸`/`▾`), because egui's bundled fonts don't carry
 /// those code points — so as glyphs the twirls simply vanish.
 pub fn disclosure(painter: &Painter, rect: Rect, open: bool, color: Color32) {
+    painter.add(Shape::convex_polygon(
+        disclosure_points(rect, open).to_vec(),
+        color,
+        Stroke::NONE,
+    ));
+}
+
+/// The twirl triangle's three corners inside `rect`. Kept separate from the
+/// painting so a test can pin the glyph's size: an earlier 0.30 shrink (on top
+/// of the triangle's own inset) left a ~4 px sliver that was invisible in
+/// practice, so the box now uses the same 0.12 inset as every other icon.
+fn disclosure_points(rect: Rect, open: bool) -> [Pos2; 3] {
     let s = rect.width().min(rect.height());
-    let b = Rect::from_center_size(rect.center(), Vec2::splat(s)).shrink(s * 0.30);
+    let b = Rect::from_center_size(rect.center(), Vec2::splat(s)).shrink(s * 0.12);
     let p = |nx: f32, ny: f32| b.min + Vec2::new(nx * b.width(), ny * b.height());
-    let pts = if open {
-        vec![p(0.06, 0.28), p(0.94, 0.28), p(0.5, 0.86)]
+    if open {
+        [p(0.12, 0.30), p(0.88, 0.30), p(0.5, 0.82)]
     } else {
-        vec![p(0.28, 0.06), p(0.86, 0.5), p(0.28, 0.94)]
-    };
-    painter.add(Shape::convex_polygon(pts, color, Stroke::NONE));
+        [p(0.30, 0.12), p(0.82, 0.5), p(0.30, 0.88)]
+    }
 }
 
 /// A small downward caret marking a control as a dropdown. Drawn, for the same
@@ -360,5 +371,26 @@ mod tests {
                 }
             });
         });
+    }
+
+    /// Regression (invisible twirl): the disclosure triangle must occupy a
+    /// readable share of its rect. The old geometry (a 0.30 shrink on top of the
+    /// triangle's own inset) produced a ~4 px sliver inside the timeline's 16 px
+    /// slot, which users could not see at all.
+    #[test]
+    fn disclosure_triangle_is_a_readable_size() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(16.0, 20.0));
+        let s = rect.width().min(rect.height());
+        for open in [false, true] {
+            let pts = disclosure_points(rect, open);
+            let bbox = Rect::from_points(&pts);
+            let min_side = bbox.width().min(bbox.height());
+            assert!(
+                min_side >= 0.30 * s,
+                "twirl (open = {open}) spans {min_side} px of a {s} px slot — too small to see"
+            );
+            // And it must stay inside the rect it was given.
+            assert!(rect.contains_rect(bbox));
+        }
     }
 }
