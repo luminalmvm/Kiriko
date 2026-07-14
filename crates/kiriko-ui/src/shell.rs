@@ -2162,49 +2162,67 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                     } = &layer.kind
                     {
                         use kiriko_core::retime::{FlowParams, Interpolation};
-                        ui.scope(|ui| {
-                            ui.set_max_width(name_w - 10.0);
-                            ui.indent(("txlabel", layer.id), |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        egui::RichText::new("Frames")
-                                            .small()
-                                            .color(theme.text_muted),
-                                    );
-                                    let mut set: Option<Interpolation> = None;
-                                    for (label, val, active) in [
-                                        (
-                                            "Nearest",
-                                            Interpolation::Nearest,
-                                            matches!(rt.interpolation, Interpolation::Nearest),
-                                        ),
-                                        (
-                                            "Blend",
-                                            Interpolation::Blend,
-                                            matches!(rt.interpolation, Interpolation::Blend),
-                                        ),
-                                        (
-                                            "Flow",
-                                            Interpolation::Flow(FlowParams::default()),
-                                            matches!(rt.interpolation, Interpolation::Flow(_)),
-                                        ),
-                                    ] {
-                                        if ui.selectable_label(active, label).clicked() && !active {
-                                            set = Some(val);
-                                        }
-                                    }
-                                    if let Some(interp) = set {
-                                        let mut r = rt.clone();
-                                        r.interpolation = interp;
-                                        pending = Some(kiriko_core::Op::SetLayerRetime {
-                                            comp: comp_id,
-                                            layer: layer.id,
-                                            retime: Some(r),
-                                        });
-                                    }
-                                });
+                        // A compact 18px row, laid out exactly like the property rows
+                        // (allocate a flush band + a clipped left-column child ui) rather
+                        // than an auto-sized scope/indent — the latter is taller and
+                        // carries item spacing, which read as an empty gap above Transform
+                        // the moment a retime turned this row on.
+                        let (row_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 18.0),
+                            egui::Sense::hover(),
+                        );
+                        let left_rect = egui::Rect::from_min_max(
+                            egui::pos2(row_rect.left() + 24.0, row_rect.top()),
+                            egui::pos2(
+                                (track_left - 6.0).max(row_rect.left() + 25.0),
+                                row_rect.bottom(),
+                            ),
+                        );
+                        let mut c = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(left_rect)
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        );
+                        c.set_clip_rect(left_rect.intersect(viewport));
+                        c.label(
+                            egui::RichText::new("Frames")
+                                .small()
+                                .color(theme.text_muted),
+                        );
+                        let mut set: Option<Interpolation> = None;
+                        for (label, val, active) in [
+                            (
+                                "Nearest",
+                                Interpolation::Nearest,
+                                matches!(rt.interpolation, Interpolation::Nearest),
+                            ),
+                            (
+                                "Blend",
+                                Interpolation::Blend,
+                                matches!(rt.interpolation, Interpolation::Blend),
+                            ),
+                            (
+                                "Flow",
+                                Interpolation::Flow(FlowParams::default()),
+                                matches!(rt.interpolation, Interpolation::Flow(_)),
+                            ),
+                        ] {
+                            if c.selectable_label(active, egui::RichText::new(label).small())
+                                .clicked()
+                                && !active
+                            {
+                                set = Some(val);
+                            }
+                        }
+                        if let Some(interp) = set {
+                            let mut r = rt.clone();
+                            r.interpolation = interp;
+                            pending = Some(kiriko_core::Op::SetLayerRetime {
+                                comp: comp_id,
+                                layer: layer.id,
+                                retime: Some(r),
                             });
-                        });
+                        }
                     }
                     // Transform group: its own twirl (open by default) revealing each
                     // animatable property as a timeline row — stopwatch/name/value in
