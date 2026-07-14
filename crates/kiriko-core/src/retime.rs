@@ -418,6 +418,37 @@ impl Retime {
         Some(out)
     }
 
+    /// The index of the segment covering local time `t`, or None if `t` is
+    /// outside the domain `[0, D]`. `t == D` resolves to the final segment.
+    pub fn segment_index_at(&self, t: Rational) -> Option<usize> {
+        let last = self.boundaries.last()?;
+        if self.segments.is_empty() || t < self.boundaries[0].t || t > last.t {
+            return None;
+        }
+        for i in 0..self.segments.len() {
+            if t < self.boundaries[i + 1].t {
+                return Some(i);
+            }
+        }
+        Some(self.segments.len() - 1)
+    }
+
+    /// A copy with the ease of the RateSegment covering local time `t` set to
+    /// `ease`, downstream source positions recomputed (docs/04-RETIMING.md §9.2:
+    /// "change a RateSegment's ease — Δs changes per E(1), downstream recomputes").
+    /// The segment's start position is pinned (K-070), so only frames after it
+    /// move. None if `t` is outside the domain or lands in a MapSegment.
+    pub fn with_segment_ease(&self, t: Rational, ease: Ease) -> Option<Retime> {
+        let i = self.segment_index_at(t)?;
+        let mut r = self.clone();
+        let RetimeSegment::Rate(seg) = &mut r.segments[i] else {
+            return None;
+        };
+        seg.ease = ease;
+        r.recompute_boundaries().ok()?;
+        Some(r)
+    }
+
     /// Split this retime at local time `t` into two retimes covering [0, t]
     /// and [t, D], each with its own domain starting at 0 (docs/04-RETIMING.md
     /// §5.3, §8: cutting a clip partitions its retime exactly). Exact when the
@@ -1194,5 +1225,36 @@ mod tests {
         let json = serde_json::to_value(&r).unwrap();
         let back: Retime = serde_json::from_value(json).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn changing_segment_ease_pins_start_and_recomputes_downstream() {
+        // Ramp 100% → 0% over 2 s. Linear end source = 2·[1 + (0−1)·½] = 1.0.
+        let base = Retime::single_ramp(rat(2, 1), rat(0, 1), rat(1, 1), rat(0, 1), Ease::Linear);
+        assert!((base.evaluate(2.0 - 1e-9) - 1.0).abs() < 1e-6);
+        // Slow ease: E(1) = 1/3, so end source = 2·[1 + (−1)·⅓] = 4/3.
+        let slow = base.with_segment_ease(rat(1, 1), Ease::Slow).unwrap();
+        assert!(slow.evaluate(0.0).abs() < 1e-9, "start is pinned");
+        assert!(
+            (slow.evaluate(2.0 - 1e-9) - 4.0 / 3.0).abs() < 1e-3,
+            "downstream source recomputed for the new ease"
+        );
+        slow.validate().unwrap();
+    }
+
+    #[test]
+    fn segment_index_at_locates_and_bounds() {
+        // Two segments over [0,2] and [2,4].
+        let keys = [
+            (rat(0, 1), rat(1, 1)),
+            (rat(2, 1), rat(1, 1)),
+            (rat(4, 1), rat(1, 1)),
+        ];
+        let r = Retime::from_speed_keyframes(rat(0, 1), &keys).unwrap();
+        assert_eq!(r.segment_index_at(rat(1, 1)), Some(0));
+        assert_eq!(r.segment_index_at(rat(3, 1)), Some(1));
+        assert_eq!(r.segment_index_at(rat(4, 1)), Some(1)); // t == D → last segment
+        assert_eq!(r.segment_index_at(rat(-1, 1)), None);
+        assert_eq!(r.segment_index_at(rat(5, 1)), None);
     }
 }
