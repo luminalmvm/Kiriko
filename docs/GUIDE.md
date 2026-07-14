@@ -325,7 +325,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   key and one forward toward the next. Drag a handle to shape the curve: how steeply it leaves
   the handle sets the **speed** there, how far the handle reaches sets the **influence** (how
   long that ease holds sway). By default the two handles are **unified** — they stay in a
-  straight line through the key, so the motion glides through smoothly; **Alt-drag** a handle
+  straight line through the key, so the motion glides through smoothly. When they are unified,
+  moving one handle rotates the other to stay opposite it, but the *other* handle keeps the
+  length you last gave it — it only pivots, it never grows or shrinks as you swing the one you
+  are holding. The handle you are dragging simply follows the cursor: no snapping to vertical,
+  no sudden lengthening near the top or bottom. **Alt-drag** a handle
   to *break* it and shape the two sides independently (a corner). Right-click a broken key and
   choose **Unify handles** to smooth it back out. The **Linear** button (bottom bar) straightens
   the selected keys again, and right-clicking a key still offers Easy ease / Linear / Hold /

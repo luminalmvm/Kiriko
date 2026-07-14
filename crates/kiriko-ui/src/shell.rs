@@ -3649,13 +3649,14 @@ fn apply_tangent(
     speed: f64,
     influence: f64,
     alt: bool,
+    partner_inf: Option<f64>,
 ) {
     use kiriko_core::anim::SideInterp::Bezier;
     let unified = matches!((side_speed(k.interp_in), side_speed(k.interp_out)),
         (Some(a), Some(b)) if (a - b).abs() < 1e-6);
     let mirror = unified && !alt;
     if is_out {
-        let in_reach = side_influence(k.interp_in);
+        let in_reach = partner_inf.unwrap_or_else(|| side_influence(k.interp_in));
         k.interp_out = Bezier { speed, influence };
         if mirror {
             k.interp_in = Bezier {
@@ -3664,7 +3665,7 @@ fn apply_tangent(
             };
         }
     } else {
-        let out_reach = side_influence(k.interp_out);
+        let out_reach = partner_inf.unwrap_or_else(|| side_influence(k.interp_out));
         k.interp_in = Bezier { speed, influence };
         if mirror {
             k.interp_out = Bezier {
@@ -3673,6 +3674,28 @@ fn apply_tangent(
             };
         }
     }
+}
+
+/// The influence a unified partner handle needs so its on-screen *length* stays
+/// fixed while the dragged side's slope changes to `new_speed` — only the angle
+/// rotates, the length holds (Mack). `sx`/`sy` are screen px per unit time /
+/// value; `seg` is the partner side's segment length in seconds. A degenerate
+/// segment leaves the influence untouched.
+fn partner_influence(
+    partner: kiriko_core::anim::SideInterp,
+    seg: f64,
+    new_speed: f64,
+    sx: f64,
+    sy: f64,
+) -> f64 {
+    if seg <= 1e-9 {
+        return side_influence(partner);
+    }
+    let old_inf = side_influence(partner);
+    let old_speed = side_speed(partner).unwrap_or(0.0);
+    let screen_len = |sp: f64| (sx * sx + sp * sp * sy * sy).sqrt().max(1e-9);
+    let target = old_inf * seg * screen_len(old_speed);
+    (target / (seg * screen_len(new_speed))).clamp(1e-3, 1.0)
 }
 
 /// Indices of the plotted keyframe points that fall inside a marquee band.
@@ -3796,6 +3819,37 @@ fn graph_plot(
     ui.painter().rect_filled(rect, 0.0, theme.surface_0);
     let duration = comp.duration.0.to_f64().max(1e-6);
 
+    // Stable screen scales (px per unit time / value) taken from the *committed*
+    // key range, so the unified partner-handle length maths (below) don't chase
+    // their own tail as the live y-range auto-fits to the dragged curve.
+    let sx_stable = rect.width() as f64 / duration;
+    let sy_stable = {
+        let (lo, hi) = keys.iter().fold((f64::MAX, f64::MIN), |(lo, hi), k| {
+            (lo.min(k.value), hi.max(k.value))
+        });
+        let span = if keys.is_empty() {
+            1.0
+        } else {
+            (hi - lo).abs().max(1.0)
+        };
+        rect.height() as f64 / span
+    };
+    // The partner side's segment length in seconds, for keyframe `idx` when its
+    // `is_out` side is dragged (partner is the opposite side's neighbouring gap).
+    let partner_seg = |idx: usize, is_out: bool| -> f64 {
+        if is_out {
+            if idx > 0 {
+                keys[idx].time.to_f64() - keys[idx - 1].time.to_f64()
+            } else {
+                0.0
+            }
+        } else if idx + 1 < keys.len() {
+            keys[idx + 1].time.to_f64() - keys[idx].time.to_f64()
+        } else {
+            0.0
+        }
+    };
+
     // Provisional keys during a drag (visual only until release) — computed up
     // here so the y-range can fit the *drawn* curve, not just the keyframes.
     let multi_delta: Option<f64> = match app.graph_edit {
@@ -3824,8 +3878,11 @@ fn graph_plot(
     }
     if let Some((idx, is_out, sp, inf)) = app.graph_tangent_edit {
         let alt = ui.input(|i| i.modifiers.alt);
+        let seg_p = partner_seg(idx, is_out);
         if let Some(k) = shown.get_mut(idx) {
-            apply_tangent(k, is_out, sp, inf, alt);
+            let partner = if is_out { k.interp_in } else { k.interp_out };
+            let pinf = partner_influence(partner, seg_p, sp, sx_stable, sy_stable);
+            apply_tangent(k, is_out, sp, inf, alt, Some(pinf));
         }
     }
 
@@ -4165,7 +4222,7 @@ fn graph_plot(
                 let (speed, influence) = match app.graph_tangent_edit {
                     Some((i, o, sp, inf)) if i == idx && o == is_out => (sp, inf),
                     Some((i, _, sp, _)) if i == idx && key_unified && !alt_now => {
-                        (sp, side_influence(side))
+                        (sp, partner_influence(side, seg, sp, sx_stable, sy_stable))
                     }
                     _ => (side_speed(side).unwrap_or(0.0), side_influence(side)),
                 };
@@ -4211,7 +4268,19 @@ fn graph_plot(
                         if i == idx {
                             let alt = ui.input(|inp| inp.modifiers.alt);
                             let mut new_keys = keys.clone();
-                            apply_tangent(&mut new_keys[i], o, sp, inf, alt);
+                            let partner = if o {
+                                new_keys[i].interp_in
+                            } else {
+                                new_keys[i].interp_out
+                            };
+                            let pinf = partner_influence(
+                                partner,
+                                partner_seg(i, o),
+                                sp,
+                                sx_stable,
+                                sy_stable,
+                            );
+                            apply_tangent(&mut new_keys[i], o, sp, inf, alt, Some(pinf));
                             pending = Some(new_keys);
                         }
                     }
@@ -8150,14 +8219,14 @@ mod dock_tests {
         };
         // Plain drag of the out handle sets both slopes; reaches are preserved.
         let mut k = base();
-        apply_tangent(&mut k, true, 5.0, 0.5, false);
+        apply_tangent(&mut k, true, 5.0, 0.5, false, None);
         assert_eq!(side_speed(k.interp_out), Some(5.0));
         assert_eq!(side_speed(k.interp_in), Some(5.0)); // mirrored
         assert!((side_influence(k.interp_out) - 0.5).abs() < 1e-9);
         assert!((side_influence(k.interp_in) - 1.0 / 3.0).abs() < 1e-9); // in reach kept
                                                                          // Alt-drag breaks: only the dragged side changes.
         let mut k = base();
-        apply_tangent(&mut k, true, 5.0, 0.5, true);
+        apply_tangent(&mut k, true, 5.0, 0.5, true, None);
         assert_eq!(side_speed(k.interp_out), Some(5.0));
         assert_eq!(side_speed(k.interp_in), Some(0.0)); // untouched
                                                         // A key already broken (slopes differ) moves one end even on a plain drag.
@@ -8172,9 +8241,30 @@ mod dock_tests {
             },
             ..base()
         };
-        apply_tangent(&mut k, false, 9.0, 0.4, false);
+        apply_tangent(&mut k, false, 9.0, 0.4, false, None);
         assert_eq!(side_speed(k.interp_in), Some(9.0));
         assert_eq!(side_speed(k.interp_out), Some(-3.0)); // stays broken
+    }
+
+    // A unified partner handle rotates but keeps its on-screen length when the
+    // dragged side steepens: partner_influence trades reach for slope so the
+    // pixel length reach·√(sx²+speed²·sy²) is conserved (Mack, bezier #2).
+    #[test]
+    fn partner_influence_preserves_screen_length() {
+        use kiriko_core::anim::SideInterp::Bezier;
+        let (sx, sy, seg) = (3.0, 5.0, 2.0);
+        let screen_len = |inf: f64, sp: f64| inf * seg * (sx * sx + sp * sp * sy * sy).sqrt();
+        // Partner at rest (flat), dragged side goes to a steep slope.
+        let partner = Bezier {
+            speed: 0.0,
+            influence: 1.0 / 3.0,
+        };
+        let before = screen_len(side_influence(partner), 0.0);
+        let inf_new = partner_influence(partner, seg, 8.0, sx, sy);
+        let after = screen_len(inf_new, 8.0);
+        assert!((before - after).abs() < 1e-9, "{before} vs {after}");
+        // A degenerate segment leaves the influence untouched.
+        assert_eq!(partner_influence(partner, 0.0, 8.0, sx, sy), 1.0 / 3.0);
     }
 
     // K-070: setting a key's speed (what a speed-lens drag commits — both sides
