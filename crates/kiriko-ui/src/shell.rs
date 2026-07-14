@@ -2964,9 +2964,34 @@ fn layer_keyframe_times(layer: &kiriko_core::model::Layer) -> Vec<f64> {
     times
 }
 
+/// Read-only context shared by every property row in a layer's twirl-down.
+struct RowCtx<'a> {
+    theme: &'a Theme,
+    comp_id: uuid::Uuid,
+    layer: &'a kiriko_core::model::Layer,
+    lt: f64,
+    off: f64,
+    track_left: f32,
+    track_w: f32,
+    duration: f64,
+}
+
+/// New (scale_x, scale_y) when the linked Scale control is dragged so x becomes
+/// `new_x`, keeping the x:y ratio. A ~zero old x has no defined ratio, so both
+/// take the new value (uniform).
+fn linked_scale(old_x: f64, old_y: f64, new_x: f64) -> (f64, f64) {
+    if old_x.abs() < 1e-9 {
+        (new_x, new_x)
+    } else {
+        (new_x, old_y * new_x / old_x)
+    }
+}
+
 /// The layer's transform properties as full-width timeline rows (K-072): each
 /// row shows its stopwatch/name/value in the left column and its own keyframes
 /// as diamonds on the track to the right; clicking a row's name graphs it.
+/// Scale x/y share one row with a ratio lock (default on); unlocking splits
+/// them into two independent rows with a relink control.
 #[allow(clippy::too_many_arguments)]
 fn transform_property_rows(
     ui: &mut egui::Ui,
@@ -2981,160 +3006,439 @@ fn transform_property_rows(
     duration: f64,
     pending: &mut Option<kiriko_core::Op>,
 ) {
-    use kiriko_core::anim::{Animation, Keyframe, SideInterp};
     use kiriko_core::model::{LayerKind, TransformProp};
 
     let is_camera = matches!(layer.kind, LayerKind::Camera { .. });
-    let mut rows: Vec<(&str, TransformProp, f64)> = Vec::new();
-    if !is_camera {
-        rows.push(("Anchor x", TransformProp::AnchorX, 1.0));
-        rows.push(("Anchor y", TransformProp::AnchorY, 1.0));
-    }
-    rows.extend([
-        ("Position x", TransformProp::PositionX, 1.0),
-        ("Position y", TransformProp::PositionY, 1.0),
-        ("Scale x %", TransformProp::ScaleX, 0.5),
-        ("Scale y %", TransformProp::ScaleY, 0.5),
-        ("Rotation °", TransformProp::Rotation, 0.5),
-        ("Opacity %", TransformProp::Opacity, 0.5),
-    ]);
-    if layer.switches.three_d || is_camera {
-        rows.extend([
-            ("Position z", TransformProp::PositionZ, 1.0),
-            ("Rotation x °", TransformProp::RotationX, 0.5),
-            ("Rotation y °", TransformProp::RotationY, 0.5),
-        ]);
-    }
-
+    let three_d = layer.switches.three_d || is_camera;
     let fps = comp.frame_rate.fps().max(1.0);
-    let lt = app.preview_frame as f64 / fps - layer.start_offset.0.to_f64();
-    let off = layer.start_offset.0.to_f64();
-    let x_of = |s: f64| track_left + (s / duration.max(1e-6)) as f32 * track_w;
+    let ctx = RowCtx {
+        theme,
+        comp_id,
+        layer,
+        lt: app.preview_frame as f64 / fps - layer.start_offset.0.to_f64(),
+        off: layer.start_offset.0.to_f64(),
+        track_left,
+        track_w,
+        duration,
+    };
 
-    for (label, prop, speed) in rows {
-        let (row_rect, _resp) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
-        let slot = layer.transform.get(prop);
-        let animated = slot.is_animated();
-        let is_graphed = app.selected_layer == Some(layer.id) && app.graph_prop == Some(prop);
-        if is_graphed {
-            ui.painter().rect_filled(
-                egui::Rect::from_min_max(
-                    row_rect.min,
-                    egui::pos2(track_left - 6.0, row_rect.bottom()),
-                ),
-                2.0,
-                theme.surface_2,
-            );
+    if !is_camera {
+        prop_row(
+            ui,
+            app,
+            &ctx,
+            "Anchor x",
+            TransformProp::AnchorX,
+            1.0,
+            pending,
+        );
+        prop_row(
+            ui,
+            app,
+            &ctx,
+            "Anchor y",
+            TransformProp::AnchorY,
+            1.0,
+            pending,
+        );
+    }
+    prop_row(
+        ui,
+        app,
+        &ctx,
+        "Position x",
+        TransformProp::PositionX,
+        1.0,
+        pending,
+    );
+    prop_row(
+        ui,
+        app,
+        &ctx,
+        "Position y",
+        TransformProp::PositionY,
+        1.0,
+        pending,
+    );
+
+    // Scale with a ratio lock (default on). Locked: one row edits both, keeping
+    // the ratio. Unlocked: two independent rows plus a relink control.
+    let scale_id = ui.id().with(("scale-unlink", layer.id));
+    let mut unlinked = ui.data(|d| d.get_temp::<bool>(scale_id)).unwrap_or(false);
+    if unlinked {
+        prop_row(
+            ui,
+            app,
+            &ctx,
+            "Scale x %",
+            TransformProp::ScaleX,
+            0.5,
+            pending,
+        );
+        prop_row(
+            ui,
+            app,
+            &ctx,
+            "Scale y %",
+            TransformProp::ScaleY,
+            0.5,
+            pending,
+        );
+        if link_toggle_row(ui, &ctx) {
+            unlinked = false;
         }
+    } else {
+        combined_scale_row(ui, app, &ctx, pending, &mut unlinked);
+    }
+    ui.data_mut(|d| d.insert_temp(scale_id, unlinked));
 
-        // Left column: stopwatch · name (click to graph) · value, indented
-        // under the layer and clipped so it never spills into the track.
-        let left_rect = egui::Rect::from_min_max(
-            egui::pos2(row_rect.left() + 24.0, row_rect.top()),
-            egui::pos2(
-                (track_left - 6.0).max(row_rect.left() + 25.0),
-                row_rect.bottom(),
+    prop_row(
+        ui,
+        app,
+        &ctx,
+        "Rotation °",
+        TransformProp::Rotation,
+        0.5,
+        pending,
+    );
+    prop_row(
+        ui,
+        app,
+        &ctx,
+        "Opacity %",
+        TransformProp::Opacity,
+        0.5,
+        pending,
+    );
+    if three_d {
+        prop_row(
+            ui,
+            app,
+            &ctx,
+            "Position z",
+            TransformProp::PositionZ,
+            1.0,
+            pending,
+        );
+        prop_row(
+            ui,
+            app,
+            &ctx,
+            "Rotation x °",
+            TransformProp::RotationX,
+            0.5,
+            pending,
+        );
+        prop_row(
+            ui,
+            app,
+            &ctx,
+            "Rotation y °",
+            TransformProp::RotationY,
+            0.5,
+            pending,
+        );
+    }
+}
+
+/// Allocate one 18px timeline row and return (row_rect, left-column child ui).
+/// The child is clipped so widgets never spill into the track area.
+fn row_frame(ui: &mut egui::Ui, ctx: &RowCtx, highlight: bool) -> (egui::Rect, egui::Ui) {
+    let (row_rect, _resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
+    if highlight {
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                row_rect.min,
+                egui::pos2(ctx.track_left - 6.0, row_rect.bottom()),
             ),
+            2.0,
+            ctx.theme.surface_2,
         );
-        let mut c = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(left_rect)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        );
-        c.set_clip_rect(left_rect);
-        let clock = if animated { "⏱" } else { "◦" };
-        if c.selectable_label(animated, egui::RichText::new(clock).small())
-            .on_hover_text(if animated {
-                "Remove animation (freeze current value)"
-            } else {
-                "Animate: keyframe at the playhead"
-            })
-            .clicked()
-        {
-            let animation = if animated {
-                Animation::Static(slot.value_at(lt))
-            } else {
-                Animation::Keyframed(vec![Keyframe {
-                    time: rational_at(lt),
-                    value: slot.value_at(lt),
-                    interp_in: SideInterp::Linear,
-                    interp_out: SideInterp::Linear,
-                }])
-            };
-            *pending = Some(kiriko_core::Op::SetTransformProperty {
-                comp: comp_id,
-                layer: layer.id,
-                prop,
-                animation,
-            });
-        }
-        if c.add(
-            egui::Label::new(egui::RichText::new(label).small().color(if is_graphed {
-                theme.accent
-            } else {
-                theme.text_muted
-            }))
-            .sense(egui::Sense::click()),
-        )
-        .clicked()
-        {
-            app.selected_layer = Some(layer.id);
-            app.graph_prop = Some(prop);
-        }
-        {
-            let committed = slot.value_at(lt);
-            let mut value = match app.prop_edit {
-                Some((l, p, v)) if l == layer.id && p == prop => v,
-                _ => committed,
-            };
-            let resp = c.add(
-                egui::DragValue::new(&mut value)
-                    .speed(speed)
-                    .max_decimals(2),
-            );
-            if resp.dragged() || resp.has_focus() {
-                app.prop_edit = Some((layer.id, prop, value));
-            }
-            if resp.drag_stopped() || resp.lost_focus() {
-                if (value - committed).abs() > f64::EPSILON {
-                    let animation = if animated {
-                        Animation::Keyframed(upsert_key(slot, lt, value))
-                    } else {
-                        Animation::Static(value)
-                    };
-                    *pending = Some(kiriko_core::Op::SetTransformProperty {
-                        comp: comp_id,
-                        layer: layer.id,
-                        prop,
-                        animation,
-                    });
-                }
-                app.prop_edit = None;
-            }
-        }
+    }
+    let left_rect = egui::Rect::from_min_max(
+        egui::pos2(row_rect.left() + 24.0, row_rect.top()),
+        egui::pos2(
+            (ctx.track_left - 6.0).max(row_rect.left() + 25.0),
+            row_rect.bottom(),
+        ),
+    );
+    let mut c = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(left_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    c.set_clip_rect(left_rect);
+    (row_rect, c)
+}
 
-        // Track: this property's own keyframes as clay diamonds on its row.
-        if let Animation::Keyframed(keys) = &slot.animation {
-            let cy = row_rect.center().y;
-            for k in keys {
-                let x = x_of(off + k.time.to_f64());
-                if x >= track_left - 1.0 && x <= track_left + track_w + 1.0 {
-                    let d = 3.0;
-                    ui.painter().add(egui::Shape::convex_polygon(
-                        vec![
-                            egui::pos2(x, cy - d),
-                            egui::pos2(x + d, cy),
-                            egui::pos2(x, cy + d),
-                            egui::pos2(x - d, cy),
-                        ],
-                        theme.accent,
-                        egui::Stroke::new(1.0_f32, theme.surface_0),
-                    ));
-                }
-            }
+/// Draw clay diamonds for `keys` on the track portion of `row_rect`.
+fn draw_key_diamonds(
+    ui: &egui::Ui,
+    ctx: &RowCtx,
+    row_rect: egui::Rect,
+    keys: &[kiriko_core::anim::Keyframe],
+) {
+    let cy = row_rect.center().y;
+    let x_of = |s: f64| ctx.track_left + (s / ctx.duration.max(1e-6)) as f32 * ctx.track_w;
+    for k in keys {
+        let x = x_of(ctx.off + k.time.to_f64());
+        if x >= ctx.track_left - 1.0 && x <= ctx.track_left + ctx.track_w + 1.0 {
+            let d = 3.0;
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(x, cy - d),
+                    egui::pos2(x + d, cy),
+                    egui::pos2(x, cy + d),
+                    egui::pos2(x - d, cy),
+                ],
+                ctx.theme.accent,
+                egui::Stroke::new(1.0_f32, ctx.theme.surface_0),
+            ));
         }
     }
+}
+
+/// The stopwatch toggle. Returns the new Animation if clicked (animate at the
+/// playhead / freeze to the current value), else None.
+fn stopwatch(
+    ui: &mut egui::Ui,
+    slot: &kiriko_core::anim::Property,
+    lt: f64,
+) -> Option<kiriko_core::anim::Animation> {
+    use kiriko_core::anim::{Animation, Keyframe, SideInterp};
+    let animated = slot.is_animated();
+    let clock = if animated { "⏱" } else { "◦" };
+    if ui
+        .selectable_label(animated, egui::RichText::new(clock).small())
+        .on_hover_text(if animated {
+            "Remove animation (freeze current value)"
+        } else {
+            "Animate: keyframe at the playhead"
+        })
+        .clicked()
+    {
+        Some(if animated {
+            Animation::Static(slot.value_at(lt))
+        } else {
+            Animation::Keyframed(vec![Keyframe {
+                time: rational_at(lt),
+                value: slot.value_at(lt),
+                interp_in: SideInterp::Linear,
+                interp_out: SideInterp::Linear,
+            }])
+        })
+    } else {
+        None
+    }
+}
+
+/// One generic property row.
+fn prop_row(
+    ui: &mut egui::Ui,
+    app: &mut AppState,
+    ctx: &RowCtx,
+    label: &str,
+    prop: kiriko_core::model::TransformProp,
+    speed: f64,
+    pending: &mut Option<kiriko_core::Op>,
+) {
+    use kiriko_core::anim::Animation;
+    let slot = ctx.layer.transform.get(prop);
+    let is_graphed = app.selected_layer == Some(ctx.layer.id) && app.graph_prop == Some(prop);
+    let (row_rect, mut c) = row_frame(ui, ctx, is_graphed);
+
+    if let Some(animation) = stopwatch(&mut c, slot, ctx.lt) {
+        *pending = Some(kiriko_core::Op::SetTransformProperty {
+            comp: ctx.comp_id,
+            layer: ctx.layer.id,
+            prop,
+            animation,
+        });
+    }
+    if c.add(
+        egui::Label::new(egui::RichText::new(label).small().color(if is_graphed {
+            ctx.theme.accent
+        } else {
+            ctx.theme.text_muted
+        }))
+        .sense(egui::Sense::click()),
+    )
+    .clicked()
+    {
+        app.selected_layer = Some(ctx.layer.id);
+        app.graph_prop = Some(prop);
+    }
+    {
+        let committed = slot.value_at(ctx.lt);
+        let mut value = match app.prop_edit {
+            Some((l, p, v)) if l == ctx.layer.id && p == prop => v,
+            _ => committed,
+        };
+        let resp = c.add(
+            egui::DragValue::new(&mut value)
+                .speed(speed)
+                .max_decimals(2),
+        );
+        if resp.dragged() || resp.has_focus() {
+            app.prop_edit = Some((ctx.layer.id, prop, value));
+        }
+        if resp.drag_stopped() || resp.lost_focus() {
+            if (value - committed).abs() > f64::EPSILON {
+                let animation = if slot.is_animated() {
+                    Animation::Keyframed(upsert_key(slot, ctx.lt, value))
+                } else {
+                    Animation::Static(value)
+                };
+                *pending = Some(kiriko_core::Op::SetTransformProperty {
+                    comp: ctx.comp_id,
+                    layer: ctx.layer.id,
+                    prop,
+                    animation,
+                });
+            }
+            app.prop_edit = None;
+        }
+    }
+    if let Animation::Keyframed(keys) = &slot.animation {
+        draw_key_diamonds(ui, ctx, row_rect, keys);
+    }
+}
+
+/// A Batch op setting both scale axes as one undo step.
+fn scale_batch(
+    comp: uuid::Uuid,
+    layer: uuid::Uuid,
+    x: kiriko_core::anim::Animation,
+    y: kiriko_core::anim::Animation,
+) -> kiriko_core::Op {
+    use kiriko_core::model::TransformProp;
+    kiriko_core::Op::Batch {
+        ops: vec![
+            kiriko_core::Op::SetTransformProperty {
+                comp,
+                layer,
+                prop: TransformProp::ScaleX,
+                animation: x,
+            },
+            kiriko_core::Op::SetTransformProperty {
+                comp,
+                layer,
+                prop: TransformProp::ScaleY,
+                animation: y,
+            },
+        ],
+    }
+}
+
+/// The combined "Scale %" row (ratio locked): edits both axes keeping the
+/// ratio, with a 🔓 button to unlink. Sets `*unlinked` = true when unlinked.
+fn combined_scale_row(
+    ui: &mut egui::Ui,
+    app: &mut AppState,
+    ctx: &RowCtx,
+    pending: &mut Option<kiriko_core::Op>,
+    unlinked: &mut bool,
+) {
+    use kiriko_core::anim::Animation;
+    use kiriko_core::model::TransformProp;
+    let sx = ctx.layer.transform.get(TransformProp::ScaleX);
+    let sy = ctx.layer.transform.get(TransformProp::ScaleY);
+    let is_graphed = app.selected_layer == Some(ctx.layer.id)
+        && matches!(
+            app.graph_prop,
+            Some(TransformProp::ScaleX | TransformProp::ScaleY)
+        );
+    let (row_rect, mut c) = row_frame(ui, ctx, is_graphed);
+
+    // Stopwatch drives both axes together.
+    let animated = sx.is_animated() || sy.is_animated();
+    let clock = if animated { "⏱" } else { "◦" };
+    if c.selectable_label(animated, egui::RichText::new(clock).small())
+        .on_hover_text(if animated {
+            "Remove animation"
+        } else {
+            "Animate both scale axes"
+        })
+        .clicked()
+    {
+        let (ax, ay) = if animated {
+            (
+                Animation::Static(sx.value_at(ctx.lt)),
+                Animation::Static(sy.value_at(ctx.lt)),
+            )
+        } else {
+            (
+                Animation::Keyframed(upsert_key(sx, ctx.lt, sx.value_at(ctx.lt))),
+                Animation::Keyframed(upsert_key(sy, ctx.lt, sy.value_at(ctx.lt))),
+            )
+        };
+        *pending = Some(scale_batch(ctx.comp_id, ctx.layer.id, ax, ay));
+    }
+    if c.add(
+        egui::Label::new(egui::RichText::new("Scale %").small().color(if is_graphed {
+            ctx.theme.accent
+        } else {
+            ctx.theme.text_muted
+        }))
+        .sense(egui::Sense::click()),
+    )
+    .clicked()
+    {
+        app.selected_layer = Some(ctx.layer.id);
+        app.graph_prop = Some(TransformProp::ScaleX);
+    }
+    if c.small_button("🔓")
+        .on_hover_text("Unlink scale (edit x and y separately)")
+        .clicked()
+    {
+        *unlinked = true;
+    }
+    {
+        let old_x = sx.value_at(ctx.lt);
+        let old_y = sy.value_at(ctx.lt);
+        let mut value = match app.prop_edit {
+            Some((l, p, v)) if l == ctx.layer.id && p == TransformProp::ScaleX => v,
+            _ => old_x,
+        };
+        let resp = c.add(egui::DragValue::new(&mut value).speed(0.5).max_decimals(2));
+        if resp.dragged() || resp.has_focus() {
+            app.prop_edit = Some((ctx.layer.id, TransformProp::ScaleX, value));
+        }
+        if resp.drag_stopped() || resp.lost_focus() {
+            if (value - old_x).abs() > f64::EPSILON {
+                let (nx, ny) = linked_scale(old_x, old_y, value);
+                let ax = if sx.is_animated() {
+                    Animation::Keyframed(upsert_key(sx, ctx.lt, nx))
+                } else {
+                    Animation::Static(nx)
+                };
+                let ay = if sy.is_animated() {
+                    Animation::Keyframed(upsert_key(sy, ctx.lt, ny))
+                } else {
+                    Animation::Static(ny)
+                };
+                *pending = Some(scale_batch(ctx.comp_id, ctx.layer.id, ax, ay));
+            }
+            app.prop_edit = None;
+        }
+    }
+    // Track: the union of both axes' keys.
+    let mut keys: Vec<kiriko_core::anim::Keyframe> = Vec::new();
+    for slot in [sx, sy] {
+        if let Animation::Keyframed(k) = &slot.animation {
+            keys.extend(k.iter().cloned());
+        }
+    }
+    draw_key_diamonds(ui, ctx, row_rect, &keys);
+}
+
+/// A thin row holding the "link scale" button; true when clicked.
+fn link_toggle_row(ui: &mut egui::Ui, ctx: &RowCtx) -> bool {
+    let (_row_rect, mut c) = row_frame(ui, ctx, false);
+    c.small_button("🔗 link scale")
+        .on_hover_text("Re-lock the x:y ratio and edit scale as one value")
+        .clicked()
 }
 
 /// A single "Speed %" row for a footage layer, inside Transform. Editing sets
@@ -4899,5 +5203,13 @@ mod dock_tests {
         assert!(!tree.tiles.is_visible(project));
         tree.tiles.set_visible(project, true); // dock back
         assert!(tree.tiles.is_visible(project));
+    }
+
+    // The linked scale control keeps the x:y ratio (K-072).
+    #[test]
+    fn linked_scale_keeps_ratio() {
+        assert_eq!(linked_scale(100.0, 50.0, 200.0), (200.0, 100.0)); // 2:1 kept
+        assert_eq!(linked_scale(100.0, 100.0, 150.0), (150.0, 150.0)); // 1:1 kept
+        assert_eq!(linked_scale(0.0, 50.0, 80.0), (80.0, 80.0)); // undefined → uniform
     }
 }

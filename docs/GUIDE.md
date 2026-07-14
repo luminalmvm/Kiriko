@@ -232,6 +232,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   property's keyframes — so you can see *which* property is keyed *when*, not just that the
   layer has keys somewhere. Click a property's name to open its curve in the graph view.
   (When the layer is twirled shut, the layer bar still shows a summary of all its keys.)
+  Scale is special: by default x and y are locked together on a single "Scale %" row that
+  keeps their ratio as you drag; the 🔓 button unlocks them into two separate rows for
+  independent editing, and 🔗 re-locks. (Re-locking keeps whatever ratio the two currently
+  have and loses nothing — a small, friendlier deviation from the original "relinking may
+  discard one axis" idea.)
 - The **2.5D camera** — the parallax tool. Every layer has a z position and x/y
   rotations alongside the flat transform; they sleep until you switch the layer to 3D
   (the "3D" toggle in its twirl-down) *and* the comp has a Camera layer
