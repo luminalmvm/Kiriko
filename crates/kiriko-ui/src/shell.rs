@@ -4197,6 +4197,20 @@ impl Shell {
                     #[cfg(feature = "media")]
                     self.start_export();
                 }
+                MenuAction::ExportYouTube1080 => {
+                    #[cfg(feature = "media")]
+                    self.start_export_preset(
+                        crate::export::ExportPreset::Youtube1080,
+                        "youtube-1080.mp4",
+                    );
+                }
+                MenuAction::ExportVertical => {
+                    #[cfg(feature = "media")]
+                    self.start_export_preset(
+                        crate::export::ExportPreset::Vertical1080,
+                        "vertical.mp4",
+                    );
+                }
                 MenuAction::ShareExport50 => {
                     #[cfg(feature = "media")]
                     self.start_share_export(50.0);
@@ -4263,16 +4277,30 @@ impl Shell {
         // gain audio. Work area replaces whole-comp when it lands.
         let bits = target_mb * 1_000_000.0 * 8.0 * 0.92;
         let bit_rate = (bits / duration) as i64;
-        self.start_export_with(Some(bit_rate), &format!("share-{}mb.mp4", target_mb as u64));
+        self.start_export_with(
+            Some(bit_rate),
+            &format!("share-{}mb.mp4", target_mb as u64),
+            crate::export::ExportPreset::Native,
+        );
     }
 
     #[cfg(feature = "media")]
     fn start_export(&mut self) {
-        self.start_export_with(None, "export.mp4");
+        self.start_export_with(None, "export.mp4", crate::export::ExportPreset::Native);
     }
 
     #[cfg(feature = "media")]
-    fn start_export_with(&mut self, bit_rate: Option<i64>, default_name: &str) {
+    fn start_export_preset(&mut self, preset: crate::export::ExportPreset, default_name: &str) {
+        self.start_export_with(None, default_name, preset);
+    }
+
+    #[cfg(feature = "media")]
+    fn start_export_with(
+        &mut self,
+        bit_rate: Option<i64>,
+        default_name: &str,
+        preset: crate::export::ExportPreset,
+    ) {
         if self.export.is_some() {
             return;
         }
@@ -4284,12 +4312,16 @@ impl Shell {
             self.app.error = Some("export needs the GPU pipeline".into());
             return;
         };
+        let doc = self.app.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let target = preset.target(comp.width, comp.height);
         let picked = rfd::FileDialog::new()
             .add_filter("MP4 video", &["mp4"])
             .set_file_name(default_name)
             .save_file();
         let Some(path) = picked else { return };
-        let doc = self.app.store.snapshot();
         let items = crate::export::item_infos(&doc, &self.app.media);
         self.export = Some(crate::export::start(
             doc,
@@ -4298,6 +4330,7 @@ impl Shell {
             gpu.export_context(),
             path,
             bit_rate,
+            target,
         ));
         self.export_progress = Some((0, 0));
     }
@@ -4915,6 +4948,30 @@ impl Shell {
                         self.start_export();
                         ui.close_menu();
                     }
+                    #[cfg(feature = "media")]
+                    ui.menu_button("Export preset", |ui| {
+                        if ui.button("YouTube 1080p").clicked() {
+                            self.start_export_preset(
+                                crate::export::ExportPreset::Youtube1080,
+                                "youtube-1080.mp4",
+                            );
+                            ui.close_menu();
+                        }
+                        if ui.button("YouTube 4K").clicked() {
+                            self.start_export_preset(
+                                crate::export::ExportPreset::Youtube2160,
+                                "youtube-4k.mp4",
+                            );
+                            ui.close_menu();
+                        }
+                        if ui.button("Vertical 1080×1920").clicked() {
+                            self.start_export_preset(
+                                crate::export::ExportPreset::Vertical1080,
+                                "vertical.mp4",
+                            );
+                            ui.close_menu();
+                        }
+                    });
                     #[cfg(feature = "media")]
                     ui.menu_button("Export for sharing", |ui| {
                         if ui.button("Discord 50 MB").clicked() {

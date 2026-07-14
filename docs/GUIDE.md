@@ -204,7 +204,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   rendered through the *exact same* colour engine and compositor the Viewer uses, then
   compressed to an .mp4. Using one shared path isn't laziness — it's the design's central
   promise (what you preview IS what you export), and it runs on its own worker so the app
-  stays responsive while exporting, with live progress and a real cancel.
+  stays responsive while exporting, with live progress and a real cancel. Besides the comp's
+  own size you can pick an **export preset** — YouTube 1080p/4K, or vertical 1080×1920 — and
+  Kiriko fits the picture into that frame keeping its shape, adding black bars where the
+  aspect ratios differ (a wide comp gets bars top and bottom in a vertical export). The
+  fitting maths (`fit_contain` / `letterbox_resize` in `pixels.rs`) is unit-tested.
 - `crates/kiriko-audio/` — **playback and the clock.** The sound card asks for samples on
   its own strict schedule through a "realtime callback" — a tiny function that must never
   wait for anything (if it's ever late, you hear a glitch). The count of samples it has

@@ -46,6 +46,38 @@ pub struct ItemInfo {
     pub frames: usize,
 }
 
+/// A named export size. Native keeps the composition's own resolution; the
+/// others letterbox the comp into a standard delivery frame (K-002 gate: the
+/// YouTube/vertical presets).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ExportPreset {
+    Native,
+    Youtube1080,
+    Youtube2160,
+    Vertical1080,
+}
+
+impl ExportPreset {
+    /// The target pixel size for this preset given the comp's own size.
+    pub fn target(self, comp_w: u32, comp_h: u32) -> (u32, u32) {
+        match self {
+            ExportPreset::Native => (comp_w, comp_h),
+            ExportPreset::Youtube1080 => (1920, 1080),
+            ExportPreset::Youtube2160 => (3840, 2160),
+            ExportPreset::Vertical1080 => (1080, 1920),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportPreset::Native => "Native (comp size)",
+            ExportPreset::Youtube1080 => "YouTube 1080p",
+            ExportPreset::Youtube2160 => "YouTube 4K",
+            ExportPreset::Vertical1080 => "Vertical 1080×1920",
+        }
+    }
+}
+
 pub fn start(
     doc: Arc<Document>,
     comp_id: Uuid,
@@ -53,12 +85,15 @@ pub fn start(
     gpu: kiriko_gpu::GpuContext,
     out_path: PathBuf,
     bit_rate: Option<i64>,
+    target: (u32, u32),
 ) -> ExportHandle {
     let (tx, events) = channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let flag = cancel.clone();
     std::thread::spawn(move || {
-        let result = run(&doc, comp_id, &items, &gpu, &out_path, bit_rate, &tx, &flag);
+        let result = run(
+            &doc, comp_id, &items, &gpu, &out_path, bit_rate, target, &tx, &flag,
+        );
         let _ = match result {
             Ok(()) if flag.load(Ordering::Relaxed) => {
                 let _ = std::fs::remove_file(&out_path); // no half files
@@ -391,6 +426,7 @@ fn run(
     gpu: &kiriko_gpu::GpuContext,
     out_path: &std::path::Path,
     bit_rate: Option<i64>,
+    target: (u32, u32),
     tx: &Sender<ExportEvent>,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
@@ -416,10 +452,14 @@ fn run(
         compositor: kiriko_gpu::Compositor::new(gpu),
         decoders: HashMap::new(),
     };
+    // Encoded frame dimensions must be even for 4:2:0 H.264/HEVC.
+    let (tw, th) = (target.0 & !1, target.1 & !1);
+    let (tw, th) = (tw.max(2), th.max(2));
+    let resize = (tw, th) != (comp.width, comp.height);
     let mut encoder = kiriko_media::Encoder::open_with_bitrate(
         out_path,
-        comp.width,
-        comp.height,
+        tw,
+        th,
         i32::try_from(comp.frame_rate.fps().round() as i64).unwrap_or(60),
         1,
         bit_rate,
@@ -438,6 +478,12 @@ fn run(
             .colour
             .readback8(gpu, &shown)
             .map_err(|e| e.to_string())?;
+        // Letterbox into the delivery frame when a preset changes the size.
+        let rgba = if resize {
+            crate::pixels::letterbox_resize(&rgba, comp.width, comp.height, tw, th)
+        } else {
+            rgba
+        };
         encoder.write_rgba(&rgba).map_err(|e| e.to_string())?;
         let _ = tx.send(ExportEvent::Progress {
             frame: frame_n + 1,
