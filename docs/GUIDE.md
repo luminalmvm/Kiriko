@@ -330,8 +330,9 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   authors a ramp — the Vegas gesture. They are two views of one store: a straight line of
   value keys *is* a constant speed, a curve *is* a changing speed. The channel opens to the
   Time view by default; a "Vegas" tick makes it open to Velocity.
-  A retimed layer also gains a small **Frames** row (its frame-interpolation choice —
-  Nearest / Blend / Flow); an un-retimed layer has no such row, keeping plain layers compact.
+  (Frame interpolation — how in-between frames are synthesised, Nearest / Blend / Flow — is a
+  per-layer retime setting in the data model, but is not surfaced in the timeline for now; it
+  will return in a dedicated place.)
 - **Property rows in the Timeline** (K-072) — twirl a layer open and each of its animatable
   properties (Position, Scale, Rotation, Opacity, and the 3D ones) gets its own row: on the
   left a stopwatch to turn animation on or off, the property's name, and its current value;

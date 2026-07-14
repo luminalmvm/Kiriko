@@ -2153,77 +2153,8 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                         }
                     });
 
-                    // A retimed footage layer shows its frame-interpolation policy here
-                    // (K-021): Nearest is crisp; Blend crossfades neighbours for smoother
-                    // slow motion. Only a retimed layer renders this row — every other
-                    // layer has nothing here, so the Transform header sits right beneath.
-                    if let kiriko_core::model::LayerKind::Footage {
-                        retime: Some(rt), ..
-                    } = &layer.kind
-                    {
-                        use kiriko_core::retime::{FlowParams, Interpolation};
-                        // A compact 18px row, laid out exactly like the property rows
-                        // (allocate a flush band + a clipped left-column child ui) rather
-                        // than an auto-sized scope/indent — the latter is taller and
-                        // carries item spacing, which read as an empty gap above Transform
-                        // the moment a retime turned this row on.
-                        let (row_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), 18.0),
-                            egui::Sense::hover(),
-                        );
-                        let left_rect = egui::Rect::from_min_max(
-                            egui::pos2(row_rect.left() + 24.0, row_rect.top()),
-                            egui::pos2(
-                                (track_left - 6.0).max(row_rect.left() + 25.0),
-                                row_rect.bottom(),
-                            ),
-                        );
-                        let mut c = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(left_rect)
-                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        );
-                        c.set_clip_rect(left_rect.intersect(viewport));
-                        c.label(
-                            egui::RichText::new("Frames")
-                                .small()
-                                .color(theme.text_muted),
-                        );
-                        let mut set: Option<Interpolation> = None;
-                        for (label, val, active) in [
-                            (
-                                "Nearest",
-                                Interpolation::Nearest,
-                                matches!(rt.interpolation, Interpolation::Nearest),
-                            ),
-                            (
-                                "Blend",
-                                Interpolation::Blend,
-                                matches!(rt.interpolation, Interpolation::Blend),
-                            ),
-                            (
-                                "Flow",
-                                Interpolation::Flow(FlowParams::default()),
-                                matches!(rt.interpolation, Interpolation::Flow(_)),
-                            ),
-                        ] {
-                            if c.selectable_label(active, egui::RichText::new(label).small())
-                                .clicked()
-                                && !active
-                            {
-                                set = Some(val);
-                            }
-                        }
-                        if let Some(interp) = set {
-                            let mut r = rt.clone();
-                            r.interpolation = interp;
-                            pending = Some(kiriko_core::Op::SetLayerRetime {
-                                comp: comp_id,
-                                layer: layer.id,
-                                retime: Some(r),
-                            });
-                        }
-                    }
+                    // (Frame-interpolation choice — Nearest / Blend / Flow — is not
+                    // surfaced here for now; it will return in a dedicated place.)
                     // Transform group: its own twirl (open by default) revealing each
                     // animatable property as a timeline row — stopwatch/name/value in
                     // the left column, that property's keyframes on the track to the
