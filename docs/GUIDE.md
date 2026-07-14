@@ -433,6 +433,13 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   stays the default; the heavy maths inside effects can run wider internally either way.
 - `crates/kiriko-ui/src/theme.rs` — **the Aizome tokens.** The only file allowed to contain
   colour values. Change a colour here, it changes everywhere.
+- `crates/kiriko-ui/src/icons.rs` — **the toolbar glyphs, drawn not downloaded.** Little
+  pictures like the play triangle or the padlock aren't image files or a special font;
+  Kiriko *draws* each one from a few lines and curves every frame (design rule §5: flat
+  single-colour strokes, no emoji). The upside is they stay crisp at any size and always take
+  the theme colour — so they dim on hover and go accent-orange when the tool is active, just
+  like everything else. To add one, add a name to the `Icon` list and a small recipe of
+  points in `paint`.
 - `crates/kiriko-ui/src/shell.rs` + `app_state.rs` — **the window**: panels, menus,
   shortcuts, and the state glue (current project, dirty flag, autosave timer, recovery
   prompt).

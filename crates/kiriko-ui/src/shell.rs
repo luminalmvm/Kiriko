@@ -4,6 +4,7 @@
 //! Effect Controls / Effects & Presets right, Timeline across the bottom.
 
 use crate::app_state::{AppState, ShapeKind, ToolMode};
+use crate::icons::Icon;
 use crate::splash::{BootLine, Splash};
 use crate::theme::Theme;
 use kiriko_core::model::ProjectItem;
@@ -418,13 +419,18 @@ fn project_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     project_header(ui, theme, app, &doc, &mut actions);
     ui.separator();
     ui.horizontal(|ui| {
-        if ui.small_button("+ Folder").clicked() {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        if icon_button(ui, theme, Icon::Folder, false)
+            .on_hover_text("New folder")
+            .clicked()
+        {
             app.new_folder();
         }
-        // "+ Composition" also accepts a dropped item: dragging footage onto it
-        // opens the New composition dialogue pre-filled from that footage's
-        // size/rate/duration, with the item queued as the first layer (K-068).
-        let new_comp = ui.small_button("+ Composition");
+        // The composition button also accepts a dropped item: dragging footage
+        // onto it opens the New composition dialogue pre-filled from that
+        // footage's size/rate/duration, queuing it as the first layer (K-068).
+        let new_comp = icon_button(ui, theme, Icon::Film, false)
+            .on_hover_text("New composition — or drop footage here to match its settings");
         if new_comp.clicked() {
             app.open_new_comp_dialog(None);
         }
@@ -700,6 +706,43 @@ fn draggable_row<P: std::any::Any + Send + Sync>(
         .inner;
     // Only actually sets the payload while this row is the one being dragged.
     resp.dnd_set_drag_payload(payload);
+    resp
+}
+
+/// A compact icon button in the house toolbar style (docs/15-DESIGN.md §5): a
+/// stroke glyph in `text_secondary`, brightening to `text_primary` on hover and
+/// `accent` when `active`, over a faint surface chip. Returns the response so
+/// the caller reads `.clicked()` and attaches a tooltip with `.on_hover_text`.
+fn icon_button(ui: &mut egui::Ui, theme: &Theme, icon: Icon, active: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), egui::Sense::click());
+    let hovered = resp.hovered();
+    if active || hovered {
+        ui.painter().rect_filled(
+            rect.shrink(1.0),
+            4.0,
+            if active {
+                theme.surface_3
+            } else {
+                theme.surface_2
+            },
+        );
+    }
+    if active {
+        ui.painter().rect_stroke(
+            rect.shrink(1.0),
+            4.0,
+            egui::Stroke::new(1.0_f32, theme.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let color = if active {
+        theme.accent
+    } else if hovered {
+        theme.text_primary
+    } else {
+        theme.text_secondary
+    };
+    crate::icons::paint(ui.painter(), rect, icon, color, 1.5);
     resp
 }
 
@@ -2579,6 +2622,23 @@ fn viewer_footage(
             .inner_margin(egui::Margin::symmetric(8, 4))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    // Transport: play/pause the preview (also the space bar).
+                    let playing = app.is_playing();
+                    if icon_button(
+                        ui,
+                        theme,
+                        if playing { Icon::Pause } else { Icon::Play },
+                        playing,
+                    )
+                    .on_hover_text(if playing {
+                        "Pause (space)"
+                    } else {
+                        "Play (space)"
+                    })
+                    .clicked()
+                    {
+                        app.toggle_play();
+                    }
                     let labels = ["Full", "Half", "Third", "Quarter"];
                     let current = if app.preview_auto_res {
                         "Auto"
@@ -4017,7 +4077,8 @@ fn scale_batch(
 }
 
 /// The combined "Scale %" row (ratio locked): edits both axes keeping the
-/// ratio, with a 🔓 button to unlink. Sets `*unlinked` = true when unlinked.
+/// ratio, with a chain-link button to unlink. Sets `*unlinked` = true when
+/// unlinked.
 fn combined_scale_row(
     ui: &mut egui::Ui,
     app: &mut AppState,
@@ -4073,7 +4134,7 @@ fn combined_scale_row(
         app.selected_layer = Some(ctx.layer.id);
         app.graph_prop = Some(TransformProp::ScaleX);
     }
-    if c.small_button("🔓")
+    if icon_button(&mut c, ctx.theme, Icon::Link, true)
         .on_hover_text("Unlink scale (edit x and y separately)")
         .clicked()
     {
@@ -4121,9 +4182,15 @@ fn combined_scale_row(
 /// A thin row holding the "link scale" button; true when clicked.
 fn link_toggle_row(ui: &mut egui::Ui, ctx: &RowCtx) -> bool {
     let (_row_rect, mut c) = row_frame(ui, ctx, false);
-    c.small_button("🔗 link scale")
+    let clicked = icon_button(&mut c, ctx.theme, Icon::Link, false)
         .on_hover_text("Re-lock the x:y ratio and edit scale as one value")
-        .clicked()
+        .clicked();
+    c.label(
+        egui::RichText::new("Link scale")
+            .small()
+            .color(ctx.theme.text_muted),
+    );
+    clicked
 }
 
 /// Insert or replace a speed keyframe at local time `lt` (seconds) with `speed`
@@ -5073,10 +5140,14 @@ impl Shell {
                             }
                         }
                         let lock = dialog.lock_ratio;
-                        if ui
-                            .selectable_label(lock, if lock { "🔒" } else { "🔓" })
-                            .on_hover_text("Lock aspect ratio")
-                            .clicked()
+                        if icon_button(
+                            ui,
+                            theme,
+                            if lock { Icon::Lock } else { Icon::Unlock },
+                            lock,
+                        )
+                        .on_hover_text("Lock aspect ratio")
+                        .clicked()
                         {
                             dialog.lock_ratio = !lock;
                             dialog.aspect =
@@ -5715,29 +5786,31 @@ impl Shell {
         // tools join as they land; today: navigation and mask drawing.
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
                 let tool = self.app.tool;
-                if ui
-                    .selectable_label(tool == ToolMode::Select, "Select")
+                if icon_button(ui, &self.theme, Icon::Pointer, tool == ToolMode::Select)
                     .on_hover_text("Select / move the view (V)")
                     .clicked()
                 {
                     self.app.tool = ToolMode::Select;
                 }
-                if ui
-                    .selectable_label(tool == ToolMode::Hand, "Hand")
+                if icon_button(ui, &self.theme, Icon::Move, tool == ToolMode::Hand)
                     .on_hover_text("Drag to pan the view (H)")
                     .clicked()
                 {
                     self.app.tool = ToolMode::Hand;
                 }
-                let shape_resp = ui
-                    .selectable_label(
-                        tool == ToolMode::Shape,
-                        format!("Shape · {}", self.app.shape_kind.label()),
-                    )
-                    .on_hover_text(
-                        "Drag in the Viewer to draw a mask — right-click to pick a shape (Q)",
-                    );
+                // The Shape button wears the current shape; right-click to switch.
+                let shape_icon = match self.app.shape_kind {
+                    ShapeKind::Rectangle => Icon::Rectangle,
+                    ShapeKind::Ellipse => Icon::Ellipse,
+                    ShapeKind::Star => Icon::Star,
+                };
+                let shape_resp = icon_button(ui, &self.theme, shape_icon, tool == ToolMode::Shape)
+                    .on_hover_text(format!(
+                        "Draw a {} mask — right-click to pick a shape (Q)",
+                        self.app.shape_kind.label().to_lowercase()
+                    ));
                 if shape_resp.clicked() {
                     self.app.tool = ToolMode::Shape;
                 }
@@ -5753,8 +5826,7 @@ impl Shell {
                         }
                     }
                 });
-                if ui
-                    .selectable_label(tool == ToolMode::Pen, "Pen")
+                if icon_button(ui, &self.theme, Icon::Pen, tool == ToolMode::Pen)
                     .on_hover_text("Click points to draw a mask; click the first to close (G)")
                     .clicked()
                 {
