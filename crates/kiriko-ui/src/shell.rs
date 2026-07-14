@@ -4192,12 +4192,12 @@ fn graph_plot(
                 if hresp.dragged() {
                     if let Some(p) = hresp.interact_pointer_pos() {
                         let (pt, pv) = (t_of(p.x), v_of(p.y));
-                        let dt = if is_out {
-                            (pt - kt).clamp(1e-4, seg)
-                        } else {
-                            (kt - pt).clamp(1e-4, seg)
-                        };
-                        let inf = (dt / seg).clamp(0.02, 1.0);
+                        // Horizontal reach, clamped inside the segment with a
+                        // small floor. Influence and speed share this same reach
+                        // so the handle lands exactly under the cursor — no
+                        // magnetise-to-vertical, no sudden lengthening (Mack).
+                        let dt = (if is_out { pt - kt } else { kt - pt }).clamp(seg * 1e-3, seg);
+                        let inf = dt / seg;
                         let sp = if is_out {
                             (pv - kv) / dt
                         } else {
