@@ -130,7 +130,14 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   segment boundary keeps its source position as an exact fraction, so cutting and
   re-editing a ramp never drifts: a frame synced to a beat stays on the beat. The map
   only chooses *which* source moment shows; how in-between moments become pixels
-  (nearest, blend, optical flow) is a separate per-clip policy. **This is wired up for
+  (nearest, blend, optical flow) is a separate per-clip policy. **Nearest and Blend are
+  wired up now** (optical flow is later): a retimed footage layer's twirl-down has a
+  Frames toggle — Nearest shows the closest real frame (crisp, a touch stuttery in deep
+  slow-mo), Blend crossfades the two neighbouring frames by exactly how far between them the
+  moment falls (smoother, slightly ghosted). The frame-pick and the crossfade are one shared,
+  tested pair of functions (`frame_pick`/`blend_rgba`) used by *both* the preview and the
+  export, so a blended slow-mo frame is identical in each — the preview-equals-export promise
+  holds for interpolation too. **This is wired up for
   Footage layers now**: a Speed % box in a footage layer's twirl-down retimes it (50% =
   half speed, and so on), and the same Retime map feeds preview, export, and the cache
   key — so a retimed clip previews, exports, and caches consistently. The Speed box is a

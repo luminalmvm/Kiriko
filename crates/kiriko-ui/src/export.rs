@@ -139,13 +139,15 @@ impl Renderer<'_> {
         &mut self,
         item: Uuid,
         source_time: f64,
+        blend: bool,
         masks: &[kiriko_core::mask::Mask],
     ) -> Result<Option<Prepared>, String> {
         let Some(info) = self.items.get(&item) else {
             return Ok(None);
         };
-        let source_frame =
-            ((source_time * info.fps).round().max(0.0) as usize).min(info.frames.saturating_sub(1));
+        // Same frame-pick + blend the preview uses, so export matches (K-031).
+        let (source_frame, blend_frame) =
+            crate::pixels::frame_pick(source_time, info.fps, info.frames, blend);
         if !self.decoders.contains_key(&item) {
             let index =
                 kiriko_media::index::build_frame_index(&info.path).map_err(|e| e.to_string())?;
@@ -157,6 +159,10 @@ impl Renderer<'_> {
         let mut px = dec
             .frame_rgba(source_frame, None)
             .map_err(|e| e.to_string())?;
+        if let Some((ceil, w)) = blend_frame {
+            let px2 = dec.frame_rgba(ceil, None).map_err(|e| e.to_string())?;
+            px.rgba = crate::pixels::blend_rgba(&px.rgba, &px2.rgba, w);
+        }
         kiriko_core::mask::apply_masks(
             &mut px.rgba,
             px.width,
@@ -190,16 +196,19 @@ impl Renderer<'_> {
         match &layer.kind {
             LayerKind::Footage { item, retime } => {
                 // Retime maps local → source time; preview uses the same
-                // Retime::evaluate, so export matches preview (K-031).
+                // Retime::evaluate + frame-pick, so export matches preview (K-031).
                 let source_time = retime.as_ref().map(|r| r.evaluate(lt)).unwrap_or(lt);
-                self.prepare_footage(*item, source_time, &layer.masks)
+                let blend = retime.as_ref().is_some_and(|r| {
+                    matches!(r.interpolation, kiriko_core::retime::Interpolation::Blend)
+                });
+                self.prepare_footage(*item, source_time, blend, &layer.masks)
             }
             LayerKind::Sequence { clips } => {
                 // The clip under the playhead, decoded like footage; a comp
                 // clip or a gap contributes nothing (comp clips join later).
                 match kiriko_core::sequence::resolve(clips, lt) {
                     Some((_id, kiriko_core::sequence::ClipSource::Footage(item), st)) => {
-                        self.prepare_footage(item, st, &layer.masks)
+                        self.prepare_footage(item, st, false, &layer.masks)
                     }
                     _ => Ok(None),
                 }

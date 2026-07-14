@@ -55,6 +55,9 @@ pub mod preview {
         /// sizes the layer (auto res must not scale geometry with zoom).
         pub natural_w: u32,
         pub natural_h: u32,
+        /// Frame interpolation: `Some((ceil_frame, weight))` blends
+        /// `source_frame` with `ceil_frame` by `weight` (K-021 Blend policy).
+        pub blend: Option<(usize, f32)>,
     }
 
     pub struct CompLayerPixels {
@@ -249,11 +252,25 @@ pub mod preview {
                 target_width: job.target_width,
             };
             let px = decode(decoders, cache, &req)?;
+            // Blend policy: crossfade with the next source frame.
+            let rgba = if let Some((ceil, w)) = job.blend {
+                let req2 = Request {
+                    generation: req.generation,
+                    item: req.item,
+                    path: job.path.clone(),
+                    frame: ceil,
+                    target_width: req.target_width,
+                };
+                let px2 = decode(decoders, cache, &req2)?;
+                crate::pixels::blend_rgba(&px.rgba, &px2.rgba, w)
+            } else {
+                px.rgba
+            };
             layers.push(CompLayerPixels {
                 layer: job.layer,
                 width: px.width,
                 height: px.height,
-                rgba: px.rgba,
+                rgba,
                 natural_w: job.natural_w,
                 natural_h: job.natural_h,
             });
@@ -2239,6 +2256,8 @@ impl AppState {
                                     target_width: self.target_width_for(video.width),
                                     natural_w: video.width,
                                     natural_h: video.height,
+                                    // Sequence-clip blend follows later; nearest for now.
+                                    blend: None,
                                 });
                             }
                         }
@@ -2269,10 +2288,14 @@ impl AppState {
                     let Some(video) = probe.video.as_ref() else {
                         continue;
                     };
-                    // Retime maps local time → source time before frame pick.
+                    // Retime maps local time → source time before frame pick;
+                    // its interpolation policy decides nearest vs blend.
                     let source_time = retime.as_ref().map(|r| r.evaluate(lt)).unwrap_or(lt);
-                    let source_frame = ((source_time * video.fps()).round().max(0.0) as usize)
-                        .min(src_frames.saturating_sub(1));
+                    let blend_on = retime.as_ref().is_some_and(|r| {
+                        matches!(r.interpolation, kiriko_core::retime::Interpolation::Blend)
+                    });
+                    let (source_frame, blend) =
+                        crate::pixels::frame_pick(source_time, video.fps(), *src_frames, blend_on);
                     jobs.push(preview::CompJob {
                         layer: layer.id,
                         item: *item,
@@ -2281,6 +2304,7 @@ impl AppState {
                         target_width: self.target_width_for(video.width),
                         natural_w: video.width,
                         natural_h: video.height,
+                        blend,
                     });
                 }
             }

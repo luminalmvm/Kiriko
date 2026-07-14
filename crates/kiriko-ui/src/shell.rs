@@ -1540,6 +1540,39 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                             .small()
                             .color(theme.text_muted),
                     );
+                    // Frame interpolation for a retimed footage clip (K-021):
+                    // Nearest is crisp; Blend crossfades neighbours for smoother
+                    // slow motion (optical flow comes later).
+                    if let kiriko_core::model::LayerKind::Footage {
+                        retime: Some(rt), ..
+                    } = &layer.kind
+                    {
+                        use kiriko_core::retime::Interpolation;
+                        let is_blend = matches!(rt.interpolation, Interpolation::Blend);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Frames")
+                                    .small()
+                                    .color(theme.text_muted),
+                            );
+                            let mut set: Option<Interpolation> = None;
+                            if ui.selectable_label(!is_blend, "Nearest").clicked() && is_blend {
+                                set = Some(Interpolation::Nearest);
+                            }
+                            if ui.selectable_label(is_blend, "Blend").clicked() && !is_blend {
+                                set = Some(Interpolation::Blend);
+                            }
+                            if let Some(interp) = set {
+                                let mut r = rt.clone();
+                                r.interpolation = interp;
+                                pending = Some(kiriko_core::Op::SetLayerRetime {
+                                    comp: comp_id,
+                                    layer: layer.id,
+                                    retime: Some(r),
+                                });
+                            }
+                        });
+                    }
                 });
             });
             // Each animatable property as its own timeline row: stopwatch/name/

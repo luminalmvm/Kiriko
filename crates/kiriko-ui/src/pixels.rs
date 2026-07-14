@@ -96,10 +96,77 @@ pub fn letterbox_resize(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u
     out
 }
 
+/// Per-channel linear crossfade of two equal-length RGBA8 buffers:
+/// `a·(1−t) + b·t`. `t` is clamped to 0..1 (0 = all `a`). The shared frame-blend
+/// used by both preview and export so a blended slow-mo frame is identical in
+/// each (K-031). Blends in sRGB bytes — standard NLE frame blending.
+pub fn blend_rgba(a: &[u8], b: &[u8], t: f32) -> Vec<u8> {
+    let t = t.clamp(0.0, 1.0);
+    let n = a.len().min(b.len());
+    (0..n)
+        .map(|i| {
+            (f32::from(a[i]) * (1.0 - t) + f32::from(b[i]) * t)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        })
+        .collect()
+}
+
+/// Which source frame(s) show `source_time` seconds of footage at `fps` over
+/// `frames` frames. Nearest → `(frame, None)`. Blend → `(floor, Some((ceil,
+/// weight)))` where `weight` is how far past `floor` the moment sits (0 at the
+/// floor). Exact frames and the last frame collapse to a single frame (no
+/// blend). Everything is clamped into `0..frames`. Shared by preview + export.
+pub fn frame_pick(
+    source_time: f64,
+    fps: f64,
+    frames: usize,
+    blend: bool,
+) -> (usize, Option<(usize, f32)>) {
+    if frames == 0 {
+        return (0, None);
+    }
+    let last = frames - 1;
+    let pos = (source_time * fps).max(0.0);
+    if !blend {
+        return ((pos.round() as usize).min(last), None);
+    }
+    let floor = (pos.floor() as usize).min(last);
+    let ceil = (floor + 1).min(last);
+    let w = (pos - pos.floor()) as f32;
+    if ceil == floor || w <= 0.0 {
+        (floor, None)
+    } else {
+        (floor, Some((ceil, w)))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blend_and_frame_pick() {
+        // Half-blend of black and mid-grey is mid-value.
+        assert_eq!(
+            blend_rgba(&[0, 0, 0, 0], &[100, 100, 100, 100], 0.5),
+            vec![50, 50, 50, 50]
+        );
+        assert_eq!(blend_rgba(&[0; 4], &[80; 4], 0.0), vec![0; 4]); // t=0 → a
+        assert_eq!(blend_rgba(&[0; 4], &[80; 4], 1.0), vec![80; 4]); // t=1 → b
+                                                                     // Nearest rounds to a single frame.
+        assert_eq!(frame_pick(1.017, 30.0, 100, false), (31, None));
+        // Blend straddles two frames with the fractional weight.
+        let (f, b) = frame_pick(1.017, 30.0, 100, true);
+        assert_eq!(f, 30);
+        let (c, w) = b.unwrap();
+        assert_eq!(c, 31);
+        assert!((w - 0.51).abs() < 0.01);
+        // An exact frame doesn't blend; past the end clamps to the last frame.
+        assert_eq!(frame_pick(1.0, 30.0, 100, true), (30, None));
+        assert_eq!(frame_pick(100.0, 30.0, 100, true), (99, None));
+    }
 
     #[test]
     fn fit_contain_letterboxes_and_pillarboxes() {
