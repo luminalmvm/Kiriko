@@ -137,7 +137,9 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   moment falls (smoother, slightly ghosted). The frame-pick and the crossfade are one shared,
   tested pair of functions (`frame_pick`/`blend_rgba`) used by *both* the preview and the
   export, so a blended slow-mo frame is identical in each — the preview-equals-export promise
-  holds for interpolation too. **This is wired up for
+  holds for interpolation too. The same Frames toggle appears per-clip on Sequence layers
+  (next to Clip speed %), so a single slowed clip can blend while its neighbours stay crisp.
+  **This is wired up for
   Footage layers now**: a Speed % box in a footage layer's twirl-down retimes it (50% =
   half speed, and so on), and the same Retime map feeds preview, export, and the cache
   key — so a retimed clip previews, exports, and caches consistently. The Speed box is a

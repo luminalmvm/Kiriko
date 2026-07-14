@@ -208,7 +208,11 @@ impl Renderer<'_> {
                 // clip or a gap contributes nothing (comp clips join later).
                 match kiriko_core::sequence::resolve(clips, lt) {
                     Some((_id, kiriko_core::sequence::ClipSource::Footage(item), st)) => {
-                        self.prepare_footage(item, st, false, &layer.masks)
+                        let blend =
+                            kiriko_core::sequence::active_clip(clips, lt).is_some_and(|c| {
+                                matches!(c.interpolation, kiriko_core::retime::Interpolation::Blend)
+                            });
+                        self.prepare_footage(item, st, blend, &layer.masks)
                     }
                     _ => Ok(None),
                 }

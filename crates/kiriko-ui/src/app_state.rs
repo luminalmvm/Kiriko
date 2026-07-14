@@ -1508,6 +1508,43 @@ impl AppState {
         self.refresh_preview();
     }
 
+    /// Set the selected clip's frame interpolation (Nearest / Blend).
+    pub fn set_selected_clip_blend(&mut self, blend: bool) {
+        use kiriko_core::model::LayerKind;
+        use kiriko_core::retime::Interpolation;
+        let (Some(comp_id), Some(layer_id), Some(clip_id)) =
+            (self.selected_comp, self.selected_layer, self.selected_clip)
+        else {
+            return;
+        };
+        let doc = self.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let Some(layer) = comp.layers.iter().find(|l| l.id == layer_id) else {
+            return;
+        };
+        let LayerKind::Sequence { clips } = &layer.kind else {
+            return;
+        };
+        let Some(idx) = clips.iter().position(|c| c.id == clip_id) else {
+            return;
+        };
+        let mut new_clips = clips.clone();
+        new_clips[idx].interpolation = if blend {
+            Interpolation::Blend
+        } else {
+            Interpolation::Nearest
+        };
+        self.commit(Op::SetSequenceClips {
+            comp: comp_id,
+            layer: layer_id,
+            clips: new_clips,
+        });
+        #[cfg(feature = "media")]
+        self.refresh_preview();
+    }
+
     /// Delete the clip under the playhead in the selected sequence layer,
     /// leaving a gap (the Vegas surface allows gaps — K-071).
     pub fn delete_clip_at_playhead(&mut self) {
@@ -2246,8 +2283,19 @@ impl AppState {
                         ) = (doc.item(item), self.media.map.get(&item))
                         {
                             if let Some(video) = probe.video.as_ref() {
-                                let source_frame = ((st * video.fps()).round().max(0.0) as usize)
-                                    .min(src_frames.saturating_sub(1));
+                                let blend_on = kiriko_core::sequence::active_clip(clips, lt)
+                                    .is_some_and(|c| {
+                                        matches!(
+                                            c.interpolation,
+                                            kiriko_core::retime::Interpolation::Blend
+                                        )
+                                    });
+                                let (source_frame, blend) = crate::pixels::frame_pick(
+                                    st,
+                                    video.fps(),
+                                    *src_frames,
+                                    blend_on,
+                                );
                                 jobs.push(preview::CompJob {
                                     layer: layer.id,
                                     item,
@@ -2256,8 +2304,7 @@ impl AppState {
                                     target_width: self.target_width_for(video.width),
                                     natural_w: video.width,
                                     natural_h: video.height,
-                                    // Sequence-clip blend follows later; nearest for now.
-                                    blend: None,
+                                    blend,
                                 });
                             }
                         }

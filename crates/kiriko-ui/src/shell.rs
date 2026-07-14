@@ -825,6 +825,8 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     let mut pending: Option<kiriko_core::Op> = None;
     // A per-clip speed edit (percent), applied after the layer loop.
     let mut clip_speed_edit: Option<f64> = None;
+    // A per-clip frame-interpolation edit (true = Blend), applied after.
+    let mut clip_blend_edit: Option<bool> = None;
 
     // ---- ruler + time geometry (07-UI-SPEC Timeline) --------------------
     let panel_left = ui.max_rect().left();
@@ -1524,6 +1526,26 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                                         ui.data_mut(|d| d.remove::<f64>(id));
                                     }
                                 });
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Frames")
+                                            .small()
+                                            .color(theme.text_muted),
+                                    );
+                                    let is_blend = matches!(
+                                        clip.interpolation,
+                                        kiriko_core::retime::Interpolation::Blend
+                                    );
+                                    if ui.selectable_label(!is_blend, "Nearest").clicked()
+                                        && is_blend
+                                    {
+                                        clip_blend_edit = Some(false);
+                                    }
+                                    if ui.selectable_label(is_blend, "Blend").clicked() && !is_blend
+                                    {
+                                        clip_blend_edit = Some(true);
+                                    }
+                                });
                             });
                         }
                     }
@@ -1656,6 +1678,9 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     }
     if let Some(v) = clip_speed_edit {
         app.set_selected_clip_speed(v);
+    }
+    if let Some(b) = clip_blend_edit {
+        app.set_selected_clip_blend(b);
     }
     timeline_mode_toggle(ui, theme, app);
 }
