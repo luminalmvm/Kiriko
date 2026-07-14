@@ -822,7 +822,6 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
         return;
     }
     use kiriko_core::anim::Animation;
-    use kiriko_core::model::TransformProp;
     let mut pending: Option<kiriko_core::Op> = None;
 
     // ---- ruler + time geometry (07-UI-SPEC Timeline) --------------------
@@ -1108,9 +1107,10 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
             );
         }
         // Keyframe glyphs: a clay diamond on the bar at each keyframed time
-        // (across the layer's animated properties). Times are layer-local, so
-        // comp time = start_offset + keyframe time.
-        {
+        // (across the layer's animated properties). Only when collapsed — when
+        // expanded, each property shows its own keys on its own row (K-072).
+        // Times are layer-local, so comp time = start_offset + keyframe time.
+        if !expanded {
             let off = layer.start_offset.0.to_f64();
             let cy = bar.center().y;
             for kt in layer_keyframe_times(layer) {
@@ -1321,139 +1321,39 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                         });
                     });
                 }
-                ui.indent(("transform", layer.id), |ui| {
-                    egui::CollapsingHeader::new(
+            });
+
+            // Transform label + footage speed sit in the left column; the
+            // properties themselves are full-width timeline rows below.
+            ui.scope(|ui| {
+                ui.set_max_width(name_w - 10.0);
+                ui.indent(("txlabel", layer.id), |ui| {
+                    ui.label(
                         egui::RichText::new("Transform")
                             .small()
                             .color(theme.text_muted),
-                    )
-                    .id_salt(("transform-hdr", layer.id))
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        // Footage speed: single value, here in Transform.
-                        if let kiriko_core::model::LayerKind::Footage { retime, .. } = &layer.kind {
-                            speed_row(ui, theme, comp_id, layer, retime, &mut pending);
-                        }
-                        egui::Grid::new(("txgrid", layer.id))
-                            .num_columns(2)
-                            .spacing(egui::vec2(12.0, 2.0))
-                            .show(ui, |ui| {
-                                let is_camera = matches!(
-                                    layer.kind,
-                                    kiriko_core::model::LayerKind::Camera { .. }
-                                );
-                                let mut rows: Vec<(&str, TransformProp, f64)> = Vec::new();
-                                // Origin (anchor): the point transforms pivot
-                                // about. First, like AE. Cameras have no anchor.
-                                if !is_camera {
-                                    rows.push(("Anchor x", TransformProp::AnchorX, 1.0));
-                                    rows.push(("Anchor y", TransformProp::AnchorY, 1.0));
-                                }
-                                rows.extend([
-                                    ("Position x", TransformProp::PositionX, 1.0),
-                                    ("Position y", TransformProp::PositionY, 1.0),
-                                    ("Scale x %", TransformProp::ScaleX, 0.5),
-                                    ("Scale y %", TransformProp::ScaleY, 0.5),
-                                    ("Rotation °", TransformProp::Rotation, 0.5),
-                                    ("Opacity %", TransformProp::Opacity, 0.5),
-                                ]);
-                                if layer.switches.three_d || is_camera {
-                                    rows.extend([
-                                        ("Position z", TransformProp::PositionZ, 1.0),
-                                        ("Rotation x °", TransformProp::RotationX, 0.5),
-                                        ("Rotation y °", TransformProp::RotationY, 0.5),
-                                    ]);
-                                }
-                                // Layer time at the playhead: where keyframes land
-                                // (AE behaviour: editing an animated value writes a
-                                // key at the current time).
-                                let fps = comp.frame_rate.fps().max(1.0);
-                                let lt =
-                                    app.preview_frame as f64 / fps - layer.start_offset.0.to_f64();
-                                for (label, prop, speed) in rows {
-                                    let slot = layer.transform.get(prop);
-                                    let animated = slot.is_animated();
-                                    ui.horizontal(|ui| {
-                                        let clock = if animated { "⏱" } else { "◦" };
-                                        if ui
-                                            .selectable_label(
-                                                animated,
-                                                egui::RichText::new(clock).small(),
-                                            )
-                                            .on_hover_text(if animated {
-                                                "Remove animation (freeze current value)"
-                                            } else {
-                                                "Animate: keyframe at the playhead"
-                                            })
-                                            .clicked()
-                                        {
-                                            let animation = if animated {
-                                                Animation::Static(slot.value_at(lt))
-                                            } else {
-                                                Animation::Keyframed(vec![
-                                                    kiriko_core::anim::Keyframe {
-                                                        time: rational_at(lt),
-                                                        value: slot.value_at(lt),
-                                                        interp_in:
-                                                            kiriko_core::anim::SideInterp::Linear,
-                                                        interp_out:
-                                                            kiriko_core::anim::SideInterp::Linear,
-                                                    },
-                                                ])
-                                            };
-                                            pending = Some(kiriko_core::Op::SetTransformProperty {
-                                                comp: comp_id,
-                                                layer: layer.id,
-                                                prop,
-                                                animation,
-                                            });
-                                        }
-                                        ui.label(
-                                            egui::RichText::new(label)
-                                                .small()
-                                                .color(theme.text_muted),
-                                        );
-                                    });
-                                    {
-                                        let committed = slot.value_at(lt);
-                                        let mut value = match app.prop_edit {
-                                            Some((l, p, v)) if l == layer.id && p == prop => v,
-                                            _ => committed,
-                                        };
-                                        let resp = ui.add(
-                                            egui::DragValue::new(&mut value)
-                                                .speed(speed)
-                                                .max_decimals(2),
-                                        );
-                                        if resp.dragged() || resp.has_focus() {
-                                            app.prop_edit = Some((layer.id, prop, value));
-                                        }
-                                        if resp.drag_stopped() || resp.lost_focus() {
-                                            if (value - committed).abs() > f64::EPSILON {
-                                                let animation = if animated {
-                                                    Animation::Keyframed(upsert_key(
-                                                        slot, lt, value,
-                                                    ))
-                                                } else {
-                                                    Animation::Static(value)
-                                                };
-                                                pending =
-                                                    Some(kiriko_core::Op::SetTransformProperty {
-                                                        comp: comp_id,
-                                                        layer: layer.id,
-                                                        prop,
-                                                        animation,
-                                                    });
-                                            }
-                                            app.prop_edit = None;
-                                        }
-                                    }
-                                    ui.end_row();
-                                }
-                            });
-                    });
+                    );
+                    if let kiriko_core::model::LayerKind::Footage { retime, .. } = &layer.kind {
+                        speed_row(ui, theme, comp_id, layer, retime, &mut pending);
+                    }
                 });
             });
+            // Each animatable property as its own timeline row: stopwatch/name/
+            // value in the left column, that property's keyframes on the track
+            // to the right; click a row to graph it (K-072).
+            transform_property_rows(
+                ui,
+                theme,
+                app,
+                comp,
+                comp_id,
+                layer,
+                name_w,
+                track_left,
+                track_w,
+                duration,
+                &mut pending,
+            );
         }
     }
     // Vertical separator + drag handle: resizes the left column (Mack).
@@ -3062,6 +2962,179 @@ fn layer_keyframe_times(layer: &kiriko_core::model::Layer) -> Vec<f64> {
         collect(&zoom.animation);
     }
     times
+}
+
+/// The layer's transform properties as full-width timeline rows (K-072): each
+/// row shows its stopwatch/name/value in the left column and its own keyframes
+/// as diamonds on the track to the right; clicking a row's name graphs it.
+#[allow(clippy::too_many_arguments)]
+fn transform_property_rows(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    app: &mut AppState,
+    comp: &kiriko_core::model::Composition,
+    comp_id: uuid::Uuid,
+    layer: &kiriko_core::model::Layer,
+    _name_w: f32,
+    track_left: f32,
+    track_w: f32,
+    duration: f64,
+    pending: &mut Option<kiriko_core::Op>,
+) {
+    use kiriko_core::anim::{Animation, Keyframe, SideInterp};
+    use kiriko_core::model::{LayerKind, TransformProp};
+
+    let is_camera = matches!(layer.kind, LayerKind::Camera { .. });
+    let mut rows: Vec<(&str, TransformProp, f64)> = Vec::new();
+    if !is_camera {
+        rows.push(("Anchor x", TransformProp::AnchorX, 1.0));
+        rows.push(("Anchor y", TransformProp::AnchorY, 1.0));
+    }
+    rows.extend([
+        ("Position x", TransformProp::PositionX, 1.0),
+        ("Position y", TransformProp::PositionY, 1.0),
+        ("Scale x %", TransformProp::ScaleX, 0.5),
+        ("Scale y %", TransformProp::ScaleY, 0.5),
+        ("Rotation °", TransformProp::Rotation, 0.5),
+        ("Opacity %", TransformProp::Opacity, 0.5),
+    ]);
+    if layer.switches.three_d || is_camera {
+        rows.extend([
+            ("Position z", TransformProp::PositionZ, 1.0),
+            ("Rotation x °", TransformProp::RotationX, 0.5),
+            ("Rotation y °", TransformProp::RotationY, 0.5),
+        ]);
+    }
+
+    let fps = comp.frame_rate.fps().max(1.0);
+    let lt = app.preview_frame as f64 / fps - layer.start_offset.0.to_f64();
+    let off = layer.start_offset.0.to_f64();
+    let x_of = |s: f64| track_left + (s / duration.max(1e-6)) as f32 * track_w;
+
+    for (label, prop, speed) in rows {
+        let (row_rect, _resp) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
+        let slot = layer.transform.get(prop);
+        let animated = slot.is_animated();
+        let is_graphed = app.selected_layer == Some(layer.id) && app.graph_prop == Some(prop);
+        if is_graphed {
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(
+                    row_rect.min,
+                    egui::pos2(track_left - 6.0, row_rect.bottom()),
+                ),
+                2.0,
+                theme.surface_2,
+            );
+        }
+
+        // Left column: stopwatch · name (click to graph) · value, indented
+        // under the layer and clipped so it never spills into the track.
+        let left_rect = egui::Rect::from_min_max(
+            egui::pos2(row_rect.left() + 24.0, row_rect.top()),
+            egui::pos2(
+                (track_left - 6.0).max(row_rect.left() + 25.0),
+                row_rect.bottom(),
+            ),
+        );
+        let mut c = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(left_rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        c.set_clip_rect(left_rect);
+        let clock = if animated { "⏱" } else { "◦" };
+        if c.selectable_label(animated, egui::RichText::new(clock).small())
+            .on_hover_text(if animated {
+                "Remove animation (freeze current value)"
+            } else {
+                "Animate: keyframe at the playhead"
+            })
+            .clicked()
+        {
+            let animation = if animated {
+                Animation::Static(slot.value_at(lt))
+            } else {
+                Animation::Keyframed(vec![Keyframe {
+                    time: rational_at(lt),
+                    value: slot.value_at(lt),
+                    interp_in: SideInterp::Linear,
+                    interp_out: SideInterp::Linear,
+                }])
+            };
+            *pending = Some(kiriko_core::Op::SetTransformProperty {
+                comp: comp_id,
+                layer: layer.id,
+                prop,
+                animation,
+            });
+        }
+        if c.add(
+            egui::Label::new(egui::RichText::new(label).small().color(if is_graphed {
+                theme.accent
+            } else {
+                theme.text_muted
+            }))
+            .sense(egui::Sense::click()),
+        )
+        .clicked()
+        {
+            app.selected_layer = Some(layer.id);
+            app.graph_prop = Some(prop);
+        }
+        {
+            let committed = slot.value_at(lt);
+            let mut value = match app.prop_edit {
+                Some((l, p, v)) if l == layer.id && p == prop => v,
+                _ => committed,
+            };
+            let resp = c.add(
+                egui::DragValue::new(&mut value)
+                    .speed(speed)
+                    .max_decimals(2),
+            );
+            if resp.dragged() || resp.has_focus() {
+                app.prop_edit = Some((layer.id, prop, value));
+            }
+            if resp.drag_stopped() || resp.lost_focus() {
+                if (value - committed).abs() > f64::EPSILON {
+                    let animation = if animated {
+                        Animation::Keyframed(upsert_key(slot, lt, value))
+                    } else {
+                        Animation::Static(value)
+                    };
+                    *pending = Some(kiriko_core::Op::SetTransformProperty {
+                        comp: comp_id,
+                        layer: layer.id,
+                        prop,
+                        animation,
+                    });
+                }
+                app.prop_edit = None;
+            }
+        }
+
+        // Track: this property's own keyframes as clay diamonds on its row.
+        if let Animation::Keyframed(keys) = &slot.animation {
+            let cy = row_rect.center().y;
+            for k in keys {
+                let x = x_of(off + k.time.to_f64());
+                if x >= track_left - 1.0 && x <= track_left + track_w + 1.0 {
+                    let d = 3.0;
+                    ui.painter().add(egui::Shape::convex_polygon(
+                        vec![
+                            egui::pos2(x, cy - d),
+                            egui::pos2(x + d, cy),
+                            egui::pos2(x, cy + d),
+                            egui::pos2(x - d, cy),
+                        ],
+                        theme.accent,
+                        egui::Stroke::new(1.0_f32, theme.surface_0),
+                    ));
+                }
+            }
+        }
+    }
 }
 
 /// A single "Speed %" row for a footage layer, inside Transform. Editing sets

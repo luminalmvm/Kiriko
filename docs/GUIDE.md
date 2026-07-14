@@ -225,6 +225,13 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   undo per drag), double-click the background to add a key, right-click to remove one.
   The curve you see is sampled from the same evaluator that renders the comp, so what the
   graph shows is exactly what plays.
+- **Property rows in the Timeline** (K-072) — twirl a layer open and each of its animatable
+  properties (Position, Scale, Rotation, Opacity, and the 3D ones) gets its own row: on the
+  left a stopwatch to turn animation on or off, the property's name, and its current value;
+  on the right, along the same time ruler as the layer bars, a little diamond at each of that
+  property's keyframes — so you can see *which* property is keyed *when*, not just that the
+  layer has keys somewhere. Click a property's name to open its curve in the graph view.
+  (When the layer is twirled shut, the layer bar still shows a summary of all its keys.)
 - The **2.5D camera** — the parallax tool. Every layer has a z position and x/y
   rotations alongside the flat transform; they sleep until you switch the layer to 3D
   (the "3D" toggle in its twirl-down) *and* the comp has a Camera layer
