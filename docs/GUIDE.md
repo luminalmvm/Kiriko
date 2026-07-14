@@ -237,8 +237,12 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   Beat markers Kiriko detects from the music (each with a confidence). Re-running beat
   detection replaces only the Beat markers, so cues you dropped by hand are never disturbed.
   `snap_time` returns the nearest marker within a threshold (else the original time) — the
-  basis for cuts landing exactly on the beat. All of this is exact-rational and unit-tested;
-  drawing them on the timeline ruler and a "detect beats" button are the remaining UI wiring.
+  basis for cuts landing exactly on the beat. All of this is exact-rational and unit-tested.
+  In the app, **Composition → Detect beats** mixes the comp's audio on a background thread,
+  runs the detector, and drops a Beat marker on every onset (re-running replaces only those,
+  never your hand-placed cues). The markers show as clay ticks on the timeline ruler — faint
+  or bright by confidence — and scrubbing the playhead snaps to a nearby marker, so you land
+  on the beat.
 - The **graph editor** (tabbed with the Timeline) — click a layer, and its animated
   properties draw as live curves: drag the keyframes (value and time together, one
   undo per drag), double-click the background to add a key, right-click a key for a menu

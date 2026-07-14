@@ -30,6 +30,7 @@ pub enum MenuAction {
     AddCameraLayer,
     AddSequenceLayer,
     CutClip,
+    DetectBeats,
     AddMaskRectangle,
     AddMaskEllipse,
     AddMaskStar,
@@ -117,6 +118,7 @@ impl NativeMenu {
             &item("comp.camera", "Add camera layer", None),
             &item("comp.sequence", "Add sequence layer", None),
             &item("comp.cut", "Cut clip at playhead", cmd_shift(Code::KeyD)),
+            &item("comp.beats", "Detect beats", None),
             &item("comp.settings", "Composition settings…", None),
         ])?;
         let mask = Submenu::new("Add mask", true);
@@ -167,6 +169,7 @@ impl NativeMenu {
                 "comp.camera" => Some(MenuAction::AddCameraLayer),
                 "comp.sequence" => Some(MenuAction::AddSequenceLayer),
                 "comp.cut" => Some(MenuAction::CutClip),
+                "comp.beats" => Some(MenuAction::DetectBeats),
                 "comp.mask.rect" => Some(MenuAction::AddMaskRectangle),
                 "comp.mask.ellipse" => Some(MenuAction::AddMaskEllipse),
                 "comp.mask.star" => Some(MenuAction::AddMaskStar),

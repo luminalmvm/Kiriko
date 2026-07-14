@@ -625,6 +625,11 @@ pub struct AppState {
     comp_audio_rx: std::sync::mpsc::Receiver<(Uuid, kiriko_media::AudioBuffer)>,
     #[cfg(feature = "media")]
     comp_audio_tx: std::sync::mpsc::Sender<(Uuid, kiriko_media::AudioBuffer)>,
+    /// Detected beats (comp id, (time_s, confidence)…) from the analysis thread.
+    #[cfg(feature = "media")]
+    beats_rx: std::sync::mpsc::Receiver<(Uuid, Vec<(f64, f32)>)>,
+    #[cfg(feature = "media")]
+    beats_tx: std::sync::mpsc::Sender<(Uuid, Vec<(f64, f32)>)>,
     /// In-flight property drag (layer, property, provisional value): commits
     /// once on release so a drag is ONE undo step, not hundreds.
     pub prop_edit: Option<(Uuid, kiriko_core::model::TransformProp, f64)>,
@@ -711,6 +716,8 @@ impl Default for AppState {
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
         #[cfg(feature = "media")]
         let (comp_audio_tx, comp_audio_rx) = std::sync::mpsc::channel();
+        #[cfg(feature = "media")]
+        let (beats_tx, beats_rx) = std::sync::mpsc::channel();
         Self {
             store: DocumentStore::new(doc),
             path: None,
@@ -735,6 +742,10 @@ impl Default for AppState {
             comp_audio_rx,
             #[cfg(feature = "media")]
             comp_audio_tx,
+            #[cfg(feature = "media")]
+            beats_rx,
+            #[cfg(feature = "media")]
+            beats_tx,
             #[cfg(feature = "media")]
             audio_rx,
             #[cfg(feature = "media")]
@@ -2391,6 +2402,123 @@ impl AppState {
         }
         self.audio_loaded_comp = Some(comp_id);
         self.audio_loaded = None; // the footage buffer is no longer loaded
+    }
+
+    /// Detect beat markers for `comp_id` off the UI thread: mix the comp's
+    /// audio (same path as playback), run onset + tempo detection, and hand the
+    /// beat times back ([`Self::poll_beats`] turns them into markers). No-op —
+    /// with an error note — for a silent comp.
+    #[cfg(feature = "media")]
+    pub fn detect_beats(&mut self, comp_id: Uuid) {
+        use kiriko_core::model::LayerKind;
+        let doc = self.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let rate = self
+            .ensure_audio_engine()
+            .map(|e| e.device_rate())
+            .unwrap_or(48_000);
+        let mut jobs: Vec<(PathBuf, f64, f64, f64)> = Vec::new();
+        for layer in &comp.layers {
+            if !layer.switches.audible {
+                continue;
+            }
+            let LayerKind::Footage { item, .. } = &layer.kind else {
+                continue;
+            };
+            let has_audio = matches!(
+                self.media.map.get(item),
+                Some(media::MediaStatus::Ready { probe, .. }) if probe.audio.is_some()
+            );
+            if !has_audio {
+                continue;
+            }
+            let Some(ProjectItem::Footage(f)) = doc.item(*item) else {
+                continue;
+            };
+            jobs.push((
+                PathBuf::from(&f.media.absolute_path),
+                layer.in_point.0.to_f64(),
+                layer.out_point.0.to_f64(),
+                layer.start_offset.0.to_f64(),
+            ));
+        }
+        if jobs.is_empty() {
+            self.error = Some("no audio in this composition to detect beats from".into());
+            return;
+        }
+        let duration_s = comp.duration.0.to_f64();
+        let tx = self.beats_tx.clone();
+        std::thread::spawn(move || {
+            let decoded: Vec<(kiriko_media::AudioBuffer, f64, f64, f64)> = jobs
+                .into_iter()
+                .filter_map(|(path, in_s, out_s, off_s)| {
+                    kiriko_media::audio::decode_all(&path, rate)
+                        .ok()
+                        .map(|buf| (buf, in_s, out_s, off_s))
+                })
+                .collect();
+            let total_frames = (duration_s * f64::from(rate)).round().max(0.0) as usize;
+            let placements: Vec<kiriko_audio::mix::PlacedAudio> = decoded
+                .iter()
+                .filter_map(|(buf, in_s, out_s, off_s)| {
+                    let (start_frame, src_start, len) = kiriko_audio::mix::place_on_timeline(
+                        *in_s,
+                        *out_s,
+                        *off_s,
+                        buf.samples.len() / 2,
+                        rate,
+                    )?;
+                    Some(kiriko_audio::mix::PlacedAudio {
+                        start_frame,
+                        samples: &buf.samples[src_start * 2..(src_start + len) * 2],
+                        gain: 1.0,
+                    })
+                })
+                .collect();
+            let samples = kiriko_audio::mix::mix_stereo(&placements, total_frames);
+            let analysis = kiriko_audio::beat::analyse_stereo(&samples, rate, 1.5);
+            let beats: Vec<(f64, f32)> = analysis
+                .onsets
+                .iter()
+                .map(|o| (o.time, o.confidence))
+                .collect();
+            let _ = tx.send((comp_id, beats));
+        });
+    }
+
+    /// Drain finished beat analysis into Beat markers (replacing only the prior
+    /// Beat markers) as one undo step.
+    #[cfg(feature = "media")]
+    pub fn poll_beats(&mut self) {
+        let mut newest = None;
+        while let Ok(msg) = self.beats_rx.try_recv() {
+            newest = Some(msg);
+        }
+        let Some((comp_id, beats)) = newest else {
+            return;
+        };
+        let doc = self.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let new_beats: Vec<kiriko_core::markers::Marker> = beats
+            .iter()
+            .filter_map(|(t, c)| {
+                let time = kiriko_core::Rational::from_f64_on_grid(t.max(0.0), 1000).ok()?;
+                Some(kiriko_core::markers::Marker::beat(
+                    uuid::Uuid::now_v7(),
+                    time,
+                    *c,
+                ))
+            })
+            .collect();
+        let markers = kiriko_core::markers::with_regenerated_beats(&comp.markers, new_beats);
+        self.commit(kiriko_core::Op::SetCompMarkers {
+            comp: comp_id,
+            markers,
+        });
     }
 
     #[cfg(feature = "media")]

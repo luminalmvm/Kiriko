@@ -892,12 +892,44 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
             );
         }
     }
+    // Markers (docs 03 §11): beats are faint clay ticks fading by confidence;
+    // user/chapter markers are full-height and solid.
+    for m in &comp.markers {
+        let x = x_of(m.time.0.to_f64());
+        if x < track_left - 1.0 || x > track_left + track_w + 1.0 {
+            continue;
+        }
+        let (col, top) = match m.kind {
+            kiriko_core::markers::MarkerKind::Beat { confidence } => (
+                theme
+                    .accent
+                    .gamma_multiply(0.25 + 0.55 * confidence.clamp(0.0, 1.0)),
+                ruler_rect.top() + 9.0,
+            ),
+            _ => (theme.accent, ruler_rect.top()),
+        };
+        ui.painter().line_segment(
+            [egui::pos2(x, top), egui::pos2(x, ruler_rect.bottom())],
+            egui::Stroke::new(1.0_f32, col),
+        );
+    }
     if ruler_resp.clicked() || ruler_resp.dragged() {
         if let Some(pos) = ruler_resp.interact_pointer_pos() {
             let frac = ((pos.x - track_left) / track_w).clamp(0.0, 1.0) as f64;
+            // Snap the scrub to a nearby marker (within ~6 px) so the playhead
+            // lands on the beat (docs/impl/beat-detection.md grid assist).
+            let raw = frac * duration;
+            let threshold = 6.0 / track_w as f64 * duration;
+            let secs = kiriko_core::markers::snap_time(
+                rational_at(raw),
+                &comp.markers,
+                rational_at(threshold),
+            )
+            .to_f64();
             app.preview_comp = Some(comp_id);
             app.comp_playback = None; // scrubbing pauses
-            app.preview_frame = ((frac * frames as f64) as usize).min(frames.saturating_sub(1));
+            app.preview_frame =
+                ((secs / duration * frames as f64) as usize).min(frames.saturating_sub(1));
             // Dragging is scrubbing: decode a coarse draft for instant feedback.
             // A plain click jumps once and wants the specified resolution.
             app.preview_draft = ruler_resp.dragged();
@@ -4227,6 +4259,12 @@ impl Shell {
                 MenuAction::AddCameraLayer => self.app.add_camera_layer(),
                 MenuAction::AddSequenceLayer => self.app.add_sequence_layer(),
                 MenuAction::CutClip => self.app.cut_sequence_at_playhead(),
+                MenuAction::DetectBeats => {
+                    #[cfg(feature = "media")]
+                    if let Some(id) = self.app.preview_comp.or(self.app.selected_comp) {
+                        self.app.detect_beats(id);
+                    }
+                }
                 MenuAction::AddMaskRectangle => self.add_mask_to_selected(ShapeKind::Rectangle),
                 MenuAction::AddMaskEllipse => self.add_mask_to_selected(ShapeKind::Ellipse),
                 MenuAction::AddMaskStar => self.add_mask_to_selected(ShapeKind::Star),
@@ -4593,6 +4631,7 @@ impl Shell {
         {
             self.app.poll_audio();
             self.app.poll_comp_audio();
+            self.app.poll_beats();
             // Transport keys (07-UI-SPEC keymap; shuttle speeds arrive with
             // the ring buffer — J/left step back, L plays, K/Space pause).
             if (self.app.preview_item.is_some() || self.app.preview_comp.is_some())
@@ -5023,6 +5062,13 @@ impl Shell {
                     }
                     if ui.button("Cut clip at playhead").clicked() {
                         self.app.cut_sequence_at_playhead();
+                        ui.close_menu();
+                    }
+                    #[cfg(feature = "media")]
+                    if ui.button("Detect beats").clicked() {
+                        if let Some(id) = self.app.preview_comp.or(self.app.selected_comp) {
+                            self.app.detect_beats(id);
+                        }
                         ui.close_menu();
                     }
                     ui.separator();
