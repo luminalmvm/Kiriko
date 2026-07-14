@@ -3273,21 +3273,37 @@ fn graph_lane_plot(
         hint_in_rect(ui, theme, plot_rect, "The selected layer is gone.");
         return;
     };
-    // Retime channel (K-075): a retimed footage layer's Speed, graphed like a
-    // property — value lens = source position as timecode, derivative = speed %.
+    // Retime channel (K-075): a retimed footage layer's curve. The Time (value)
+    // lens is now the ordinary graph editor on the source-position channel
+    // (K-078); only the Velocity (speed) lens keeps the bespoke retime editor
+    // with its ramp presets.
     if app.graph_retime {
         if let kiriko_core::model::LayerKind::Footage {
             retime: Some(rt), ..
         } = &layer.kind
         {
-            // Source frame rate for the timecode: the probed footage fps when
-            // media is present, else the comp's rate as a reasonable fallback.
-            let src_fps = layer_source_fps(app, layer, comp.frame_rate.fps());
-            // The marquee lives on transform-property curves only; a keyframe
-            // selection lives only while its channel is the one graphed.
-            app.graph_marquee = None;
-            app.graph_selection = None;
-            graph_plot_retime(ui, theme, app, comp, layer, rt, src_fps, plot_rect);
+            if app.graph_speed_view {
+                // Source frame rate for the timecode: the probed footage fps
+                // when media is present, else the comp's rate as a fallback.
+                let src_fps = layer_source_fps(app, layer, comp.frame_rate.fps());
+                // The marquee lives on curve channels only; a keyframe selection
+                // lives only while its channel is the one graphed.
+                app.graph_marquee = None;
+                app.graph_selection = None;
+                graph_plot_retime(ui, theme, app, comp, layer, rt, src_fps, plot_rect);
+            } else {
+                // `current` is unused for the Time channel; pass a placeholder.
+                graph_plot(
+                    ui,
+                    theme,
+                    app,
+                    comp,
+                    layer,
+                    TransformProp::PositionX,
+                    true,
+                    plot_rect,
+                );
+            }
             return;
         }
         app.graph_retime = false; // selected layer isn't retimed footage
@@ -3296,7 +3312,7 @@ fn graph_lane_plot(
     // a flat line you can double-click to add the first keyframe to.
     let current = app.graph_prop.unwrap_or(TransformProp::PositionX);
     app.graph_prop = Some(current);
-    graph_plot(ui, theme, app, comp, layer, current, plot_rect);
+    graph_plot(ui, theme, app, comp, layer, current, false, plot_rect);
 }
 
 /// The Retime channel graphed (K-075): the value lens plots the source position
@@ -3762,6 +3778,7 @@ fn graph_multi_selection(
 /// lives in the timeline's bottom bar). In the speed lens each key's tangent
 /// is draggable (K-070); the derivative curve updates live and the release
 /// writes bezier speeds back to the keyframes.
+#[allow(clippy::too_many_arguments)]
 fn graph_plot(
     ui: &mut egui::Ui,
     theme: &Theme,
@@ -3769,6 +3786,11 @@ fn graph_plot(
     comp: &kiriko_core::model::Composition,
     layer: &kiriko_core::model::Layer,
     current: kiriko_core::model::TransformProp,
+    // When set, this is the footage layer's Retime *Time* channel (K-078): the
+    // curve is source position over local time, read from and committed back to
+    // the layer's Retime rather than a transform property. Otherwise `current`
+    // names the transform property being graphed.
+    is_retime: bool,
     rect: egui::Rect,
 ) {
     use kiriko_core::anim::{Animation, Keyframe, SideInterp};
@@ -3783,14 +3805,33 @@ fn graph_plot(
         set_sides = Some(kiriko_core::anim::EASY_EASE);
     }
 
-    let slot = layer.transform.get(current);
+    // The Time channel's keys are synthesised from the Retime store (owned, so
+    // they outlive the borrow); a transform property borrows its slot directly.
+    let retime_keys: Option<Vec<Keyframe>> = if is_retime {
+        match &layer.kind {
+            kiriko_core::model::LayerKind::Footage {
+                retime: Some(rt), ..
+            } => Some(rt.source_keyframes()),
+            _ => None,
+        }
+    } else {
+        None
+    };
     // A still (Static) property has no keys yet: graph a flat line at its value
-    // that you can double-click to add the first keyframe to (Mack).
-    let static_val = slot.value_at(0.0);
+    // that you can double-click to add the first keyframe to (Mack). The Time
+    // channel always has ≥ 2 boundary keys, so its static value is just the
+    // first key (only used if a curve were somehow empty).
     let empty_keys: Vec<Keyframe> = Vec::new();
-    let keys: &Vec<Keyframe> = match &slot.animation {
-        Animation::Keyframed(k) => k,
-        _ => &empty_keys,
+    let (keys, static_val): (&Vec<Keyframe>, f64) = match &retime_keys {
+        Some(ks) => (ks, ks.first().map_or(0.0, |k| k.value)),
+        None => {
+            let slot = layer.transform.get(current);
+            let sv = slot.value_at(0.0);
+            match &slot.animation {
+                Animation::Keyframed(k) => (k, sv),
+                _ => (&empty_keys, sv),
+            }
+        }
     };
 
     // The marquee selection for this channel. A selection made on any other
@@ -3798,13 +3839,17 @@ fn graph_plot(
     // (something edited them underneath), clears here rather than risk ever
     // touching the wrong keyframes.
     let selection: Vec<usize> = match &app.graph_selection {
-        Some(s) if s.layer == layer_id && s.prop == current => match s.indices_for(keys) {
-            Some(sel) => sel,
-            None => {
-                app.graph_selection = None;
-                Vec::new()
+        Some(s)
+            if s.layer == layer_id && s.retime == is_retime && (is_retime || s.prop == current) =>
+        {
+            match s.indices_for(keys) {
+                Some(sel) => sel,
+                None => {
+                    app.graph_selection = None;
+                    Vec::new()
+                }
             }
-        },
+        }
         Some(_) => {
             app.graph_selection = None;
             Vec::new()
@@ -3955,6 +4000,7 @@ fn graph_plot(
                 app.graph_selection = (!hit.is_empty()).then(|| crate::app_state::GraphSelection {
                     layer: layer_id,
                     prop: current,
+                    retime: is_retime,
                     keys: hit.into_iter().map(|i| (i, keys[i].time)).collect(),
                 });
             }
@@ -4026,7 +4072,9 @@ fn graph_plot(
     // Y-axis scale: labelled gridlines in the active lens's units — the value
     // itself, or its rate of change per second in the speed lens.
     {
-        let unit = prop_unit(current);
+        // The Time channel reads in seconds of source; transform props use
+        // their own unit (%, °, or none).
+        let unit = if is_retime { "s" } else { prop_unit(current) };
         if app.graph_speed_view {
             graph_y_axis(ui, theme, rect, s_lo, s_hi, |v| {
                 format!("{}{unit}/s", fmt_axis_value(v, s_hi - s_lo))
@@ -4293,6 +4341,7 @@ fn graph_plot(
             app.graph_selection = Some(crate::app_state::GraphSelection {
                 layer: layer_id,
                 prop: current,
+                retime: is_retime,
                 keys: vec![(idx, key.time)],
             });
         }
@@ -4310,6 +4359,7 @@ fn graph_plot(
                         app.graph_selection = Some(crate::app_state::GraphSelection {
                             layer: layer_id,
                             prop: current,
+                            retime: is_retime,
                             keys: vec![(idx, key.time)],
                         });
                     }
@@ -4335,6 +4385,7 @@ fn graph_plot(
                         app.graph_selection = ni.map(|n| crate::app_state::GraphSelection {
                             layer: layer_id,
                             prop: current,
+                            retime: is_retime,
                             keys: vec![(n, nt)],
                         });
                     }
@@ -4432,16 +4483,30 @@ fn graph_plot(
         pending = Some(new_keys);
     }
     if let Some(new_keys) = pending {
-        let animation = if new_keys.is_empty() {
-            Animation::Static(slot.value_at(0.0))
+        let op = if is_retime {
+            // Rebuild the Retime store from the edited Time keyframes (K-078).
+            // Fewer than two keys (or otherwise unbuildable) can't be a retime,
+            // so that edit is dropped and the existing store kept.
+            match kiriko_core::retime::Retime::from_source_keyframes(&new_keys) {
+                Some(rt) => kiriko_core::Op::SetLayerRetime {
+                    comp: comp.id,
+                    layer: layer_id,
+                    retime: Some(rt),
+                },
+                None => return,
+            }
         } else {
-            Animation::Keyframed(new_keys)
-        };
-        let op = kiriko_core::Op::SetTransformProperty {
-            comp: comp.id,
-            layer: layer_id,
-            prop: current,
-            animation,
+            let animation = if new_keys.is_empty() {
+                Animation::Static(static_val)
+            } else {
+                Animation::Keyframed(new_keys)
+            };
+            kiriko_core::Op::SetTransformProperty {
+                comp: comp.id,
+                layer: layer_id,
+                prop: current,
+                animation,
+            }
         };
         follow_edit(app, &op); // the graph follows the key you just touched
         app.commit(op);
@@ -8577,6 +8642,7 @@ mod dock_tests {
         let sel = GraphSelection {
             layer: uuid::Uuid::nil(),
             prop: kiriko_core::model::TransformProp::PositionX,
+            retime: false,
             keys: vec![(0, keys[0].time), (1, keys[1].time)],
         };
         assert_eq!(sel.indices_for(&keys), Some(vec![0, 1]));

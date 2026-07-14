@@ -646,8 +646,13 @@ type BeatMsg = (Uuid, f64, Vec<(f64, f32)>);
 pub struct GraphSelection {
     /// The layer whose curve the selection was made on.
     pub layer: Uuid,
-    /// The transform property (channel) the indices refer to.
+    /// The transform property (channel) the indices refer to. Ignored when
+    /// `retime` is set — the Retime Time channel isn't a transform property.
     pub prop: kiriko_core::model::TransformProp,
+    /// True when the selection was made on the footage layer's Retime Time
+    /// channel (K-078) rather than a transform property, so a selection on one
+    /// never leaks onto the other.
+    pub retime: bool,
     /// (keyframe index, its time when selected), ascending by index.
     pub keys: Vec<(usize, Rational)>,
 }

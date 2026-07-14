@@ -336,16 +336,24 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   Delete. Whatever the handles, the curve always passes exactly through the keys.
   A **footage layer** also carries a **Retime channel** here, named for the lens you are in
   (K-076): **Time** in the value view, **Velocity** in the speed view. In the **Time** lens it
-  behaves like every other property — a stopwatch turns keyframing on (adding a key that holds
-  the source frame showing at the playhead), and its value reads and edits as an
-  `HH:MM:SS:FF` timecode: "which moment of the footage is on screen here". This is After
-  Effects' *Time Remap*. Enabling it always yields at least the start and end keys — press
-  the stopwatch with the playhead at the layer's very start or end and those endpoint keys
-  simply appear (the stopwatch still lights; nothing is silently skipped). In the
-  **Velocity** lens the same channel reads playback speed per cent, and dragging a point
-  authors a ramp — the Vegas gesture. They are two views of one store: a straight line of
-  value keys *is* a constant speed, a curve *is* a changing speed. The channel opens to the
-  Time view by default; a "Vegas" tick makes it open to Velocity.
+  is now *exactly* an ordinary property graph (K-078): the curve is the source position (in
+  seconds of footage) over the clip's own time — "which moment of the footage is on screen
+  here", After Effects' *Time Remap* — and it edits with the same tools as Position or Scale.
+  Keys drag, double-click adds one, and you can shape each with the same **gold bezier
+  handles** and **F9** easy-ease as any property; the view auto-fits to the curve. A straight
+  line is a constant speed, a curve is a speeding-up or slowing-down. A stopwatch turns
+  keyframing on (adding a key that holds the source frame showing at the playhead); enabling it
+  always yields at least the start and end keys — press the stopwatch with the playhead at the
+  layer's very start or end and those endpoint keys simply appear (the stopwatch still lights;
+  nothing is silently skipped). In the **Velocity** lens the same channel reads playback speed
+  per cent, and dragging a point authors a ramp — the Vegas gesture, still its own bespoke
+  editor with the ramp presets. They are two views of one store: shaping the Time curve with
+  handles re-expresses the whole channel in After Effects terms, so any eased speed ramp you
+  built in the Velocity lens is replaced by explicit value tangents once you drag a Time
+  handle. The channel opens to the Time view by default; a "Vegas" tick makes it open to
+  Velocity. (Time values show as plain seconds for now, like any property's axis — a proper
+  `HH:MM:SS:FF` timecode readout is still to come. A *held* Time key — freeze then jump — also
+  isn't distinct yet; a Hold there reads as a straight line.)
   (Frame interpolation — how in-between frames are synthesised, Nearest / Blend / Flow — is a
   per-layer retime setting in the data model, but is not surfaced in the timeline for now; it
   will return in a dedicated place.)
