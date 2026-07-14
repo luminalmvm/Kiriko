@@ -716,6 +716,10 @@ pub struct AppState {
     /// speed-% (derivative) lens by default; off, to the frame-timecode lens.
     /// Session state for now — a persisted Settings home is a later refinement.
     pub vegas_default_lens: bool,
+    /// In-flight speed-keyframe drag on the Retime channel's % lens (K-075, 2b):
+    /// (keyframe index, provisional speed per cent). The retime rebuilds from the
+    /// edited keyframe on release; downstream boundaries recompute (K-070).
+    pub graph_retime_edit: Option<(usize, f64)>,
     /// Comp shown in the Viewer (takes precedence over preview_item).
     pub preview_comp: Option<Uuid>,
     /// Wall-clock comp playback v0 (the frame scheduler replaces this):
@@ -821,6 +825,7 @@ impl Default for AppState {
             graph_speed_view: false,
             graph_retime: false,
             vegas_default_lens: false,
+            graph_retime_edit: None,
             preview_comp: None,
             comp_playback: None,
             preview_item: None,
@@ -2251,6 +2256,7 @@ impl AppState {
             || self.trim_edit.is_some()
             || self.graph_edit.is_some()
             || self.graph_speed_edit.is_some()
+            || self.graph_retime_edit.is_some()
             || self.mask_drag.is_some()
             || self.origin_drag.is_some()
             || self.shape_drag.is_some()

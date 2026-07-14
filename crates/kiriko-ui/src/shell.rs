@@ -2691,9 +2691,11 @@ fn graph_editor_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     graph_plot(ui, theme, app, comp, layer, current, plot_rect);
 }
 
-/// The Retime channel graphed (K-075, increment 2a): the value lens plots the
-/// source position read as `HH:MM:SS:FF` frame timecode, the derivative lens
-/// plots speed per cent. Display-only for now — in-graph segment editing is 2b.
+/// The Retime channel graphed (K-075): the value lens plots the source position
+/// read as `HH:MM:SS:FF` frame timecode, the derivative lens plots speed per
+/// cent. In the speed lens the speed keyframes are draggable (2b) — the retime
+/// rebuilds from the edited keyframe and downstream boundaries recompute (K-070).
+/// The value lens is read-only for now, as are eased/Map ramps in the speed lens.
 #[allow(clippy::too_many_arguments)]
 fn graph_plot_retime(
     ui: &mut egui::Ui,
@@ -2736,16 +2738,40 @@ fn graph_plot_retime(
     let duration = comp.duration.0.to_f64().max(1e-6);
     let x_of = |t: f64| rect.left() + ((t / duration) as f32) * rect.width();
 
-    // Sample the active lens across the pane width.
     let speed_view = app.graph_speed_view;
+
+    // Speed keyframes in % (K-075, 2b): draggable in the speed lens. Present only
+    // when the retime is a Linear-Rate keyframe store; eased/Map ramps stay
+    // read-only until the §9.2 editing lands.
+    let dur = layer.out_point.0;
+    let kfs: Vec<(f64, f64)> = retime
+        .speed_keyframes()
+        .map(|ks| {
+            ks.iter()
+                .map(|(t, s)| (t.to_f64(), s.to_f64() * 100.0))
+                .collect()
+        })
+        .unwrap_or_default();
+    let pct_to_speed = |pct: f64| {
+        kiriko_core::Rational::from_f64_on_grid(pct / 100.0, 1000)
+            .unwrap_or(kiriko_core::Rational::ONE)
+    };
+    // While dragging a handle, a provisional retime drives the live curve.
+    let provisional = app.graph_retime_edit.and_then(|(idx, pct)| {
+        let &(t, _) = kfs.get(idx)?;
+        speed_with_key(&Some(retime.clone()), dur, t, pct_to_speed(pct))
+    });
+    let sampled: &kiriko_core::retime::Retime = provisional.as_ref().unwrap_or(retime);
+
+    // Sample the active lens across the pane width.
     let samples = (rect.width() as usize / 2).max(16);
     let values: Vec<(f64, f64)> = (0..=samples)
         .map(|i| {
             let t = duration * i as f64 / samples as f64;
             let v = if speed_view {
-                retime.speed_at(t) * 100.0
+                sampled.speed_at(t) * 100.0
             } else {
-                retime.evaluate(t)
+                sampled.evaluate(t)
             };
             (t, v)
         })
@@ -2756,6 +2782,10 @@ fn graph_plot_retime(
     if speed_view {
         lo = lo.min(0.0); // always frame 0% and 100%
         hi = hi.max(100.0);
+        if let Some((_, p)) = app.graph_retime_edit {
+            lo = lo.min(p); // keep the dragged handle in frame
+            hi = hi.max(p);
+        }
     }
     let pad = ((hi - lo).abs().max(1.0)) * 0.12;
     let (lo, hi) = (lo - pad, hi + pad);
@@ -2803,6 +2833,51 @@ fn graph_plot_retime(
         egui::Stroke::new(1.5_f32, colour),
     ));
 
+    // Draggable speed-keyframe handles (K-075, 2b) — the speed lens only.
+    let mut pending: Option<kiriko_core::Op> = None;
+    if speed_view {
+        for (idx, &(t, pct)) in kfs.iter().enumerate() {
+            let shown_pct = match app.graph_retime_edit {
+                Some((i, p)) if i == idx => p,
+                _ => pct,
+            };
+            let pos = egui::pos2(x_of(t), y_of(shown_pct));
+            let resp = ui.interact(
+                egui::Rect::from_center_size(pos, egui::vec2(12.0, 12.0)),
+                ui.id().with(("rtkey", layer.id, idx)),
+                egui::Sense::click_and_drag(),
+            );
+            let active = app.graph_retime_edit.is_some_and(|(i, _)| i == idx);
+            let colour = if resp.hovered() || active {
+                theme.accent
+            } else {
+                theme.curve[1]
+            };
+            ui.painter().circle_filled(pos, 4.0, colour);
+            if resp.dragged() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let frac = ((rect.bottom() - p.y) / rect.height()) as f64;
+                    app.graph_retime_edit = Some((idx, lo + frac * (hi - lo)));
+                }
+            }
+            if resp.drag_stopped() {
+                if let Some((i, p)) = app.graph_retime_edit.take() {
+                    if i == idx {
+                        if let Some(new_rt) =
+                            speed_with_key(&Some(retime.clone()), dur, t, pct_to_speed(p))
+                        {
+                            pending = Some(kiriko_core::Op::SetLayerRetime {
+                                comp: comp.id,
+                                layer: layer.id,
+                                retime: Some(new_rt),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Playhead + a header readout (source timecode and speed %).
     if app.preview_comp == Some(comp.id) {
         let lt = app.preview_frame as f64 / comp.frame_rate.fps().max(1.0)
@@ -2814,8 +2889,8 @@ fn graph_plot_retime(
         );
         let readout = format!(
             "{}   {:.1}%",
-            fmt_timecode_frames(retime.evaluate(lt), src_fps),
-            retime.speed_at(lt) * 100.0
+            fmt_timecode_frames(sampled.evaluate(lt), src_fps),
+            sampled.speed_at(lt) * 100.0
         );
         ui.painter().text(
             egui::pos2(rect.right() - 6.0, rect.top() + 4.0),
@@ -2824,6 +2899,10 @@ fn graph_plot_retime(
             egui::FontId::monospace(11.0),
             theme.text_secondary,
         );
+    }
+
+    if let Some(op) = pending {
+        app.commit(op);
     }
 }
 
@@ -6254,5 +6333,23 @@ mod dock_tests {
         assert_eq!(fmt_timecode_frames(1.0, 25.0), "00:00:01:00");
         // Hours / minutes / seconds compose.
         assert_eq!(fmt_timecode_frames(3661.0, 24.0), "01:01:01:00");
+    }
+
+    // K-075 2b: dragging a speed keyframe in the % lens (via speed_with_key)
+    // authors a ramp — the speed set is the speed read back, and the segment
+    // start is pinned (K-070 frame-pinning: only downstream recomputes).
+    #[test]
+    fn retime_speed_keyframe_edit_round_trips() {
+        use kiriko_core::retime::Retime;
+        use kiriko_core::Rational;
+        let dur = Rational::from_f64_on_grid(2.0, 1000).unwrap();
+        let base = Some(Retime::constant_speed(dur, Rational::ZERO, Rational::ONE));
+        // Drag the end keyframe (t = 2 s) to 50% — a 100% → 50% ramp.
+        let speed = Rational::from_f64_on_grid(0.5, 1000).unwrap();
+        let edited = speed_with_key(&base, dur, 2.0, speed).expect("retime rebuilds");
+        let end = edited.speed_at(2.0 - 1e-6) * 100.0;
+        assert!((end - 50.0).abs() < 1.0, "end speed {end} ≈ 50");
+        let start = edited.speed_at(1e-6) * 100.0;
+        assert!((start - 100.0).abs() < 1.0, "start speed {start} ≈ 100");
     }
 }

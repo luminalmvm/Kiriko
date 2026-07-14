@@ -289,6 +289,10 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   derivative). Both are editable, and they are the *same* data seen two ways (K-070): in the
   speed view you drag a key up or down to set how fast the value is moving at that moment,
   which is often the easier way to make motion feel right. Editing one view updates the other.
+  A **retimed footage layer** also shows a **"Speed (Retime)"** entry here (K-075): its value
+  view reads the source frame showing at each point as `HH:MM:SS:FF` timecode, its speed view
+  reads playback speed per cent, and dragging a speed point in that lens authors a ramp — the
+  Vegas gesture. (A "Vegas" tick makes the channel open to the per-cent view by default.)
 - **Property rows in the Timeline** (K-072) — twirl a layer open and each of its animatable
   properties (Position, Scale, Rotation, Opacity, and the 3D ones) gets its own row: on the
   left a stopwatch to turn animation on or off, the property's name, and its current value;
