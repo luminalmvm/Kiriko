@@ -150,7 +150,7 @@ impl egui_tiles::Behavior<Panel> for DockBehavior<'_> {
         if let Some(active) = tabs.active {
             if let Some(egui_tiles::Tile::Pane(panel)) = tiles.get(active) {
                 if ui
-                    .small_button("⇱")
+                    .add(egui::Button::new(crate::icons::text(Icon::PopOut, 12.0)).frame(false))
                     .on_hover_text("Pop out into its own window")
                     .clicked()
                 {
@@ -5756,12 +5756,14 @@ fn keyframe_nav(
         return;
     };
     let tol = 0.5 / ctx.fps.max(1.0); // within half a frame counts as "on" it
-    let small = |g: &str| egui::Button::new(egui::RichText::new(g).small()).frame(false);
+                                      // Iconoir glyphs (K-085): the old ◄ ◆ ► characters aren't in the UI fonts
+                                      // and rendered as blanks. No colour is set, so disabled buttons dim.
+    let small = |i: Icon| egui::Button::new(crate::icons::text(i, 11.0)).frame(false);
     let mut jump_to: Option<f64> = None;
 
     let has_prev = keys.iter().any(|k| k.time.to_f64() < ctx.lt - tol);
     if ui
-        .add_enabled(has_prev, small("◄"))
+        .add_enabled(has_prev, small(Icon::PrevKeyframe))
         .on_hover_text("Previous keyframe")
         .clicked()
     {
@@ -5774,7 +5776,11 @@ fn keyframe_nav(
 
     let on_key = keys.iter().any(|k| (k.time.to_f64() - ctx.lt).abs() < tol);
     if ui
-        .add(small(if on_key { "◆" } else { "◇" }))
+        .add(small(if on_key {
+            Icon::Keyframe
+        } else {
+            Icon::KeyframeAdd
+        }))
         .on_hover_text(if on_key {
             "Remove keyframe here"
         } else {
@@ -5806,7 +5812,7 @@ fn keyframe_nav(
 
     let has_next = keys.iter().any(|k| k.time.to_f64() > ctx.lt + tol);
     if ui
-        .add_enabled(has_next, small("►"))
+        .add_enabled(has_next, small(Icon::NextKeyframe))
         .on_hover_text("Next keyframe")
         .clicked()
     {
@@ -6250,14 +6256,15 @@ fn speed_property_row(
         }
     }
 
-    // Keyframe navigator (◄ ◆ ►), like every other property row — shown once the
-    // channel is keyed. ◄ ► jump the playhead between this lens's keys; the
-    // diamond adds a key at the playhead, or removes an interior one (the
-    // structural start/end keys stay, shown as a disabled ◆).
+    // Keyframe navigator, like every other property row — shown once the
+    // channel is keyed. The arrows jump the playhead between this lens's keys;
+    // the keyframe button adds a key at the playhead, or removes an interior
+    // one (the structural start/end keys stay, shown disabled). Iconoir glyphs
+    // (K-085) — the old ◄ ◆ ► characters weren't in the UI fonts.
     let nav_on = if speed_lens { animated } else { time_enabled };
     if nav_on {
         let tol = 0.5 / fps.max(1.0);
-        let small = |g: &str| egui::Button::new(egui::RichText::new(g).small()).frame(false);
+        let small = |i: Icon| egui::Button::new(crate::icons::text(i, 11.0)).frame(false);
         let key_times: Vec<f64> = if speed_lens {
             keys.as_ref()
                 .map(|k| k.iter().map(|(t, _)| t.to_f64()).collect())
@@ -6271,7 +6278,7 @@ fn speed_property_row(
         let mut jump_to: Option<f64> = None;
 
         let has_prev = key_times.iter().any(|&t| t < ctx.lt - tol);
-        if c.add_enabled(has_prev, small("◄"))
+        if c.add_enabled(has_prev, small(Icon::PrevKeyframe))
             .on_hover_text("Previous keyframe")
             .clicked()
         {
@@ -6286,7 +6293,14 @@ fn speed_property_row(
         let at_endpoint = ctx.lt <= tol || (dur.to_f64() - ctx.lt).abs() < tol;
         let removable = on_key && !at_endpoint;
         let diamond = c
-            .add_enabled(!on_key || removable, small(if on_key { "◆" } else { "◇" }))
+            .add_enabled(
+                !on_key || removable,
+                small(if on_key {
+                    Icon::Keyframe
+                } else {
+                    Icon::KeyframeAdd
+                }),
+            )
             .on_hover_text(if on_key {
                 "Remove keyframe here"
             } else {
@@ -6324,7 +6338,7 @@ fn speed_property_row(
         }
 
         let has_next = key_times.iter().any(|&t| t > ctx.lt + tol);
-        if c.add_enabled(has_next, small("►"))
+        if c.add_enabled(has_next, small(Icon::NextKeyframe))
             .on_hover_text("Next keyframe")
             .clicked()
         {

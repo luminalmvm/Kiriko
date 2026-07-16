@@ -121,6 +121,9 @@ impl Theme {
             .entry(egui::FontFamily::Proportional)
             .or_default()
             .insert(0, "Inter-Medium".to_owned());
+        // The Iconoir icon font joins the same definitions (K-085) — one
+        // set_fonts call carries the whole type system.
+        crate::icons::install(&mut fonts);
         ctx.set_fonts(fonts);
     }
 

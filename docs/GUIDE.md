@@ -579,13 +579,15 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   from pressed purely by how light their fill is; scrollbars are thin and solid; panel
   edges are single crisp 1px lines. The colours themselves (the clay accent, the cool grey
   family) are still Luminal's own — we borrowed the skeleton, not the skin.
-- `crates/luminal-ui/src/icons.rs` — **the toolbar glyphs, drawn not downloaded.** Little
-  pictures like the play triangle or the padlock aren't image files or a special font;
-  Luminal *draws* each one from a few lines and curves every frame (design rule §5: flat
-  single-colour strokes, no emoji). The upside is they stay crisp at any size and always take
-  the theme colour — so they dim on hover and go accent-orange when the tool is active, just
-  like everything else. To add one, add a name to the `Icon` list and a small recipe of
-  points in `paint`.
+- `crates/luminal-ui/src/icons.rs` — **the icons: Iconoir, shipped as a font** (K-085).
+  Little pictures like the play triangle or the padlock come from Iconoir, a free
+  professionally drawn icon family, baked into the program as a small font file — each icon
+  is a character in that font, so it stays crisp at any size and always takes the theme
+  colour (dimming on hover, turning accent when active) exactly like text does. Emoji are
+  still banned: a glyph is either from this set or deliberately drawn, never a character we
+  hope the user's fonts carry — that's how the invisible stopwatch/arrow bugs happened. To
+  add one, add a name to the `Icon` list and its Iconoir name in the lookup; a test fails
+  if the name doesn't exist in the set, so a typo can't ship.
 - `crates/luminal-ui/src/shell.rs` + `app_state.rs` — **the window**: panels, menus,
   shortcuts, and the state glue (current project, dirty flag, autosave timer, recovery
   prompt).

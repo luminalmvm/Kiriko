@@ -1,24 +1,27 @@
-//! Flat monochrome stroke glyphs, drawn straight onto the egui painter
-//! (docs/15-DESIGN.md §5): thin strokes in the theme's `currentColor`, no emoji,
-//! no icon font, no image files.
+//! Luminal's icons: the Iconoir set, rendered from an embedded icon font
+//! (K-085, via the `iconflow` crate; Iconoir is MIT-licensed).
 //!
-//! In plain terms: instead of shipping little picture files or a special icon
-//! font, Luminal *draws* each icon from a handful of lines and curves every
-//! frame. Two upsides: the icons stay razor-sharp at any size or screen zoom,
-//! and they are always exactly the theme colour we ask for (so they dim on
-//! hover and turn accent when active, like the rest of the UI). Each icon is
-//! described inside a notional 0..1 square and scaled to fit wherever it is
-//! placed, so the same definition works at 16px in a toolbar or larger.
+//! In plain terms: instead of drawing every icon by hand from lines and curves
+//! (the old way), Luminal now ships a professionally drawn icon family as a
+//! small font file baked into the program. Each icon is a character in that
+//! font, so it stays razor-sharp at any size and always takes the exact theme
+//! colour we ask for — dimming on hover, turning accent when active — just
+//! like text does. Emoji are still banned: every glyph here is a real icon
+//! from one consistent set, never a character we hope the user's fonts carry.
+//!
+//! [`install`] must run once at startup (Theme::install_fonts does this)
+//! before anything paints, or the icon font family won't exist.
 
-use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
-use std::f32::consts::PI;
+use egui::{Align2, Color32, FontFamily, FontId, Painter, Pos2, Rect, RichText, Vec2};
+use iconflow::{Pack, Size, Style};
 
-/// One drawable glyph. Add a variant here and a match arm in [`paint`].
+/// One icon. Add a variant here and its Iconoir name in [`Icon::name`]; the
+/// `every_icon_resolves` test fails on any name the pack doesn't carry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
     /// Selection arrow (the Select tool).
     Pointer,
-    /// Four-way arrows: pan the view (the Hand tool).
+    /// Pan the view (the Hand tool).
     Move,
     /// Mask/shape tool — rectangle.
     Rectangle,
@@ -40,9 +43,9 @@ pub enum Icon {
     Link,
     /// Folder (a project folder).
     Folder,
-    /// Film frame (a composition — kept for the "new composition" button).
+    /// Film (the "new composition" button).
     Film,
-    /// Graph editor view: an animation curve.
+    /// Graph editor view: an animation curve with control points.
     GraphCurve,
     /// Layer/timeline view: stacked bars.
     TimelineBars,
@@ -50,27 +53,43 @@ pub enum Icon {
     Nodes,
     /// Footage item: a media clip.
     Footage,
-    /// Composition item: stacked layers.
+    /// Composition item.
     Comp,
     /// Solid item: a filled block of colour.
     Solid,
     /// Sequence layer: clips cut back-to-back on a row.
     Sequence,
-    /// Text layer: a capital T.
+    /// Text layer.
     Text,
-    /// Camera layer: a video camera.
+    /// Camera layer.
     Camera,
     /// Layer visibility switch: an eye.
     Eye,
-    /// Audible layer: a speaker with sound waves.
+    /// Audible layer: a speaker.
     Audio,
-    /// Muted layer: a speaker, struck through.
+    /// Muted layer: a speaker, off.
     Mute,
+    /// Pop a panel out into its own window.
+    PopOut,
+    /// Jump to the previous keyframe.
+    PrevKeyframe,
+    /// Jump to the next keyframe.
+    NextKeyframe,
+    /// Add a keyframe at the playhead.
+    KeyframeAdd,
+    /// A keyframe is here (clicking removes it).
+    Keyframe,
+    /// The animate toggle on a property row.
+    Stopwatch,
+    /// Disclosure twirl, closed (points right).
+    TwirlClosed,
+    /// Disclosure twirl, open (points down).
+    TwirlOpen,
 }
 
 impl Icon {
     /// Every variant, for exhaustive iteration (tests, palettes).
-    pub const ALL: [Icon; 25] = [
+    pub const ALL: [Icon; 33] = [
         Icon::Pointer,
         Icon::Move,
         Icon::Rectangle,
@@ -96,273 +115,140 @@ impl Icon {
         Icon::Eye,
         Icon::Audio,
         Icon::Mute,
+        Icon::PopOut,
+        Icon::PrevKeyframe,
+        Icon::NextKeyframe,
+        Icon::KeyframeAdd,
+        Icon::Keyframe,
+        Icon::Stopwatch,
+        Icon::TwirlClosed,
+        Icon::TwirlOpen,
     ];
-}
 
-/// Paint `icon` centred in `rect`, stroked in `color` at `width` px. The glyph
-/// is drawn in the largest centred square that fits, inset slightly so strokes
-/// never clip the edge.
-pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32, width: f32) {
-    let side = rect.width().min(rect.height());
-    let b = Rect::from_center_size(rect.center(), Vec2::splat(side)).shrink(side * 0.12);
-    // Normalised (0..1, y-down) → screen position inside the icon box.
-    let p = |nx: f32, ny: f32| b.min + Vec2::new(nx * b.width(), ny * b.height());
-    let stroke = Stroke::new(width, color);
-    let poly = |pts: &[(f32, f32)]| pts.iter().map(|&(x, y)| p(x, y)).collect::<Vec<_>>();
-    let line = |pts: &[(f32, f32)]| {
-        painter.add(Shape::line(poly(pts), stroke));
-    };
-    let closed = |pts: &[(f32, f32)]| {
-        painter.add(Shape::closed_line(poly(pts), stroke));
-    };
-    // A partial circle from `a0` to `a1` radians (y-down), centred at (cx,cy).
-    let arc = |cx: f32, cy: f32, r: f32, a0: f32, a1: f32| {
-        let n = 16;
-        let pts: Vec<Pos2> = (0..=n)
-            .map(|i| {
-                let a = a0 + (a1 - a0) * i as f32 / n as f32;
-                p(cx + r * a.cos(), cy + r * a.sin())
-            })
-            .collect();
-        painter.add(Shape::line(pts, stroke));
-    };
+    /// The Iconoir icon this variant renders.
+    fn name(self) -> &'static str {
+        match self {
+            Icon::Pointer => "cursor-pointer",
+            Icon::Move => "drag-hand-gesture",
+            Icon::Rectangle => "square",
+            Icon::Ellipse => "circle",
+            Icon::Star => "star",
+            Icon::Pen => "design-nib",
+            Icon::Play => "play",
+            Icon::Pause => "pause",
+            Icon::Lock => "lock",
+            Icon::Unlock => "lock-slash",
+            Icon::Link => "link",
+            Icon::Folder => "folder",
+            Icon::Film => "movie",
+            Icon::GraphCurve => "ease-curve-control-points",
+            Icon::TimelineBars => "align-left",
+            Icon::Nodes => "network",
+            Icon::Footage => "media-video",
+            Icon::Comp => "frame",
+            Icon::Solid => "fill-color",
+            Icon::Sequence => "view-columns-3",
+            Icon::Text => "text",
+            Icon::Camera => "video-camera",
+            Icon::Eye => "eye",
+            Icon::Audio => "sound-high",
+            Icon::Mute => "sound-off",
+            Icon::PopOut => "open-new-window",
+            Icon::PrevKeyframe => "nav-arrow-left",
+            Icon::NextKeyframe => "nav-arrow-right",
+            Icon::KeyframeAdd => "keyframe-plus",
+            Icon::Keyframe => "keyframe",
+            Icon::Stopwatch => "timer",
+            Icon::TwirlClosed => "nav-arrow-right",
+            Icon::TwirlOpen => "nav-arrow-down",
+        }
+    }
 
-    match icon {
-        Icon::Pointer => {
-            closed(&[
-                (0.16, 0.08),
-                (0.16, 0.84),
-                (0.36, 0.64),
-                (0.49, 0.92),
-                (0.60, 0.87),
-                (0.47, 0.60),
-                (0.70, 0.60),
-            ]);
-        }
-        Icon::Move => {
-            line(&[(0.5, 0.06), (0.5, 0.94)]);
-            line(&[(0.06, 0.5), (0.94, 0.5)]);
-            // Arrow heads on each of the four ends.
-            line(&[(0.39, 0.19), (0.5, 0.06), (0.61, 0.19)]);
-            line(&[(0.39, 0.81), (0.5, 0.94), (0.61, 0.81)]);
-            line(&[(0.19, 0.39), (0.06, 0.5), (0.19, 0.61)]);
-            line(&[(0.81, 0.39), (0.94, 0.5), (0.81, 0.61)]);
-        }
-        Icon::Rectangle => {
-            closed(&[(0.12, 0.20), (0.88, 0.20), (0.88, 0.80), (0.12, 0.80)]);
-        }
-        Icon::Ellipse => {
-            painter.add(Shape::circle_stroke(b.center(), b.width() * 0.38, stroke));
-        }
-        Icon::Star => {
-            let (cx, cy) = (b.center().x, b.center().y);
-            let (ro, ri) = (b.width() * 0.46, b.width() * 0.19);
-            let pts: Vec<Pos2> = (0..10)
-                .map(|i| {
-                    let r = if i % 2 == 0 { ro } else { ri };
-                    let a = -PI / 2.0 + i as f32 * PI / 5.0;
-                    Pos2::new(cx + r * a.cos(), cy + r * a.sin())
-                })
-                .collect();
-            painter.add(Shape::closed_line(pts, stroke));
-        }
-        Icon::Pen => {
-            // A downward nib: triangle, central slit, and the vent hole.
-            closed(&[(0.28, 0.16), (0.72, 0.16), (0.5, 0.88)]);
-            line(&[(0.5, 0.52), (0.5, 0.88)]);
-            painter.add(Shape::circle_stroke(p(0.5, 0.40), b.width() * 0.05, stroke));
-        }
-        Icon::Play => {
-            closed(&[(0.30, 0.16), (0.82, 0.5), (0.30, 0.84)]);
-        }
-        Icon::Pause => {
-            closed(&[(0.30, 0.16), (0.44, 0.16), (0.44, 0.84), (0.30, 0.84)]);
-            closed(&[(0.56, 0.16), (0.70, 0.16), (0.70, 0.84), (0.56, 0.84)]);
-        }
-        Icon::Lock => {
-            closed(&[(0.26, 0.46), (0.74, 0.46), (0.74, 0.86), (0.26, 0.86)]);
-            // Shackle: a closed top arc with both legs meeting the body.
-            arc(0.5, 0.46, 0.16, PI, 2.0 * PI);
-            line(&[(0.34, 0.46), (0.34, 0.36)]);
-            line(&[(0.66, 0.46), (0.66, 0.36)]);
-        }
-        Icon::Unlock => {
-            closed(&[(0.26, 0.46), (0.74, 0.46), (0.74, 0.86), (0.26, 0.86)]);
-            // Same shackle, hinged open on the right (only the left leg is down).
-            arc(0.62, 0.42, 0.16, PI, 2.0 * PI);
-            line(&[(0.46, 0.42), (0.46, 0.46)]);
-        }
-        Icon::Link => {
-            painter.add(Shape::circle_stroke(p(0.38, 0.5), b.width() * 0.17, stroke));
-            painter.add(Shape::circle_stroke(p(0.62, 0.5), b.width() * 0.17, stroke));
-        }
-        Icon::Folder => {
-            closed(&[
-                (0.12, 0.30),
-                (0.40, 0.30),
-                (0.48, 0.40),
-                (0.88, 0.40),
-                (0.88, 0.80),
-                (0.12, 0.80),
-            ]);
-        }
-        Icon::Film => {
-            closed(&[(0.16, 0.22), (0.84, 0.22), (0.84, 0.78), (0.16, 0.78)]);
-            closed(&[(0.32, 0.34), (0.68, 0.34), (0.68, 0.66), (0.32, 0.66)]);
-        }
-        Icon::GraphCurve => {
-            // An ease S-curve, the graph editor's signature.
-            line(&[
-                (0.10, 0.80),
-                (0.30, 0.74),
-                (0.48, 0.50),
-                (0.66, 0.26),
-                (0.90, 0.20),
-            ]);
-        }
-        Icon::TimelineBars => {
-            closed(&[(0.14, 0.22), (0.64, 0.22), (0.64, 0.36), (0.14, 0.36)]);
-            closed(&[(0.14, 0.43), (0.86, 0.43), (0.86, 0.57), (0.14, 0.57)]);
-            closed(&[(0.14, 0.64), (0.50, 0.64), (0.50, 0.78), (0.14, 0.78)]);
-        }
-        Icon::Nodes => {
-            line(&[(0.28, 0.30), (0.5, 0.70)]);
-            line(&[(0.72, 0.28), (0.5, 0.70)]);
-            painter.add(Shape::circle_stroke(
-                p(0.28, 0.30),
-                b.width() * 0.12,
-                stroke,
-            ));
-            painter.add(Shape::circle_stroke(
-                p(0.72, 0.28),
-                b.width() * 0.12,
-                stroke,
-            ));
-            painter.add(Shape::circle_stroke(p(0.5, 0.72), b.width() * 0.12, stroke));
-        }
-        Icon::Footage => {
-            closed(&[(0.14, 0.24), (0.86, 0.24), (0.86, 0.76), (0.14, 0.76)]);
-            closed(&[(0.42, 0.37), (0.66, 0.5), (0.42, 0.63)]);
-        }
-        Icon::Comp => {
-            closed(&[(0.30, 0.16), (0.82, 0.16), (0.82, 0.54), (0.30, 0.54)]);
-            closed(&[(0.18, 0.46), (0.70, 0.46), (0.70, 0.84), (0.18, 0.84)]);
-        }
-        Icon::Solid => {
-            painter.rect_filled(Rect::from_min_max(p(0.22, 0.22), p(0.78, 0.78)), 2.0, color);
-        }
-        Icon::Sequence => {
-            // Clips cut back-to-back on a row.
-            closed(&[(0.12, 0.32), (0.88, 0.32), (0.88, 0.68), (0.12, 0.68)]);
-            line(&[(0.38, 0.32), (0.38, 0.68)]);
-            line(&[(0.62, 0.32), (0.62, 0.68)]);
-        }
-        Icon::Text => {
-            line(&[(0.24, 0.28), (0.76, 0.28)]);
-            line(&[(0.5, 0.28), (0.5, 0.76)]);
-        }
-        Icon::Camera => {
-            closed(&[(0.12, 0.36), (0.62, 0.36), (0.62, 0.70), (0.12, 0.70)]);
-            closed(&[(0.62, 0.45), (0.84, 0.37), (0.84, 0.69), (0.62, 0.61)]);
-        }
-        Icon::Eye => {
-            // Almond outline with a pupil.
-            closed(&[
-                (0.10, 0.50),
-                (0.30, 0.32),
-                (0.50, 0.28),
-                (0.70, 0.32),
-                (0.90, 0.50),
-                (0.70, 0.68),
-                (0.50, 0.72),
-                (0.30, 0.68),
-            ]);
-            painter.add(Shape::circle_stroke(p(0.5, 0.5), b.width() * 0.13, stroke));
-        }
-        Icon::Audio => {
-            // Speaker box + cone, with two sound-wave arcs.
-            closed(&[
-                (0.14, 0.40),
-                (0.30, 0.40),
-                (0.46, 0.26),
-                (0.46, 0.74),
-                (0.30, 0.60),
-                (0.14, 0.60),
-            ]);
-            arc(0.46, 0.5, 0.20, -PI / 3.0, PI / 3.0);
-            arc(0.46, 0.5, 0.33, -PI / 3.0, PI / 3.0);
-        }
-        Icon::Mute => {
-            closed(&[
-                (0.14, 0.40),
-                (0.30, 0.40),
-                (0.46, 0.26),
-                (0.46, 0.74),
-                (0.30, 0.60),
-                (0.14, 0.60),
-            ]);
-            line(&[(0.58, 0.36), (0.86, 0.64)]);
-            line(&[(0.86, 0.36), (0.58, 0.64)]);
-        }
+    /// The glyph and font family for this icon, or None if the pack lacks it
+    /// (guarded by `every_icon_resolves`, so None never happens in practice —
+    /// and the UI degrades to painting nothing rather than faulting).
+    fn glyph(self) -> Option<(char, &'static str)> {
+        let r =
+            iconflow::try_icon(Pack::Iconoir, self.name(), Style::Regular, Size::Regular).ok()?;
+        Some((char::from_u32(r.codepoint)?, r.family))
     }
 }
 
-/// A filled disclosure triangle: points right when closed, down when open. Drawn
-/// rather than a font glyph (`▸`/`▾`), because egui's bundled fonts don't carry
-/// those code points — so as glyphs the twirls simply vanish.
-pub fn disclosure(painter: &Painter, rect: Rect, open: bool, color: Color32) {
-    painter.add(Shape::convex_polygon(
-        disclosure_points(rect, open).to_vec(),
-        color,
-        Stroke::NONE,
-    ));
+/// Register the icon font into a set of font definitions. Must run before
+/// anything paints an icon; `Theme::install_fonts` calls it at startup.
+pub fn install(defs: &mut egui::FontDefinitions) {
+    for font in iconflow::fonts() {
+        defs.font_data.insert(
+            font.family.to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(font.bytes)),
+        );
+        defs.families
+            .entry(FontFamily::Name(font.family.into()))
+            .or_default()
+            .insert(0, font.family.to_owned());
+    }
 }
 
-/// A stopwatch, drawn rather than a font glyph (egui's fonts carry no stopwatch
-/// emoji, so `⏱` simply vanishes): a ring with a top button, and a filled centre
-/// when the property is animated, so its animation state reads at a glance.
-pub fn stopwatch(painter: &Painter, center: Pos2, radius: f32, animated: bool, color: Color32) {
-    let stroke = Stroke::new(1.2_f32, color);
-    painter.circle_stroke(center, radius, stroke);
-    painter.line_segment(
-        [
-            center + Vec2::new(0.0, -radius),
-            center + Vec2::new(0.0, -radius - 2.0),
-        ],
-        stroke,
+/// Paint `icon` centred in `rect` in `color`. The glyph fills the smaller side
+/// of the rect (Iconoir's own padding keeps strokes off the edge). `_width` is
+/// kept for call-site compatibility with the old stroke-drawn icons.
+pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32, _width: f32) {
+    let Some((glyph, family)) = icon.glyph() else {
+        return;
+    };
+    let size = rect.width().min(rect.height());
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        glyph,
+        FontId::new(size, FontFamily::Name(family.into())),
+        color,
     );
-    if animated {
-        painter.circle_filled(center, radius * 0.45, color);
-    }
 }
 
-/// The twirl triangle's three corners inside `rect`. Kept separate from the
-/// painting so a test can pin the glyph's size: an earlier 0.30 shrink (on top
-/// of the triangle's own inset) left a ~4 px sliver that was invisible in
-/// practice, so the box now uses the same 0.12 inset as every other icon.
-fn disclosure_points(rect: Rect, open: bool) -> [Pos2; 3] {
-    let s = rect.width().min(rect.height());
-    let b = Rect::from_center_size(rect.center(), Vec2::splat(s)).shrink(s * 0.12);
-    let p = |nx: f32, ny: f32| b.min + Vec2::new(nx * b.width(), ny * b.height());
-    if open {
-        [p(0.12, 0.30), p(0.88, 0.30), p(0.5, 0.82)]
+/// The icon as inline rich text at `size` px, for `egui::Button`/`ui.label`.
+/// No colour is set, so the widget's own state colouring applies (disabled
+/// buttons dim their icon like they dim their text).
+pub fn text(icon: Icon, size: f32) -> RichText {
+    let Some((glyph, family)) = icon.glyph() else {
+        return RichText::new("");
+    };
+    RichText::new(glyph.to_string()).font(FontId::new(size, FontFamily::Name(family.into())))
+}
+
+/// A disclosure twirl: points right when closed, down when open.
+pub fn disclosure(painter: &Painter, rect: Rect, open: bool, color: Color32) {
+    let icon = if open {
+        Icon::TwirlOpen
     } else {
-        [p(0.30, 0.12), p(0.82, 0.5), p(0.30, 0.88)]
-    }
+        Icon::TwirlClosed
+    };
+    paint(painter, rect, icon, color, 1.0);
 }
 
-/// A small downward caret marking a control as a dropdown. Drawn, for the same
-/// font reason as [`disclosure`].
-pub fn caret_down(painter: &Painter, center: Pos2, color: Color32) {
-    painter.add(Shape::convex_polygon(
-        vec![
-            Pos2::new(center.x - 3.0, center.y - 1.5),
-            Pos2::new(center.x + 3.0, center.y - 1.5),
-            Pos2::new(center.x, center.y + 2.5),
-        ],
+/// The animate toggle on a property row: Iconoir's timer, sized from the old
+/// stopwatch's radius. `animated` state is carried by the colour the caller
+/// picks (accent when animated), so the glyph itself doesn't change.
+pub fn stopwatch(painter: &Painter, center: Pos2, radius: f32, _animated: bool, color: Color32) {
+    let side = radius * 2.0 + 4.0;
+    paint(
+        painter,
+        Rect::from_center_size(center, Vec2::splat(side)),
+        Icon::Stopwatch,
         color,
-        Stroke::NONE,
-    ));
+        1.0,
+    );
+}
+
+/// A small downward caret marking a control as a dropdown.
+pub fn caret_down(painter: &Painter, center: Pos2, color: Color32) {
+    paint(
+        painter,
+        Rect::from_center_size(center, Vec2::splat(9.0)),
+        Icon::TwirlOpen,
+        color,
+        1.0,
+    );
 }
 
 #[cfg(test)]
@@ -370,11 +256,30 @@ pub fn caret_down(painter: &Painter, center: Pos2, color: Color32) {
 mod tests {
     use super::*;
 
-    /// Every icon paints without panicking (guards the match arms and the
-    /// point/arc maths against empty paths or bad indices).
+    /// Every variant's Iconoir name resolves in the embedded pack — a typo'd
+    /// or removed icon name fails here, not silently in the UI.
+    #[test]
+    fn every_icon_resolves() {
+        for icon in Icon::ALL {
+            let r = iconflow::try_icon(Pack::Iconoir, icon.name(), Style::Regular, Size::Regular);
+            assert!(r.is_ok(), "{icon:?} → {:?} does not resolve", icon.name());
+            let r = r.unwrap();
+            assert!(
+                char::from_u32(r.codepoint).is_some(),
+                "{icon:?} has an invalid codepoint"
+            );
+        }
+    }
+
+    /// Every icon paints without panicking once the fonts are installed
+    /// (unknown font families make egui's layouter fault, so this also guards
+    /// the install path).
     #[test]
     fn every_icon_paints() {
         let ctx = egui::Context::default();
+        let mut defs = egui::FontDefinitions::default();
+        install(&mut defs);
+        ctx.set_fonts(defs);
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let painter = ui.painter().clone();
@@ -389,26 +294,5 @@ mod tests {
                 }
             });
         });
-    }
-
-    /// Regression (invisible twirl): the disclosure triangle must occupy a
-    /// readable share of its rect. The old geometry (a 0.30 shrink on top of the
-    /// triangle's own inset) produced a ~4 px sliver inside the timeline's 16 px
-    /// slot, which users could not see at all.
-    #[test]
-    fn disclosure_triangle_is_a_readable_size() {
-        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(16.0, 20.0));
-        let s = rect.width().min(rect.height());
-        for open in [false, true] {
-            let pts = disclosure_points(rect, open);
-            let bbox = Rect::from_points(&pts);
-            let min_side = bbox.width().min(bbox.height());
-            assert!(
-                min_side >= 0.30 * s,
-                "twirl (open = {open}) spans {min_side} px of a {s} px slot — too small to see"
-            );
-            // And it must stay inside the rect it was given.
-            assert!(rect.contains_rect(bbox));
-        }
     }
 }

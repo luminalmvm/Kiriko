@@ -570,3 +570,15 @@ selection, punchier than before (50% fill). Embedding Inter (rerun's UI face) is
 follow-up awaiting the owner's decision on shipping the font file. The owner also wants a
 sleeker "liquid glass" alternative theme later; that is not this decision. The hexagon mark
 redesign (noted at K-083) remains open.
+
+**K-085 · DECIDED · Icons are the Iconoir set, embedded as an icon font via `iconflow`.**
+From the owner (2026-07-16). Reverses 15-DESIGN §5's hand-drawn-only iconography (and its "no
+icon font" clause): the hand-drawn glyphs are replaced wholesale by **Iconoir** (MIT), embedded
+through the `iconflow` crate (MIT, `pack-iconoir` feature only) as a font whose glyphs render
+like text — theme-coloured, resolution-independent. The change also retires every raw Unicode
+symbol the UI hoped the fonts carried and didn't (the pop-out `⇱`, the keyframe navigators'
+`◄ ◆ ►` — all rendered blank): those are proper icons now (`open-new-window`, `nav-arrow-*`,
+`keyframe`/`keyframe-plus`). What stands from §5: monochrome only, theme-coloured, and the
+emoji ban — a glyph is from the set or deliberately painter-drawn (track keyframe diamonds),
+never a hoped-for font character. A CI test resolves every mapped name against the embedded
+pack, so a typo'd icon name cannot ship.

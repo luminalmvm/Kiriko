@@ -6,6 +6,9 @@ license = "GPL-3.0-only"
 
 [dependencies]
 egui = "0.31"
+# Iconoir icon set as an embedded icon font (K-085); only that pack's feature,
+# so the binary carries one icon family, not the whole library.
+iconflow = { version = "1.0", features = ["pack-iconoir"] }
 luminal-core = { path = "../luminal-core" }
 egui-wgpu = { version = "0.31", optional = true }
 luminal-audio = { path = "../luminal-audio", optional = true }

@@ -269,10 +269,16 @@ them.
 
 ## 5. Iconography
 
-Flat monochrome stroke glyphs drawn in `currentColor` equivalents (`text_secondary` at rest,
-`text_primary` on hover, `accent` when active), 1.5px stroke at 16px grid for panel toolbars,
-20px for the transport. Layer-type glyphs in the Timeline are tinted with the layer-type
-family (§6.1). No filled multi-colour icons, no emoji in UI.
+The **Iconoir** set (MIT), embedded as an icon font via the `iconflow` crate (K-085,
+reversing this section's earlier hand-drawn-only rule): one consistent, professionally drawn
+family, rendered as glyphs so every icon takes the theme colour exactly like text —
+`text_secondary` at rest, `text_primary` on hover, `accent` when active — at 16px for panel
+toolbars, 20px for the transport. Layer-type glyphs in the Timeline are tinted with the
+layer-type family (§6.1). Rules that stand: monochrome only, no filled multi-colour icons,
+and **no emoji or bare symbol characters in UI ever** — a glyph is either from the icon set
+or deliberately painter-drawn (keyframe diamonds on tracks); never a Unicode character we
+hope the user's fonts happen to carry. Every icon name used must resolve in the embedded
+pack (CI-tested).
 
 ## 6. Editor-specific semantic tokens
 
