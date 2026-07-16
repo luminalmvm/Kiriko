@@ -174,6 +174,41 @@ impl egui_tiles::Behavior<Panel> for DockBehavior<'_> {
         1.0
     }
 
+    // Rerun-style panel chrome (K-084): the tab bar sits one surface step above
+    // the panel; the active tab takes the panel's own fill so it reads as part
+    // of the content below; inactive tabs melt into the bar until hovered.
+    fn tab_bar_color(&self, _visuals: &egui::Visuals) -> egui::Color32 {
+        self.theme.surface_2
+    }
+
+    fn tab_bg_color(
+        &self,
+        _visuals: &egui::Visuals,
+        _tiles: &egui_tiles::Tiles<Panel>,
+        _tile_id: egui_tiles::TileId,
+        state: &egui_tiles::TabState,
+    ) -> egui::Color32 {
+        if state.active {
+            self.theme.surface_1
+        } else {
+            self.theme.surface_2
+        }
+    }
+
+    fn tab_text_color(
+        &self,
+        _visuals: &egui::Visuals,
+        _tiles: &egui_tiles::Tiles<Panel>,
+        _tile_id: egui_tiles::TileId,
+        state: &egui_tiles::TabState,
+    ) -> egui::Color32 {
+        if state.active {
+            self.theme.text_primary
+        } else {
+            self.theme.text_muted
+        }
+    }
+
     fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
         egui_tiles::SimplificationOptions {
             prune_empty_tabs: true,
@@ -2381,14 +2416,22 @@ fn timeline_bottom_bar(
         }
     }
 
-    // Controls-bar background across the lanes.
+    // Controls-bar background across the lanes — a faint step above the panel
+    // (rerun's bottom-bar treatment, K-084), parted from it by a hairline.
     ui.painter().rect_filled(
         egui::Rect::from_min_max(
             egui::pos2(track_left, bar_top),
             egui::pos2(panel_right, panel.bottom()),
         ),
         0.0,
-        theme.surface_1,
+        theme.surface_2,
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(track_left, bar_top),
+            egui::pos2(panel_right, bar_top),
+        ],
+        egui::Stroke::new(1.0_f32, theme.hairline),
     );
 
     // Zoom controls, bottom-left of the lanes (with room for the lens toggle
@@ -6824,6 +6867,10 @@ pub struct Shell {
     floating: Vec<Panel>,
     #[serde(skip, default)]
     theme: Theme,
+    /// The user's background-ramp pick (Window menu); the seed of the full
+    /// theme picker to come. Persisted with the workspace.
+    #[serde(default)]
+    theme_variant: crate::theme::ThemeVariant,
     #[serde(skip, default)]
     app: AppState,
     /// Boot splash (K-008); None once the application window has expanded.
@@ -6866,6 +6913,7 @@ impl Default for Shell {
             dock: default_layout(),
             floating: Vec::new(),
             theme: Theme::dark(),
+            theme_variant: crate::theme::ThemeVariant::default(),
             app: AppState::default(),
             splash: None,
             preview_tex: None,
@@ -6894,6 +6942,8 @@ impl Shell {
     ) -> Self {
         let workspace_restored = restored.is_some();
         let mut shell = restored.unwrap_or_default();
+        Theme::install_fonts(ctx);
+        shell.theme = Theme::of(shell.theme_variant); // honour the saved pick
         shell.theme.apply(ctx);
         ctx.style_mut(|s| s.visuals.panel_fill = shell.theme.surface_0);
 
@@ -7887,6 +7937,28 @@ impl Shell {
                 ui.menu_button("Window", |ui| {
                     if ui.button("Reset workspace").clicked() {
                         self.dock = default_layout();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    // Background ramp pick — the seed of the full theme picker.
+                    ui.label(
+                        egui::RichText::new("Background")
+                            .small()
+                            .color(self.theme.text_muted),
+                    );
+                    let mut pick = self.theme_variant;
+                    ui.radio_value(&mut pick, crate::theme::ThemeVariant::Dark, "Dark");
+                    ui.radio_value(
+                        &mut pick,
+                        crate::theme::ThemeVariant::DarkBlue,
+                        "Dark blue (previous)",
+                    );
+                    if pick != self.theme_variant {
+                        self.theme_variant = pick;
+                        self.theme = Theme::of(pick);
+                        self.theme.apply(ui.ctx());
+                        let s0 = self.theme.surface_0;
+                        ui.ctx().style_mut(|s| s.visuals.panel_fill = s0);
                         ui.close_menu();
                     }
                 });
