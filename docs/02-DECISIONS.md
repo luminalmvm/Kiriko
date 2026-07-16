@@ -529,3 +529,14 @@ lock-step. Clicking a speed key selects it (as in the value lens) to reveal its 
 value lens keeps the unified partner-length behaviour (K-072 refinement); the speed lens mirrors
 a unified drag but keeps the partner's own reach (no screen-length preservation — the speed lens
 is about the speeds themselves).
+
+**K-082 · DECIDED · Linux is a supported build target.** From Mack (2026-07-16), after outside
+requests to run Kiriko on Linux. Kiriko remains **Windows-first** (that ordering is unchanged);
+Linux joins macOS as a supported desktop target: the build must work from a plain
+`cargo build` given the platform's usual dependencies, and the README documents them. On Linux
+FFmpeg resolves through pkg-config (the same `link_system_ffmpeg` path as macOS), which needs
+the **FFmpeg 7.x development packages**, `pkg-config`, and `clang` (for the binding generator).
+Known constraint: distributions still shipping FFmpeg 6 (e.g. Ubuntu 24.04 LTS) cannot build
+without a newer FFmpeg; that is documented, not worked around. A Linux CI job joins the matrix
+when a maintainer can verify it; until then Linux support is best-effort docs + upstream-standard
+code (no platform-specific code paths exist today).

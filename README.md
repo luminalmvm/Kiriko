@@ -49,8 +49,8 @@ Three companion pieces:
 
 ## Building
 
-Kiriko builds on Windows and macOS with the stable Rust toolchain. The one outside
-dependency is **FFmpeg 7.1** (video/audio decode), plus **LLVM 18** on Windows for the
+Kiriko builds on Windows, macOS and Linux with the stable Rust toolchain. The one outside
+dependency is **FFmpeg 7.x** (video/audio decode), plus **LLVM 18** on Windows for the
 binding generator.
 
 - **macOS**: `brew install ffmpeg@7`, then `cargo test --workspace`. The repo's
@@ -58,6 +58,12 @@ binding generator.
 - **Windows**: unzip a [BtbN FFmpeg 7.1 shared/GPL build](https://github.com/BtbN/FFmpeg-Builds/releases)
   under `%USERPROFILE%\ffmpeg\`, `winget install LLVM.LLVM --version 18.1.8`, then
   `. .\scripts\win-dev-env.ps1 -Persist` to wire it up. `cargo run -p kiriko-app` launches.
+- **Linux** (K-082): install the FFmpeg 7 development packages plus `pkg-config` and `clang`,
+  then `cargo run -p kiriko-app`. Debian 13 / Ubuntu 24.10 or newer:
+  `sudo apt install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev libavfilter-dev libavdevice-dev`.
+  Arch: `sudo pacman -S ffmpeg clang pkgconf`. Note that FFmpeg **7.x** is required —
+  distributions still shipping FFmpeg 6 (Ubuntu 24.04 LTS among them) need a newer release
+  or a self-built FFmpeg before Kiriko will build.
 
 Full step-by-step, in plain English: [docs/GUIDE.md](docs/GUIDE.md) §8.
 

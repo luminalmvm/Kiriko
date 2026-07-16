@@ -693,6 +693,23 @@ FFmpeg comes from Homebrew: `brew install ffmpeg@7`. The repo's `.cargo/config.t
 points the build at it, and macOS ships the translator (libclang) as part of its developer
 tools, so there's nothing else to set up — `cargo test --workspace` just works.
 
+### On Linux (K-082)
+
+Linux finds FFmpeg the same way macOS does — by asking the system's package registry
+(`pkg-config`) where the libraries live — so the setup is: install the FFmpeg 7
+*development* packages (the ones ending `-dev`, which carry the headers the binding
+generator reads), plus `pkg-config` and `clang`. On Debian 13 or Ubuntu 24.10 and newer
+that is one line: `sudo apt install pkg-config clang libavcodec-dev libavformat-dev
+libavutil-dev libswscale-dev libswresample-dev libavfilter-dev libavdevice-dev`. On Arch:
+`sudo pacman -S ffmpeg clang pkgconf`. Then `cargo run -p kiriko-app` as usual.
+
+One honest caveat: the build needs FFmpeg **7**, and some distributions still ship
+FFmpeg 6 — Ubuntu 24.04 LTS is the big one. On those, `cargo build` will complain about
+"ffmpeg stuff" (a version the binding doesn't accept, or missing headers). The fix is a
+newer distribution release, or building FFmpeg 7.1 from source and letting `pkg-config`
+find it. There is no Linux machine in CI yet, so treat Linux as "documented and expected
+to work" rather than "verified on every push".
+
 ### What the robots check
 
 Every push, CI rebuilds and retests everything on both macOS and Windows, media included, so
