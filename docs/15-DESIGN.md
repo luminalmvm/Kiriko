@@ -288,11 +288,13 @@ family, brightness orderings, redundant non-colour encodings) are binding.
 
 ### 6.1 Layer-type colours
 
-Every layer type has an identity colour used as: a 3px tab on the row's left edge, a ~12%
-tonal tint over the layer's bar in the Timeline, and the tint of its type glyph. Labels on the
-bars are always JetBrains Mono 11px. The family MUST read as *muted siblings* — desaturated,
-mid-lightness, clearly quieter than `accent` — so a full Timeline looks organised, not
-carnival. Selection (accent) must visibly beat every one of them.
+Every layer type has an identity colour used as: a 3px tab on the left edge of the layer's
+bar in the Timeline (owner amendment: the tab rides the bar, not the outline row — the
+outline stays glyph-free), a ~12% tonal tint over the bar's fill, and the tint of its type
+glyph where one appears. Labels on the bars are always JetBrains Mono 11px. The family MUST
+read as *muted siblings* — desaturated, mid-lightness, clearly quieter than `accent` — so a
+full Timeline looks organised, not carnival. Selection (accent) must visibly beat every one
+of them.
 
 | Layer type | Token | Value |
 |---|---|---|
@@ -346,8 +348,11 @@ not a failure.
 
 - **Overrun** (Retime requesting time beyond the media, per K-022): the affected span of the
   clip/layer bar is overlaid with `warning` (kraft) 45° hatching — 1px lines, 4px pitch, 60%
-  opacity — plus a mono `HOLD` tag when the span is wide enough. Warning, not error: the
-  render is well-defined (boundary-frame hold), the editor just needs to see it.
+  opacity — plus a mono `HOLD` tag when the span is wide enough. Beneath the hatch sits a
+  ~14% `warning` wash so the span reads as one piece at timeline sizes, a 1px `warning` tick
+  marks the exact exhaustion point, and hovering the span says what it means ("Source ends
+  here — holding the last frame"). Warning, not error: the render is well-defined
+  (boundary-frame hold), the editor just needs to see it.
 - **Beat markers**: `marker.beat` = `#aef3e7` (mint) 1px ticks in the ruler with a small
   triangular head. Manual markers: `marker.manual` = `text_secondary`; span markers draw a
   hairline-bounded band. Marker labels: mono 11px.
