@@ -869,10 +869,9 @@ fn icon_button(ui: &mut egui::Ui, theme: &Theme, icon: Icon, active: bool) -> eg
     resp
 }
 
-/// The identity glyph and §6.1 colour for a layer type. No longer drawn in the
-/// outline (layer type reads from the lane bar's colour instead, Mack); kept for
-/// that planned per-type lane colouring.
-#[allow(dead_code)]
+/// The identity glyph and §6.1 colour for a layer type. Not drawn in the
+/// outline (Mack): the type reads from the lane bar itself — its tonal wash
+/// and the 3px tab on the bar's left edge.
 fn layer_type_style(kind: &lumit_core::model::LayerKind, theme: &Theme) -> (Icon, egui::Color32) {
     use lumit_core::model::LayerKind;
     match kind {
@@ -1715,25 +1714,40 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                             row_rect.bottom() - 2.0,
                         ),
                     );
-                    ui.painter().rect(
+                    // The bar wears its layer's identity (15-DESIGN §6.1, Mack):
+                    // a quiet tonal wash of the type colour over the neutral fill
+                    // and a 3px type tab on the bar's left edge. Muted siblings by
+                    // design — selection and hover (accent) beat every one of them.
+                    let type_colour = layer_type_style(&layer.kind, theme).1;
+                    ui.painter().rect_filled(bar, 3.0, theme.surface_3);
+                    ui.painter()
+                        .rect_filled(bar, 3.0, type_colour.gamma_multiply(0.13));
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_max(
+                            bar.left_top(),
+                            egui::pos2(bar.left() + 3.0, bar.bottom()),
+                        ),
+                        egui::CornerRadius {
+                            nw: 3,
+                            sw: 3,
+                            ne: 0,
+                            se: 0,
+                        },
+                        type_colour,
+                    );
+                    ui.painter().rect_stroke(
                         bar,
                         3.0,
-                        theme.surface_3,
                         egui::Stroke::new(1.0_f32, theme.hairline_strong),
                         egui::StrokeKind::Inside,
                     );
-                    if layer.matte.is_some() {
-                        ui.painter().text(
-                            egui::pos2(bar.right() - 4.0, bar.center().y),
-                            egui::Align2::RIGHT_CENTER,
-                            "matte",
-                            egui::FontId::monospace(8.0),
-                            theme.text_muted,
-                        );
-                    }
-                    // Overrun (K-022): a retimed clip that outruns its source holds the
-                    // last frame — mark where and hatch the held tail in warning kraft
-                    // (never a red alarm — house rule). Boundaries never move on their own.
+                    // Overrun (K-022): a retimed clip that outruns its source holds
+                    // the boundary frame — wash and hatch the held span in warning
+                    // kraft (15-DESIGN §6.4: calm, never a red alarm) with a hairline
+                    // tick at the exact exhaustion point and a HOLD tag when there is
+                    // room. Indication only: boundaries never move on their own.
+                    #[cfg(feature = "media")]
+                    let mut overrun_span: Option<egui::Rect> = None;
                     #[cfg(feature = "media")]
                     if let lumit_core::model::LayerKind::Footage {
                         item,
@@ -1746,35 +1760,89 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                         {
                             if let Some(v) = probe.video.as_ref() {
                                 let src_dur = *frames as f64 / v.fps().max(1.0);
-                                if let Some(ot) = rt.overrun_local_time(rational_at(src_dur)) {
-                                    let ox = x_of(layer.start_offset.0.to_f64() + ot);
-                                    if ox > bar.left() && ox < bar.right() - 0.5 {
-                                        let hatch = theme.warning.gamma_multiply(0.5);
-                                        let mut hx = ox;
-                                        while hx < bar.right() {
+                                if let Some((span_in, span_out)) = overrun_span_secs(
+                                    rt,
+                                    src_dur,
+                                    layer.start_offset.0.to_f64(),
+                                    layer.in_point.0.to_f64(),
+                                    layer.out_point.0.to_f64(),
+                                ) {
+                                    let sx = x_of(span_in + move_dx).max(bar.left());
+                                    let ex = x_of(span_out + move_dx).min(bar.right());
+                                    if ex - sx > 0.5 {
+                                        let span = egui::Rect::from_min_max(
+                                            egui::pos2(sx, bar.top()),
+                                            egui::pos2(ex, bar.bottom()),
+                                        );
+                                        // Low-alpha wash so the held region reads as
+                                        // one piece even where the hatch gets sparse.
+                                        ui.painter().rect_filled(
+                                            span,
+                                            egui::CornerRadius {
+                                                nw: 0,
+                                                sw: 0,
+                                                ne: 3,
+                                                se: 3,
+                                            },
+                                            theme.warning.gamma_multiply(0.14),
+                                        );
+                                        // 45° hatching, 1px lines on a 4px
+                                        // perpendicular pitch (§6.4) — so the
+                                        // horizontal step is 4·√2. Clipped to the
+                                        // span, so diagonals end cleanly at its edges.
+                                        let hatch = ui.painter().with_clip_rect(span);
+                                        let stroke = egui::Stroke::new(
+                                            1.0_f32,
+                                            theme.warning.gamma_multiply(0.6),
+                                        );
+                                        let rise = span.height();
+                                        let step = 4.0 * std::f32::consts::SQRT_2;
+                                        let mut hx = span.left() - rise;
+                                        while hx < span.right() {
+                                            hatch.line_segment(
+                                                [
+                                                    egui::pos2(hx, span.bottom()),
+                                                    egui::pos2(hx + rise, span.top()),
+                                                ],
+                                                stroke,
+                                            );
+                                            hx += step;
+                                        }
+                                        // The exhaustion tick — only when the crossing
+                                        // itself is on the bar (a fully-held bar has
+                                        // its crossing left of the in point).
+                                        if sx > bar.left() + 0.5 {
                                             ui.painter().line_segment(
                                                 [
-                                                    egui::pos2(hx, bar.top()),
-                                                    egui::pos2(
-                                                        (hx + 6.0).min(bar.right()),
-                                                        bar.bottom(),
-                                                    ),
+                                                    egui::pos2(sx, bar.top()),
+                                                    egui::pos2(sx, bar.bottom()),
                                                 ],
-                                                egui::Stroke::new(1.0_f32, hatch),
+                                                egui::Stroke::new(1.0_f32, theme.warning),
                                             );
-                                            hx += 6.0;
                                         }
-                                        ui.painter().line_segment(
-                                            [
-                                                egui::pos2(ox, bar.top()),
-                                                egui::pos2(ox, bar.bottom()),
-                                            ],
-                                            egui::Stroke::new(1.5_f32, theme.warning),
-                                        );
+                                        if span.width() > 40.0 {
+                                            ui.painter().text(
+                                                span.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "HOLD",
+                                                egui::FontId::monospace(8.0),
+                                                theme.warning,
+                                            );
+                                        }
+                                        overrun_span = Some(span);
                                     }
                                 }
                             }
                         }
+                    }
+                    if layer.matte.is_some() {
+                        ui.painter().text(
+                            egui::pos2(bar.right() - 4.0, bar.center().y),
+                            egui::Align2::RIGHT_CENTER,
+                            "matte",
+                            egui::FontId::monospace(8.0),
+                            theme.text_muted,
+                        );
                     }
                     // Keyframe glyphs: a clay diamond on the bar at each keyframed time
                     // (across the layer's animated properties). Only when collapsed — when
@@ -1940,6 +2008,18 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                             } else if resp.hovered() {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                            }
+                            // Hovering the held (overrun) tail says what the kraft
+                            // wash means — but not mid-drag, where a tooltip would
+                            // sit under the hand.
+                            #[cfg(feature = "media")]
+                            if let Some(span) = overrun_span {
+                                if !resp.dragged()
+                                    && resp.hover_pos().is_some_and(|p| span.contains(p))
+                                {
+                                    resp.clone()
+                                        .on_hover_text("Source ends here — holding the last frame");
+                                }
                             }
                             if resp.clicked() {
                                 app.selected_layer = Some(layer.id);
@@ -6516,6 +6596,26 @@ fn layer_source_fps(_app: &AppState, _layer: &lumit_core::model::Layer, fallback
     fallback_fps
 }
 
+/// Where a retimed footage layer runs out of source, as a comp-time span in
+/// seconds: from the exhaustion point to the layer's out point, clamped to the
+/// layer's visible span (a source that dies before the in point holds for the
+/// whole bar). `None` when the source lasts to the out point, or runs out only
+/// past it. Indication only — overrun never moves a boundary (K-022).
+/// (Only the media-gated timeline drawing calls this, but the maths is
+/// feature-free, so it stays compiled and tested in every build.)
+#[cfg_attr(not(feature = "media"), allow(dead_code))]
+fn overrun_span_secs(
+    retime: &lumit_core::retime::Retime,
+    source_duration_secs: f64,
+    start_offset_secs: f64,
+    in_point_secs: f64,
+    out_point_secs: f64,
+) -> Option<(f64, f64)> {
+    let local = retime.overrun_local_time(rational_at(source_duration_secs))?;
+    let start = (start_offset_secs + local).max(in_point_secs);
+    (start < out_point_secs).then_some((start, out_point_secs))
+}
+
 /// Insert or replace a value keyframe (local time → source time) at the playhead
 /// `lt`, keeping the list sorted and its times unique. Local time snaps to the
 /// comp frame grid (`comp_fps`, the playhead's own rate); source time snaps to
@@ -8692,6 +8792,121 @@ mod geometry_tests {
         let draws = build_comp_draws(&doc, &patched, 0.0, &map, &mut visited);
         assert_eq!(draws.len(), 1);
         assert_eq!(draws[0].position.0, 500.0);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod lane_tests {
+    use super::*;
+    use lumit_core::model::LayerKind;
+    use lumit_core::retime::Retime;
+    use lumit_core::Rational;
+
+    fn rat(n: i64, d: i64) -> Rational {
+        Rational::new(n, d).unwrap()
+    }
+
+    // 2× over a 4 s layer eats 4 s of source by local 2 s — with the layer
+    // starting at comp 1 s, the held tail runs from comp 3 s to the out point.
+    #[test]
+    fn overrun_span_runs_from_exhaustion_to_the_out_point() {
+        let rt = Retime::constant_speed(rat(4, 1), rat(0, 1), rat(2, 1));
+        let (start, end) = overrun_span_secs(&rt, 4.0, 1.0, 1.0, 5.0).unwrap();
+        assert!((start - 3.0).abs() < 1e-3, "held tail starts at {start}");
+        assert!((end - 5.0).abs() < 1e-9, "held tail ends at {end}");
+    }
+
+    // Plenty of source at 1× — nothing to indicate.
+    #[test]
+    fn no_overrun_means_no_span() {
+        let rt = Retime::constant_speed(rat(4, 1), rat(0, 1), rat(1, 1));
+        assert_eq!(overrun_span_secs(&rt, 10.0, 0.0, 0.0, 4.0), None);
+    }
+
+    // Source-in already past the media's end: the whole visible bar is a
+    // hold, and the span clamps to start at the in point (the bar's left
+    // edge), not at layer time zero.
+    #[test]
+    fn overrun_before_the_in_point_clamps_to_the_bar() {
+        let rt = Retime::identity(rat(4, 1), rat(5, 1));
+        let (start, end) = overrun_span_secs(&rt, 3.0, 0.0, 2.0, 4.0).unwrap();
+        assert!(
+            (start - 2.0).abs() < 1e-9,
+            "span clamps to in point, got {start}"
+        );
+        assert!(
+            (end - 4.0).abs() < 1e-9,
+            "span ends at out point, got {end}"
+        );
+    }
+
+    // The source runs out only past the layer's out point — the overrun is
+    // real in the map but invisible on the bar, so no span.
+    #[test]
+    fn overrun_past_the_out_point_is_not_drawn() {
+        let rt = Retime::constant_speed(rat(4, 1), rat(0, 1), rat(2, 1));
+        assert_eq!(overrun_span_secs(&rt, 4.0, 0.0, 0.0, 1.5), None);
+    }
+
+    // §6.1: every layer kind paints its own identity colour on the lane bar
+    // (the adjustment layer borrows the solid's until it earns its own).
+    #[test]
+    fn every_layer_kind_paints_its_identity_colour() {
+        let theme = Theme::dark();
+        let id = uuid::Uuid::now_v7();
+        let text = lumit_core::model::TextDocument {
+            text: String::new(),
+            size: 12.0,
+            fill: lumit_core::model::LinearColour::BLACK,
+            extra: serde_json::Map::new(),
+        };
+        let cases = [
+            (
+                LayerKind::Footage {
+                    item: id,
+                    retime: None,
+                },
+                theme.layer.footage,
+            ),
+            (
+                LayerKind::Sequence { clips: Vec::new() },
+                theme.layer.sequence,
+            ),
+            (LayerKind::Precomp { comp: id }, theme.layer.precomp),
+            (LayerKind::Solid { def: id }, theme.layer.solid),
+            (LayerKind::Text { document: text }, theme.layer.text),
+            (
+                LayerKind::Camera {
+                    zoom: lumit_core::anim::Property::fixed(1000.0),
+                },
+                theme.layer.camera,
+            ),
+            (LayerKind::Adjustment, theme.layer.solid),
+        ];
+        for (kind, want) in cases {
+            assert_eq!(layer_type_style(&kind, &theme).1, want);
+        }
+    }
+
+    // The identity family must stay distinct siblings — two types sharing a
+    // colour would make the timeline lie about what a bar is.
+    #[test]
+    fn identity_colours_are_distinct() {
+        let t = Theme::dark();
+        let all = [
+            t.layer.footage,
+            t.layer.sequence,
+            t.layer.precomp,
+            t.layer.solid,
+            t.layer.text,
+            t.layer.camera,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b, "identity colours collide");
+            }
+        }
     }
 }
 

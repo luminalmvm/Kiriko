@@ -152,8 +152,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   clip can rush in and settle — the core montage gesture — not just play at one flat rate.
   When a retime speeds a clip up so much that it runs out of footage, `overrun_local_time`
   reports the exact moment it runs dry — the point where the last frame gets held rather
-  than inventing more footage. That point is now drawn on the clip as a kraft warning line
-  with the held tail hatched (kraft, never a red alarm — house rule), and right-clicking the
+  than inventing more footage. The Timeline draws that held tail on the layer's bar: a
+  faint kraft wash with diagonal hatching over the span, a thin kraft line at the exact
+  frame the source runs out, a small `HOLD` tag when there's room, and a tooltip when you
+  hover it ("Source ends here — holding the last frame"). Kraft, never a red alarm — house
+  rule: a held frame is legal and well-defined, you just need to see it. Right-clicking the
   clip offers **Trim to source end** to cut it there. It never trims for you (boundaries must
   stay put so cuts keep landing on the beat). Sequence layers, the graph-editor lenses, and
   per-beat cutting come next.
@@ -429,7 +432,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   the same engine described above. Curved (eased) speed ramps are still the graph editor's job.
 - **Getting around the Timeline** — the panel is split into the **layer outline** on the left
   (the stack of names, stopwatches and toggles) and the **lane area** on the right (the time
-  ruler with each layer's bar on its own *lane*). Drag a layer's bar body to slide it earlier
+  ruler with each layer's bar on its own *lane*). Each bar wears its layer's identity colour:
+  a 3px tab on its left edge plus a very faint tint across the fill, so a tall stack reads at
+  a glance — footage is steel, sequences indigo, precomps plum, solids neutral grey, text
+  parchment, cameras dry gold. The colours are deliberately muted siblings, so the clay
+  selection colour still beats all of them. Drag a layer's bar body to slide it earlier
   or later in time (one undo per drag). Every drag in the lane area — moving a bar, trimming
   an edge, scrubbing the ruler — follows the cursor one-for-one at any zoom, and the small
   "magnetic" pull towards nearby markers stays the same ~6 px on screen however far in you
