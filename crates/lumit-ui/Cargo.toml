@@ -1,0 +1,42 @@
+[package]
+name = "lumit-ui"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+
+[dependencies]
+egui = "0.31"
+# Iconoir icon set as an embedded icon font (K-085); only that pack's feature,
+# so the binary carries one icon family, not the whole library.
+iconflow = { version = "1.0", features = ["pack-iconoir"] }
+lumit-core = { path = "../lumit-core" }
+egui-wgpu = { version = "0.31", optional = true }
+lumit-audio = { path = "../lumit-audio", optional = true }
+lumit-cache = { path = "../lumit-cache", optional = true }
+lumit-eval = { path = "../lumit-eval", optional = true }
+lumit-gpu = { path = "../lumit-gpu", optional = true }
+lumit-flow = { path = "../lumit-flow", optional = true }
+lumit-media = { path = "../lumit-media", optional = true }
+lumit-text = { path = "../lumit-text" }
+lumit-project = { path = "../lumit-project" }
+rfd = "0.15"
+uuid = { version = "1", features = ["v7"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+egui_tiles = { version = "0.12", features = ["serde"] }
+
+[features]
+# "media" wires probing/frame-indexing (ffmpeg). Default on; Windows CI builds
+# --no-default-features until ffmpeg dev libs are set up there (tracked TODO).
+default = ["media"]
+media = ["dep:lumit-media", "dep:lumit-audio", "dep:lumit-cache", "dep:lumit-eval", "dep:lumit-gpu", "dep:lumit-flow", "dep:egui-wgpu"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = "0.15"
+
+[dev-dependencies]
+lumit-media = { path = "../lumit-media", features = ["test-fixtures"] }
+tempfile = "3"
+
+[lints]
+workspace = true

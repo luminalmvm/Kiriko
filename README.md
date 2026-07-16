@@ -1,4 +1,4 @@
-# Luminal
+# Lumit
 
 A native motion-graphics and compositing editor — After Effects' depth, Vegas' retiming
 soul, one application. Built first for gaming-edit and montage editors; growing into a full
@@ -10,7 +10,7 @@ first line of application code; the specs are canonical and implementation follo
 ## Why
 
 The montage scene edits in After Effects plus an expensive third-party plugin stack, and
-lives with preview lag, crashes, and a retiming workflow many of them fight. Luminal's
+lives with preview lag, crashes, and a retiming workflow many of them fight. Lumit's
 promises: playback at speed, degrade-never-crash, retiming as a first-class citizen with a
 beat-sync covenant, and the genre's staple effects in the box. The full pitch:
 [docs/00-VISION.md](docs/00-VISION.md).
@@ -19,7 +19,7 @@ beat-sync covenant, and the genre's staple effects in the box. The full pitch:
 
 | Doc | What it specifies |
 |---|---|
-| [00-VISION](docs/00-VISION.md) | Why Luminal exists, pillars, non-goals, the v1 milestone |
+| [00-VISION](docs/00-VISION.md) | Why Lumit exists, pillars, non-goals, the v1 milestone |
 | [01-GLOSSARY](docs/01-GLOSSARY.md) | Canonical terminology — binding on all docs, UI, and code |
 | [02-DECISIONS](docs/02-DECISIONS.md) | Numbered decision log with rationale |
 | [03-DATA-MODEL](docs/03-DATA-MODEL.md) | Project/comp/layer/clip/property/keyframe object model |
@@ -49,7 +49,7 @@ Three companion pieces:
 
 ## Building
 
-Luminal builds on Windows, macOS and Linux with the stable Rust toolchain. The one outside
+Lumit builds on Windows, macOS and Linux with the stable Rust toolchain. The one outside
 dependency is **FFmpeg 7.x** (video/audio decode), plus **LLVM 18** on Windows for the
 binding generator.
 
@@ -57,13 +57,13 @@ binding generator.
   `.cargo/config.toml` points the build at the keg.
 - **Windows**: unzip a [BtbN FFmpeg 7.1 shared/GPL build](https://github.com/BtbN/FFmpeg-Builds/releases)
   under `%USERPROFILE%\ffmpeg\`, `winget install LLVM.LLVM --version 18.1.8`, then
-  `. .\scripts\win-dev-env.ps1 -Persist` to wire it up. `cargo run -p luminal-app` launches.
+  `. .\scripts\win-dev-env.ps1 -Persist` to wire it up. `cargo run -p lumit-app` launches.
 - **Linux** (K-082): install the FFmpeg 7 development packages plus `pkg-config` and `clang`,
-  then `cargo run -p luminal-app`. Debian 13 / Ubuntu 24.10 or newer:
+  then `cargo run -p lumit-app`. Debian 13 / Ubuntu 24.10 or newer:
   `sudo apt install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev libavfilter-dev libavdevice-dev`.
   Arch: `sudo pacman -S ffmpeg clang pkgconf`. Note that FFmpeg **7.x** is required —
   distributions still shipping FFmpeg 6 (Ubuntu 24.04 LTS among them) need a newer release
-  or a self-built FFmpeg before Luminal will build.
+  or a self-built FFmpeg before Lumit will build.
 
 Full step-by-step, in plain English: [docs/GUIDE.md](docs/GUIDE.md) §8.
 

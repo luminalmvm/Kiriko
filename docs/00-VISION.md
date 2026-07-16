@@ -1,4 +1,4 @@
-# Luminal
+# Lumit
 
 **A native motion-graphics and compositing editor that plays back what you built, at speed,
 without crashing — built first for the editors After Effects forgot.**
@@ -11,7 +11,7 @@ Status: design phase. This document is the why; the rest of [docs/](.) is the wh
 
 The gaming-edit scene runs on After Effects plus an ~$800 stack of third-party plugins
 (Twixtor, RSMB, Deep Glow, Sapphire, FilmConvert), much of it pirated by a young audience
-that cannot afford it. Luminal's home lane within that scene is the **flow / MVM style** —
+that cannot afford it. Lumit's home lane within that scene is the **flow / MVM style** —
 the CoD movie-making ("MVM") lineage (codmvm.com), today curated by teams and taught across
 the T3C community: one- to three-minute music-video-style edits built from game footage,
 mood- and phrasing-driven rather than beat-hammering, defined by velocity ramps, synthetic
@@ -26,7 +26,7 @@ fight rather than use, preferring Vegas Pro's ramp-and-cut editing. CapCut prove
 audience will move instantly to anything that is fast and free; nothing fast and free is
 also deep.
 
-Luminal is the deep tool built for them: After Effects' compositing model, Vegas' retiming
+Lumit is the deep tool built for them: After Effects' compositing model, Vegas' retiming
 soul, one application, GPU-first, open source (GPLv3).
 
 ## 2. Who it is for
@@ -35,7 +35,7 @@ soul, one application, GPU-first, open source (GPLv3).
    community and its neighbours). Their editing is compositing and animation as much as
    cutting: the graph editor, the camera, and masks are daily tools, not occasional ones.
    The v1 milestone is theirs — see §4.
-2. **Then: anyone leaving After Effects.** Luminal grows toward a full AE replacement, with
+2. **Then: anyone leaving After Effects.** Lumit grows toward a full AE replacement, with
    its own version of everything AE has (decision K-002), an AE project importer, and OFX
    plugin support so existing tools come along.
 
@@ -67,7 +67,7 @@ Everything in the specs traces to one of these; a feature that serves none of th
 
 ## 4. The v1 milestone
 
-> A flow-style editor records gameplay tonight and publishes tomorrow, using only Luminal:
+> A flow-style editor records gameplay tonight and publishes tomorrow, using only Lumit:
 > import 120/240 fps captures, cut against the music's phrasing with auto beat markers,
 > speed-ramp with flow slow motion, animate a smooth 2.5D camera move, build a masked
 > transition, apply shake/glow/motion-blur/grade, and export a YouTube-ready 1080p60 file —
@@ -90,12 +90,12 @@ Phases and gates: [16-ROADMAP.md](16-ROADMAP.md).
 
 ## 6. Name
 
-Luminal — of light, and of thresholds (K-083; the project began life as *Kiriko*, renamed
-by the owner 2026-07-16). The app's whole work happens at a threshold: between an editor's
-intent and the picture, between one frame and the next. The name is used bare ("Luminal",
-never "the Luminal app"), and features are named per the glossary. The named subsystems
-share the astral register: **Nova** is the render pipeline, **Nebula** the cache, and
-**Pulsar** the audio engine whose clock everything syncs to.
+Lumit — from *lumen*, the unit of light: the app's one output, measured and made (K-087;
+the project began life as *Kiriko*, was briefly *Luminal*, and settled here by the owner,
+2026-07-16). The name is used bare ("Lumit", never "the Lumit app"), and features are named
+per the glossary. The named subsystems keep the astral register: **Nova** is the render
+pipeline, **Nebula** the cache, and **Pulsar** the audio engine whose clock everything
+syncs to.
 
 ## Open questions
 

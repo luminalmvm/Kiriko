@@ -1,4 +1,4 @@
-# Luminal project format
+# Lumit project format
 
 **Status: canonical.** Serialisation of the model in [03-DATA-MODEL.md](03-DATA-MODEL.md),
 per decision K-040 (hybrid container) and K-024 (non-destructive always).
@@ -24,7 +24,7 @@ myproject.lum
 
 Rules:
 - `manifest.json` MUST be the first entry in the archive and MUST parse standalone:
-  `{ "format": "luminal-project", "schema_version": "…", "written_by": "luminal x.y.z",
+  `{ "format": "lumit-project", "schema_version": "…", "written_by": "lumit x.y.z",
   "min_reader": "…" }`. A reader newer than `schema_version` migrates; older than
   `min_reader` refuses with a clear message; otherwise it loads and preserves unknowns.
 - `project.json` is pretty-printed with stable key order and stable array order, so two
@@ -41,7 +41,7 @@ Rules:
 - Enums: lower-kebab strings (`"blend-mode": "screen"`).
 - **Unknown-field preservation is mandatory**: a reader keeps any keys it does not
   understand and writes them back out. This is what lets shared projects and newer/older
-  Luminal versions coexist (K-065) and lets Placeholder effects round-trip
+  Lumit versions coexist (K-065) and lets Placeholder effects round-trip
   ([11-AE-IMPORT.md](11-AE-IMPORT.md)).
 
 ## 2. Media references and relinking
@@ -78,7 +78,7 @@ All derived data lives outside the project, in a per-project cache directory:
 Rules, binding:
 - The global cache root defaults under the user's local app-data and is configurable with a
   size budget ([13-PERFORMANCE-RULES.md](13-PERFORMANCE-RULES.md)).
-- Deleting any or all of the sidecar at any time MUST be safe: Luminal rebuilds on demand.
+- Deleting any or all of the sidecar at any time MUST be safe: Lumit rebuilds on demand.
 - The project file never references sidecar contents; the sidecar is keyed by project uuid
   and content hashes.
 
@@ -90,7 +90,7 @@ Rules, binding:
   plugin install), rotating `<name>.autosave-<k>.lum` copies (default keep 5) in an
   `autosaves/` folder beside the project.
 - **Journal recovery**: the operation journal ([03-DATA-MODEL.md](03-DATA-MODEL.md) §10) is
-  appended to a sidecar `journal/` log between saves. After a crash, Luminal offers: last
+  appended to a sidecar `journal/` log between saves. After a crash, Lumit offers: last
   save + replayed journal (usually everything), or last save, or an autosave. The journal is
   truncated on successful save.
 - Recovery is offered calmly on next launch — one dialogue, no error storm

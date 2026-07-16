@@ -1,4 +1,4 @@
-# Luminal data model
+# Lumit data model
 
 **Status: canonical.** The object model every other document builds on. Terminology per
 [01-GLOSSARY.md](01-GLOSSARY.md); decisions per [02-DECISIONS.md](02-DECISIONS.md).

@@ -598,3 +598,11 @@ gets a replacement — right-click an empty spot on its comp-tab strip for **Pop
 (the request travels through `AppState::pop_out_timeline`, consumed by the shell after the
 dock draws); other panels pop out via the tab they grow when stacked. The default layout is
 unchanged in substance, minus the two single-child tab wrappers (Scopes, Timeline).
+
+**K-087 · DECIDED · The application is named Lumit (was Luminal); the astral register stays.**
+From the owner (2026-07-16), same day as K-083. Luminal becomes **Lumit** (from *lumen*)
+everywhere living: UI strings, docs, crate names (`luminal-*` → `lumit-*`, binary `lumit.exe`),
+brand asset filenames, and the GitHub repository (`luminalmvm/Luminal` → `luminalmvm/Lumit`,
+old URLs redirect). Explicitly retained from K-083: the subsystem names **Nova** / **Nebula** /
+**Pulsar**, and the `.lum` project extension (it reads even better for Lumit). Historical
+records (this log's earlier entries, `docs/research/`) keep their era's names verbatim.

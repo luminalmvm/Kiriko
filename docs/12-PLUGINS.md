@@ -1,6 +1,6 @@
 # Plugins, scripting, and expressions
 
-**Status: canonical.** This document specifies Luminal's extensibility surfaces: the OFX
+**Status: canonical.** This document specifies Lumit's extensibility surfaces: the OFX
 host (K-061), the KFX native plugin API (K-062), and the expression/scripting runtime
 (K-063) — see [02-DECISIONS.md](02-DECISIONS.md). Terminology follows
 [01-GLOSSARY.md](01-GLOSSARY.md) exactly. RFC-2119 keywords (MUST, SHOULD, MAY) are
@@ -11,7 +11,7 @@ effect placeholder behaviour is shared with [11-AE-IMPORT.md](11-AE-IMPORT.md) �
 
 ## 1. Philosophy
 
-Plugins ship **after** the main application. Luminal's built-in effect suite (K-064) covers
+Plugins ship **after** the main application. Lumit's built-in effect suite (K-064) covers
 the montage staples in-box, so v1 does not depend on third parties. But per K-062, **every
 engine boundary is designed against these APIs from day one**: the evaluation graph's node
 interface, the property system, ROI/DoD metadata, temporal frame requests, and the
@@ -22,7 +22,7 @@ difference is trust and transport.
 
 Two non-negotiables:
 
-1. **A plugin must never take Luminal down.** Third-party code runs out of process. A crash,
+1. **A plugin must never take Lumit down.** Third-party code runs out of process. A crash,
    hang, or memory explosion in a plugin ends that plugin's process, not the session. The
    affected effect renders as an errored placeholder (identity output, calm badge) and the
    user keeps working.
@@ -45,20 +45,20 @@ parameters, and keyframes preserved, identity render, never lost on save.
 
 OpenFX is the sanctioned road to the gaming-edit staples: RE:Vision (Twixtor, ReelSmart
 Motion Blur), BorisFX (Sapphire, Continuum, Mocha), NewBlue, Neat Video and others all ship
-OFX builds already proven in Vegas and Resolve — the exact plugins Luminal's audience owns.
+OFX builds already proven in Vegas and Resolve — the exact plugins Lumit's audience owns.
 The standard is BSD-3-licensed, fee-free, and stewarded by the Academy Software Foundation;
-implementing a host requires no permission and no payment. The host lives in `luminal-ofx`.
+implementing a host requires no permission and no payment. The host lives in `lumit-ofx`.
 
 ### 2.1 Conformance scope
 
-Luminal implements a conformant OFX Image Effect host, targeting spec 1.4 semantics with the
+Lumit implements a conformant OFX Image Effect host, targeting spec 1.4 semantics with the
 1.5 additions adopted incrementally. Suites, in implementation order:
 
 | Suite | Notes |
 |---|---|
 | **Property** (`OfxPropertySuiteV1`) | The load-bearing one; every object is a property set. Mechanical but must be exact. |
-| **Image Effect** (`OfxImageEffectSuiteV1`) | Effect/instance lifecycle, clip access (in OFX's sense of "clip" — an image input/output; not a Luminal clip). |
-| **Parameter** (`OfxParameterSuiteV1`) | Definition of all standard parameter types; `paramGetValueAtTime` answered from Luminal's property system (§2.2). |
+| **Image Effect** (`OfxImageEffectSuiteV1`) | Effect/instance lifecycle, clip access (in OFX's sense of "clip" — an image input/output; not a Lumit clip). |
+| **Parameter** (`OfxParameterSuiteV1`) | Definition of all standard parameter types; `paramGetValueAtTime` answered from Lumit's property system (§2.2). |
 | **Memory, Multi-thread, Message** | Small; Multi-thread backed by the worker pool with the documented OFX semantics. |
 | **Interact / Draw** (later) | On-Viewer overlay widgets. The 1.5 Draw Suite is preferred (host-abstracted 2D drawing); legacy OpenGL interacts are the fallback and an open question under wgpu (§Open questions). |
 | **GPU render** (later) | OFX 1.5 GPU suites — CUDA and OpenCL on Windows, Metal on macOS (§2.4). |
@@ -74,7 +74,7 @@ hashing and caching correctly.
 **Contexts supported**: filter, general, generator, transition. (OFX's retimer context is
 rarely used by real plugins — Twixtor ships as a filter/general effect — and is deferred.)
 **Pixel formats advertised**: float RGBA only, which the spec permits and which matches the
-working space; plugins adapt or are rejected at describe time with a report entry. Luminal's
+working space; plugins adapt or are rejected at describe time with a report entry. Lumit's
 fp16 scene-linear working frames convert to fp32 at the plugin boundary and back
 ([06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md) defines where in the pipeline the
 conversion nodes sit).
@@ -82,11 +82,11 @@ conversion nodes sit).
 ### 2.2 Parameter mapping
 
 OFX parameters (double, int, boolean, choice, RGBA, 2D/3D point, string, custom, group,
-page) map onto Luminal properties one-to-one. The host owns animation: keyframes and curves
-live in Luminal's property system, are edited in the Timeline and graph editor, serialise
+page) map onto Lumit properties one-to-one. The host owns animation: keyframes and curves
+live in Lumit's property system, are edited in the Timeline and graph editor, serialise
 into the `.lum` file, and are readable from expressions like any built-in property.
 `paramGetValueAtTime` evaluates the property (including any expression on it) at the
-requested time. Custom parameters carry opaque vendor blobs; Luminal stores and round-trips
+requested time. Custom parameters carry opaque vendor blobs; Lumit stores and round-trips
 them without interpretation. Parameter pages/groups become the Effect Controls layout.
 
 ### 2.3 Out-of-process hosting
@@ -133,7 +133,7 @@ milestone is scheduled.
 ### 2.5 The quirks reality
 
 Every OFX host implements the spec slightly differently and commercial plugins carry
-per-host workaround tables; Luminal will need the mirror image. `luminal-ofx` maintains a
+per-host workaround tables; Lumit will need the mirror image. `lumit-ofx` maintains a
 **quirks table** (data file: per plugin identifier + version → deviations, timeout
 overrides, suite-version pins) from day one, so workarounds are data, not scattered code.
 
@@ -144,8 +144,8 @@ bench is CI-automated for the open plugins and a manual checklist for the commer
 Natron's HostSupport library and the openfx Support library are reference reading, not
 dependencies.
 
-Vendor relations: the OpenFX TSC includes the vendors that matter most to Luminal's
-audience; engage early so "Luminal" appears in vendors' supported-host lists and licence
+Vendor relations: the OpenFX TSC includes the vendors that matter most to Lumit's
+audience; engage early so "Lumit" appears in vendors' supported-host lists and licence
 activation works. This is outreach, not engineering, but it gates real-world usability.
 
 ### 2.6 Discovery
@@ -160,11 +160,11 @@ to built-ins apart from a small provenance tag in the effect's context menu.
 
 ## 3. KFX: the native plugin API
 
-KFX is the first-party API — for effects that want what OFX cannot offer: Luminal-native
+KFX is the first-party API — for effects that want what OFX cannot offer: Lumit-native
 UI richness, host motion vectors, the fp16 working format without conversion, first-class
 temporal access, and a modern, typed, sandbox-first contract. KFX competes with OFX only
-where OFX is weak; it does not try to out-standard the standard. Host side: `luminal-kfx`,
-sharing the sandbox/IPC substrate with `luminal-ofx`.
+where OFX is weak; it does not try to out-standard the standard. Host side: `lumit-kfx`,
+sharing the sandbox/IPC substrate with `lumit-ofx`.
 
 ### 3.1 Shape: CLAP-shaped C ABI
 
@@ -260,7 +260,7 @@ ever adding one). Same server-process model, watchdog, and restart policy as OFX
   gracefully when an extension is absent (a plugin requiring a missing extension fails to
   instantiate with a clear message and becomes a placeholder).
 - **Deliverables shipped with the first KFX release**: MIT-licensed headers (deliberately
-  more permissive than Luminal's GPLv3 so proprietary vendors can adopt without licence
+  more permissive than Lumit's GPLv3 so proprietary vendors can adopt without licence
   anxiety), a **`kfx-validator` CLI** (loads a plugin, exercises lifecycle/threading/ROI
   contracts, fuzzes parameter edges, checks the threading annotations under a stress
   scheduler — CLAP's proxy-validator idea), and a **plugin template repository** (Rust and
@@ -280,7 +280,7 @@ search, same apply gestures, same Effect Controls layout rules
 
 ### 4.1 Engine
 
-**QuickJS-ng, embedded in `luminal-expr`** (K-063), ES2018 surface. Rationale over V8:
+**QuickJS-ng, embedded in `lumit-expr`** (K-063), ES2018 surface. Rationale over V8:
 trivially embeddable, byte-identical behaviour across machines and runs (no JIT tiers),
 built-in memory/time limits, and per-property snippets are interpreter-friendly — the
 host-call cost dominates, not JS execution. The engine version is pinned per project-file
@@ -415,7 +415,7 @@ Boundaries:
 - **Expression editor scope**: inline editor per property is assumed in
   [07-UI-SPEC.md](07-UI-SPEC.md); syntax highlighting, error ribbon, and pick-whip writing
   are UI-spec questions, but does the expression *language service* (autocomplete against
-  the implemented subset) live in `luminal-expr` or the UI crate?
+  the implemented subset) live in `lumit-expr` or the UI crate?
 - **Shared plugin-server pooling**: one process per bundle is clean but a Sapphire-scale
   suite (hundreds of effects, one bundle) becomes a serialisation choke point if it flags
   thread-unsafe; measure whether per-instance worker processes are needed for heavyweight

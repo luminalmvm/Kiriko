@@ -1,0 +1,21 @@
+[package]
+name = "lumit-app"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+
+[[bin]]
+name = "lumit"
+path = "src/main.rs"
+
+[features]
+default = ["media"]
+media = ["lumit-ui/media"]
+
+[dependencies]
+lumit-ui = { path = "../lumit-ui", default-features = false }
+eframe = { version = "0.31", features = ["persistence", "wgpu"] }
+egui = "0.31"
+
+[lints]
+workspace = true
