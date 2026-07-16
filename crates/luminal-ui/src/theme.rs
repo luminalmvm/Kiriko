@@ -104,10 +104,30 @@ impl Theme {
         }
     }
 
+    /// Install the UI typeface: Inter Medium (SIL OFL 1.1 — free, commercial
+    /// use included; `assets/fonts/LICENSE.txt`, shared with the text engine's
+    /// Inter Regular). First in the proportional family, so every label takes
+    /// it; egui's bundled faces stay behind it as glyph fallbacks.
+    pub fn install_fonts(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "Inter-Medium".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+                "../../../assets/fonts/Inter-Medium.otf"
+            ))),
+        );
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "Inter-Medium".to_owned());
+        ctx.set_fonts(fonts);
+    }
+
     /// Apply the theme to an egui context: visuals, spacing, type scale — the
-    /// rerun-inspired system (K-084). Widgets are borderless: their states are
-    /// fill changes, not stroke changes; menus float on a soft real shadow;
-    /// scrollbars are thin and solid.
+    /// rerun-inspired system (K-084). Idle widgets are borderless (hover and
+    /// press carry an edge, owner amendment); menus float on a soft real
+    /// shadow; scrollbars are thin and solid.
     pub fn apply(&self, ctx: &egui::Context) {
         let mut visuals = Visuals::dark();
 
@@ -125,7 +145,8 @@ impl Theme {
         visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, self.hairline);
         visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, self.text_secondary);
 
-        // Interactive widgets carry no border; state reads from the fill alone.
+        // Idle widgets carry no border; hover and press bring one back (owner
+        // amendment to K-084) so state reads from fill *and* edge together.
         visuals.widgets.inactive.bg_fill = self.surface_3;
         visuals.widgets.inactive.weak_bg_fill = self.surface_2;
         visuals.widgets.inactive.bg_stroke = Stroke::NONE;
@@ -133,16 +154,16 @@ impl Theme {
 
         visuals.widgets.hovered.bg_fill = self.surface_4;
         visuals.widgets.hovered.weak_bg_fill = self.surface_4;
-        visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, self.hairline_strong);
         visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, self.text_primary);
 
         visuals.widgets.active.bg_fill = self.hairline_strong;
         visuals.widgets.active.weak_bg_fill = self.hairline_strong;
-        visuals.widgets.active.bg_stroke = Stroke::NONE;
+        visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, self.accent);
         visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, self.text_primary);
 
         visuals.widgets.open.bg_fill = self.surface_3;
-        visuals.widgets.open.bg_stroke = Stroke::NONE;
+        visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, self.hairline_strong);
         visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, self.text_primary);
 
         // Selection is punchy, rerun-style — the accent carries it.
@@ -219,6 +240,49 @@ impl Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self::dark()
+    }
+}
+
+/// Which background ramp the user has picked (the seed of the full theme
+/// picker to come). `Dark` is the K-084 rerun-structure ramp; `DarkBlue` is
+/// the previous, bluer and slightly lighter ramp, kept as an option by
+/// owner request.
+#[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ThemeVariant {
+    #[default]
+    Dark,
+    DarkBlue,
+}
+
+impl Theme {
+    /// The theme for a variant choice.
+    pub const fn of(variant: ThemeVariant) -> Self {
+        match variant {
+            ThemeVariant::Dark => Self::dark(),
+            ThemeVariant::DarkBlue => Self::dark_blue(),
+        }
+    }
+
+    /// The pre-K-084 ramp: bluer, a step lighter — everything else (accent,
+    /// roles, curves, layer colours, and the whole widget/spacing system in
+    /// `apply`) is shared with `dark`. The Viewer surround stays strictly
+    /// neutral here too.
+    pub const fn dark_blue() -> Self {
+        Self {
+            surface_0: Color32::from_rgb(0x14, 0x16, 0x18),
+            surface_1: Color32::from_rgb(0x1b, 0x1e, 0x20),
+            surface_2: Color32::from_rgb(0x22, 0x26, 0x2a),
+            surface_3: Color32::from_rgb(0x2b, 0x30, 0x34),
+            surface_4: Color32::from_rgb(0x34, 0x3a, 0x3f),
+            viewer_surround: Color32::from_rgb(0x1e, 0x1e, 0x1e),
+            text_primary: Color32::from_rgb(0xe6, 0xe9, 0xea),
+            text_secondary: Color32::from_rgb(0xb6, 0xbc, 0xbf),
+            text_muted: Color32::from_rgb(0x83, 0x8b, 0x90),
+            text_disabled: Color32::from_rgb(0x66, 0x70, 0x77),
+            hairline: Color32::from_rgba_premultiplied(0x25, 0x27, 0x29, 0xff),
+            hairline_strong: Color32::from_rgba_premultiplied(0x3d, 0x40, 0x42, 0xff),
+            ..Self::dark()
+        }
     }
 }
 

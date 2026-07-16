@@ -6867,6 +6867,10 @@ pub struct Shell {
     floating: Vec<Panel>,
     #[serde(skip, default)]
     theme: Theme,
+    /// The user's background-ramp pick (Window menu); the seed of the full
+    /// theme picker to come. Persisted with the workspace.
+    #[serde(default)]
+    theme_variant: crate::theme::ThemeVariant,
     #[serde(skip, default)]
     app: AppState,
     /// Boot splash (K-008); None once the application window has expanded.
@@ -6909,6 +6913,7 @@ impl Default for Shell {
             dock: default_layout(),
             floating: Vec::new(),
             theme: Theme::dark(),
+            theme_variant: crate::theme::ThemeVariant::default(),
             app: AppState::default(),
             splash: None,
             preview_tex: None,
@@ -6937,6 +6942,8 @@ impl Shell {
     ) -> Self {
         let workspace_restored = restored.is_some();
         let mut shell = restored.unwrap_or_default();
+        Theme::install_fonts(ctx);
+        shell.theme = Theme::of(shell.theme_variant); // honour the saved pick
         shell.theme.apply(ctx);
         ctx.style_mut(|s| s.visuals.panel_fill = shell.theme.surface_0);
 
@@ -7930,6 +7937,28 @@ impl Shell {
                 ui.menu_button("Window", |ui| {
                     if ui.button("Reset workspace").clicked() {
                         self.dock = default_layout();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    // Background ramp pick — the seed of the full theme picker.
+                    ui.label(
+                        egui::RichText::new("Background")
+                            .small()
+                            .color(self.theme.text_muted),
+                    );
+                    let mut pick = self.theme_variant;
+                    ui.radio_value(&mut pick, crate::theme::ThemeVariant::Dark, "Dark");
+                    ui.radio_value(
+                        &mut pick,
+                        crate::theme::ThemeVariant::DarkBlue,
+                        "Dark blue (previous)",
+                    );
+                    if pick != self.theme_variant {
+                        self.theme_variant = pick;
+                        self.theme = Theme::of(pick);
+                        self.theme.apply(ui.ctx());
+                        let s0 = self.theme.surface_0;
+                        ui.ctx().style_mut(|s| s.visuals.panel_fill = s0);
                         ui.close_menu();
                     }
                 });
