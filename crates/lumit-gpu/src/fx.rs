@@ -231,6 +231,36 @@ struct TransformParams {
     mix_amt: f32,
 }
 
+/// One resolved glow (docs/08 §3.3, v1 core): bright-pass with a soft knee,
+/// the shared gaussian on the leftover light, additive recombine. The
+/// radius is already in raster pixels; intensity 0 is the neutral point
+/// (bit-exact passthrough, matching the CPU reference's short-circuit).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlowOp {
+    /// The halo gaussian's half-width, raster pixels.
+    pub radius_px: f32,
+    /// Linear-light bright threshold, ≥ 0 (unbounded above, K-090).
+    pub threshold: f32,
+    /// Soft-knee width around the threshold, 0..1.
+    pub knee: f32,
+    /// Gain on the added halo.
+    pub intensity: f32,
+    /// Scene-linear RGBA halo tint (alpha unused).
+    pub tint: [f32; 4],
+    /// 0..1, blended against the unprocessed input.
+    pub mix: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GlowParams {
+    tint: [f32; 4],
+    threshold: f32,
+    knee: f32,
+    intensity: f32,
+    mix_amt: f32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct AdjustParams {
@@ -251,6 +281,8 @@ pub struct FxEngine {
     colour_balance: wgpu::ComputePipeline,
     saturation: wgpu::ComputePipeline,
     transform: wgpu::ComputePipeline,
+    glow_bright: wgpu::ComputePipeline,
+    glow_combine: wgpu::ComputePipeline,
     adjust: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     /// The adjustment blend's own layout: three sampled inputs (below,
@@ -360,6 +392,7 @@ impl FxEngine {
         let balance_mod = module(include_str!("fx_colourbalance.wgsl"), "fx-colour-balance");
         let saturation_mod = module(include_str!("fx_saturation.wgsl"), "fx-saturation");
         let transform_mod = module(include_str!("fx_transform.wgsl"), "fx-transform");
+        let glow_mod = module(include_str!("fx_glow.wgsl"), "fx-glow");
         let adjust_mod = module(include_str!("fx_adjust.wgsl"), "fx-adjust");
         let blur = pipeline(&blur_mod, "fx-blur", "blur_pass");
         let dir_blur = pipeline(&dir_blur_mod, "fx-dir-blur", "dir_blur");
@@ -371,6 +404,8 @@ impl FxEngine {
         let colour_balance = pipeline(&balance_mod, "fx-colour-balance", "colour_balance");
         let saturation = pipeline(&saturation_mod, "fx-saturation", "saturate_fx");
         let transform = pipeline(&transform_mod, "fx-transform", "transform");
+        let glow_bright = pipeline(&glow_mod, "fx-glow-bright", "glow_bright");
+        let glow_combine = pipeline(&glow_mod, "fx-glow", "glow_combine");
         let adjust = ctx
             .device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -392,6 +427,8 @@ impl FxEngine {
             colour_balance,
             saturation,
             transform,
+            glow_bright,
+            glow_combine,
             adjust,
             layout,
             adjust_layout,
@@ -818,6 +855,78 @@ impl FxEngine {
                 opacity: op.opacity,
                 mix_amt: op.mix,
             }),
+        );
+        out
+    }
+
+    /// Apply one glow (docs/08 §3.3, v1 core) to a linear working texture,
+    /// returning a new texture of the same size. Four passes: the bright
+    /// pass keeps only the light above the threshold (soft knee, all four
+    /// premultiplied channels — the halo carries alpha), the shared
+    /// separable gaussian widens it (Repeat edges, fixed: the halo holds
+    /// its strength along frame borders), and the combine pass adds
+    /// `intensity · tint · halo` back onto the untouched input in linear,
+    /// alpha saturating at 1. Intensity 0 short-circuits inside the combine
+    /// kernel to the bit-exact identity.
+    pub fn glow(
+        &self,
+        ctx: &GpuContext,
+        src: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        op: &GlowOp,
+    ) -> wgpu::Texture {
+        let bright = work_texture(ctx, w, h, "fx-glow-bright");
+        let tmp = work_texture(ctx, w, h, "fx-glow-tmp");
+        let blurred = work_texture(ctx, w, h, "fx-glow-blur");
+        let out = work_texture(ctx, w, h, "fx-glow-out");
+        let params = GlowParams {
+            tint: op.tint,
+            threshold: op.threshold,
+            knee: op.knee,
+            intensity: op.intensity,
+            mix_amt: op.mix,
+        };
+        self.dispatch(
+            ctx,
+            &self.glow_bright,
+            src,
+            src,
+            &bright,
+            w,
+            h,
+            bytemuck::bytes_of(&params),
+        );
+        let sigma = (op.radius_px * 0.5).max(1e-3);
+        for (pass_src, pass_dst, dir) in [(&bright, &tmp, [1.0, 0.0]), (&tmp, &blurred, [0.0, 1.0])]
+        {
+            self.dispatch(
+                ctx,
+                &self.blur,
+                pass_src,
+                pass_src,
+                pass_dst,
+                w,
+                h,
+                bytemuck::bytes_of(&BlurParams {
+                    dir,
+                    radius: op.radius_px,
+                    sigma,
+                    edge: 1, // Repeat, always (see the CPU reference)
+                    mix_amt: 1.0,
+                    _pad: [0.0; 2],
+                }),
+            );
+        }
+        self.dispatch(
+            ctx,
+            &self.glow_combine,
+            &blurred,
+            src,
+            &out,
+            w,
+            h,
+            bytemuck::bytes_of(&params),
         );
         out
     }
@@ -1512,6 +1621,157 @@ mod tests {
             let out2 = fx.transform(&ctx, &tex, w, h, &op);
             let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
             assert_eq!(gpu, gpu2, "GPU transform must be bit-stable");
+        }
+    }
+
+    /// The §1.6 oracle for shake (docs/08 §3.4): a transform-domain effect
+    /// with no kernel of its own — the resolved wobble maps through the
+    /// shared `shake_affine` to the Transform kernel, exactly as `run_ops`
+    /// dispatches it, and the CPU reference walks the same affine. One-tap
+    /// resample, so the cheap-class ≤ 2 fp16 ULP bound holds; the GPU is
+    /// bit-stable (§2.4); the neutral wobble (zero amplitude, rotation and
+    /// pump — the effect's §1.2 trigger-adjacent neutral) is the bit-exact
+    /// passthrough even with auto-scale on, because the cover is exactly 1.
+    #[test]
+    fn wgsl_shake_matches_the_cpu_oracle_through_the_transform_kernel() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        let img = corpus(w, h);
+        for (name, offset, rot, zoom, amp, rot_max, zoom_min, auto_scale, mix) in [
+            (
+                "neutral",
+                [0.0f32, 0.0f32],
+                0.0f32,
+                1.0f32,
+                0.0f32,
+                0.0f32,
+                1.0f32,
+                true,
+                1.0f32,
+            ),
+            ("offset", [2.5, -1.5], 0.0, 1.0, 3.0, 0.0, 1.0, false, 1.0),
+            ("twist", [1.0, 0.5], 4.0, 1.0, 1.5, 5.0, 1.0, true, 1.0),
+            ("pumped", [0.0, 2.0], -2.0, 0.95, 2.0, 3.0, 0.9, true, 0.7),
+        ] {
+            let shake = lumit_core::fx::Resolved::Shake {
+                offset_px: offset,
+                rotation_deg: rot,
+                zoom,
+                amp_px: amp,
+                rotation_max_deg: rot_max,
+                zoom_min,
+                auto_scale,
+                mix,
+            };
+            let mut cpu = img.clone();
+            lumit_core::fx::cpu::apply(&mut cpu, w, h, &shake);
+
+            // The exact run_ops mapping: shared affine → transform op →
+            // the Transform kernel.
+            let (anchor, position, scale, rotation) = lumit_core::fx::shake_affine(
+                w, h, offset, rot, zoom, amp, rot_max, zoom_min, auto_scale,
+            );
+            let (m, off, opacity) =
+                lumit_core::fx::transform_op(anchor, position, scale, rotation, 1.0);
+            let tex = upload_linear_f32(&ctx, &img, w, h);
+            let op = TransformOp {
+                m,
+                off,
+                opacity,
+                mix,
+            };
+            let out = fx.transform(&ctx, &tex, w, h, &op);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+
+            let worst = worst_f16_ulp(&cpu, &gpu);
+            eprintln!("shake {name}: worst {worst} ulp");
+            assert!(worst <= 2, "{name}: worst {worst} fp16 ULP");
+            if name == "neutral" {
+                assert_eq!(
+                    gpu, img,
+                    "a neutral shake must be the bit-exact passthrough"
+                );
+            }
+
+            let out2 = fx.transform(&ctx, &tex, w, h, &op);
+            let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
+            assert_eq!(gpu, gpu2, "GPU shake must be bit-stable");
+        }
+    }
+
+    /// The §1.6 oracle for glow: WGSL agrees with the CPU reference on the
+    /// corpus across parameter sweeps, is bit-stable (§2.4), and — the
+    /// effect's neutral pin — intensity 0 is the bit-exact identity. Like
+    /// sharpen, the internal gaussian's intermediates round through fp16
+    /// textures on the GPU and stay f32 on the CPU, so the bound is an
+    /// absolute epsilon rather than a ULP count: 5e-3 ≈ 1–2 fp16 ULP at the
+    /// corpus's HDR peak of 6.0 (measured worst on NVIDIA: 1.5e-3, on the
+    /// hard-knee case where the bright stage passes the most energy).
+    #[test]
+    fn wgsl_glow_matches_the_cpu_oracle() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        let img = corpus(w, h);
+        for (name, radius, threshold, knee, intensity, tint, mix) in [
+            (
+                "default",
+                6.0f32,
+                1.0f32,
+                0.5f32,
+                1.0f32,
+                [1.0f32; 4],
+                1.0f32,
+            ),
+            ("hard-knee", 4.0, 0.5, 0.0, 2.0, [1.0; 4], 1.0),
+            ("threshold-0", 8.0, 0.0, 0.0, 1.0, [1.0; 4], 1.0),
+            (
+                "tinted-mixed",
+                5.0,
+                0.3,
+                0.2,
+                1.5,
+                [2.0, 0.5, 0.25, 1.0],
+                0.6,
+            ),
+            ("neutral", 6.0, 1.0, 0.5, 0.0, [1.0; 4], 1.0),
+        ] {
+            let mut cpu = img.clone();
+            lumit_core::fx::cpu::glow(
+                &mut cpu, w, h, radius, threshold, knee, intensity, tint, mix,
+            );
+
+            let tex = upload_linear_f32(&ctx, &img, w, h);
+            let op = GlowOp {
+                radius_px: radius,
+                threshold,
+                knee,
+                intensity,
+                tint,
+                mix,
+            };
+            let out = fx.glow(&ctx, &tex, w, h, &op);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+
+            let worst = worst_diff(&cpu, &gpu);
+            // Logged so real cross-vendor deltas accumulate (docs/08 open
+            // question 5: the class tolerances are placeholders until then).
+            eprintln!("glow {name}: worst {worst:.2e}");
+            assert!(worst < 5e-3, "{name}: worst diff {worst}");
+            if name == "neutral" {
+                assert_eq!(gpu, img, "intensity 0 must be the bit-exact identity");
+            }
+
+            let out2 = fx.glow(&ctx, &tex, w, h, &op);
+            let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
+            assert_eq!(gpu, gpu2, "GPU glow must be bit-stable");
         }
     }
 
