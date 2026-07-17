@@ -791,3 +791,17 @@ Colour, Export, Keymap, Autosave, Plugins) fills in on this same surface as thos
 controls; a GPU-acceleration toggle was deliberately deferred rather than shipped half-wired
 (the flow engine lives in the decode worker and needs its own control message). The window is
 the `docs/07 §15` "Interface/Preferences" surface, not a second one.
+
+**K-100 · DECIDED · The Performance page gains a video-memory (VRAM) budget and a
+Clear cache action.** Extends K-098: `PerformanceSettings` gains `vram_cache_mb` (default
+512, matching `GpuViewer`'s existing `VRAM_TIER_CAP`), applied live through a new
+`GpuViewer::set_vram_cap` alongside the RAM and disk lines already wired in
+`apply_cache_budgets`. `set_vram_cap` re-evicts the VRAM tier's oldest entries against the
+new cap immediately, reusing the same `vram_evict_count` policy `present_keyed` already
+applies on insert — no separate eviction logic. A **Cache** group joins the Performance page
+with a single **Clear cache** button: it empties the RAM `comp_frame_cache` and the VRAM
+tier (`GpuViewer::clear_vram`, which releases each texture's egui registration so nothing
+leaks) and bumps `AppState::cache_epoch` so the cache bar and any live views notice the
+tiers are now empty. This is the first row of the docs/07 §15 "Performance" inventory's VRAM
+budget to ship; CUDA on/off, decoder pool size, worker thread cap and background cache fill
+remain open.

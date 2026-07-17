@@ -1019,11 +1019,16 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   app's own dropdown menus, which don't animate at all today regardless of this setting. All
   five persist with your workspace; Reset returns the clay default for Accent.
   The **Performance** page of the same window is where you tell Lumit how hard to work your
-  machine: how much memory its frame cache may hold, and how much disk the on-disk cache may
-  use. Both apply the moment you change them — nudge the memory budget down and the cache
-  trims itself to fit at once. The defaults match what Lumit used before the page existed, so
-  nothing changes until you move a slider. (More performance controls — the graphics-card
-  budget, worker counts — arrive on this page as those systems gain their knobs.)
+  machine: how much memory its frame cache may hold, how much disk the on-disk cache may use,
+  and how much video memory (VRAM, the graphics card's own memory) the cache of
+  already-drawn frames on the GPU may hold. All three apply the moment you change them —
+  nudge a budget down and the matching cache trims itself to fit at once. The defaults match
+  what Lumit used before the page existed, so nothing changes until you move a slider. A
+  **Clear cache** button underneath empties the memory and video-memory caches straight away
+  (handy after a big edit, or if you just want a clean start) — the on-disk cache is left
+  alone since clearing it would mean re-decoding footage from scratch. (More performance
+  controls — CUDA acceleration, worker counts — arrive on this page as those systems gain
+  their knobs.)
   The **focused panel** also wears a thin accent edge: whichever panel you last clicked is
   where keyboard shortcuts land, and the edge keeps that visible at a glance (the After
   Effects convention) — it follows the Round shape's card rounding too, when that's picked.

@@ -658,14 +658,16 @@ project file, [10-FILE-FORMAT.md](10-FILE-FORMAT.md) §2):
   **Autosave** (interval, copies kept), **Plugins** (search paths, disabled list,
   per-plugin overrides).
 
-**Shipped (v1, K-098):** the Settings window exists — a macOS-System-Settings-style surface,
-a sidebar of pages with grouped cards, honouring the Sharp/Round shape. It opens from
-**Window → Settings…** or **Ctrl/Cmd+comma**. Its v1 pages are a subset of the inventory
-above: **Appearance** (Theme Mode, Background ramp, Accent, Shape, Interface motion — all
-migrated here out of the Window menu, K-092), **Performance** (RAM frame-cache budget and
-disk-cache cap, both applied live), and **General** (reset workspace, version). The remaining
-groups (VRAM/CUDA and the other Performance rows, Cache root/proxy, Preview, Colour, Export,
-Keymap, Autosave, Plugins) fill in on this same surface as those systems gain their controls.
+**Shipped (v1, K-098; VRAM budget and Clear cache added K-100):** the Settings window exists —
+a macOS-System-Settings-style surface, a sidebar of pages with grouped cards, honouring the
+Sharp/Round shape. It opens from **Window → Settings…** or **Ctrl/Cmd+comma**. Its v1 pages
+are a subset of the inventory above: **Appearance** (Theme Mode, Background ramp, Accent,
+Shape, Interface motion — all migrated here out of the Window menu, K-092), **Performance**
+(RAM frame-cache budget, disk-cache cap and VRAM frame-cache budget, all applied live, plus a
+Clear cache action that empties the RAM and VRAM tiers at once), and **General** (reset
+workspace, version). The remaining groups (CUDA and the other Performance rows, Cache
+root/proxy, Preview, Colour, Export, Keymap, Autosave, Plugins) fill in on this same surface
+as those systems gain their controls.
 
 All bindings are remappable in Settings → Keymap (search, conflict detection, per-context
 display); the keymap serialises to a shareable file. An "After Effects" alternate preset

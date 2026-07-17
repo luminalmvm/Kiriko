@@ -54,6 +54,9 @@ pub(crate) struct PerformanceSettings {
     pub ram_cache_mb: u32,
     /// Disk frame-cache cap, in mebibytes (the `.lum-cache` sidecar).
     pub disk_cache_mb: u32,
+    /// Video-memory (VRAM) frame-cache budget, in mebibytes (the GPU
+    /// display-texture tier, `GpuViewer::vram`, docs/06 §5).
+    pub vram_cache_mb: u32,
 }
 
 impl Default for PerformanceSettings {
@@ -63,6 +66,8 @@ impl Default for PerformanceSettings {
             ram_cache_mb: 512,
             // Matches `AppState::DEFAULT_CAP_BYTES` (50 GiB).
             disk_cache_mb: 50 * 1024,
+            // Matches `gpu::VRAM_TIER_CAP` (512 MiB).
+            vram_cache_mb: 512,
         }
     }
 }
@@ -332,6 +337,37 @@ impl Shell {
                 self.settings.disk_cache_mb = disk;
                 self.apply_cache_budgets();
             }
+
+            settings_divider(ui, theme);
+            let mut vram = self.settings.vram_cache_mb;
+            settings_row(
+                ui,
+                theme,
+                "Video memory budget",
+                Some("How much VRAM the displayed-frame cache may hold."),
+                |ui| {
+                    ui.label(egui::RichText::new("MB").color(theme.text_muted));
+                    ui.add(egui::DragValue::new(&mut vram).speed(64).range(128..=16384));
+                },
+            );
+            if vram != self.settings.vram_cache_mb {
+                self.settings.vram_cache_mb = vram;
+                self.apply_cache_budgets();
+            }
+        });
+
+        settings_group(ui, theme, "Cache", |ui| {
+            settings_row(
+                ui,
+                theme,
+                "Clear cache",
+                Some("Empty the RAM and video-memory frame caches now."),
+                |ui| {
+                    if ui.button("Clear cache").clicked() {
+                        self.clear_frame_caches();
+                    }
+                },
+            );
         });
     }
 
@@ -346,6 +382,25 @@ impl Shell {
         if let Some(io) = &self.app.disk_io {
             let _ = io.tx.send(crate::app_state::diskio::Cmd::SetCap(disk));
         }
+        #[cfg(feature = "media")]
+        {
+            let vram = (self.settings.vram_cache_mb as u64).saturating_mul(1024 * 1024);
+            if let Some(gpu) = &mut self.gpu {
+                gpu.set_vram_cap(vram);
+            }
+        }
+    }
+
+    /// Empty the RAM and VRAM frame-cache tiers immediately (Settings →
+    /// Performance "Clear cache", K-100) and bump the cache epoch so the
+    /// cache bar and any live views notice the tiers are now empty.
+    pub(crate) fn clear_frame_caches(&mut self) {
+        self.app.comp_frame_cache.clear();
+        #[cfg(feature = "media")]
+        if let Some(gpu) = &mut self.gpu {
+            gpu.clear_vram();
+        }
+        self.app.cache_epoch += 1;
     }
 
     /// Rebuild and re-apply the theme from the current appearance fields, plus
@@ -453,6 +508,8 @@ mod tests {
         // install behaves exactly as before the settings surface existed.
         assert_eq!(p.ram_cache_mb, 512);
         assert_eq!(p.disk_cache_mb, 50 * 1024);
+        // Matches `gpu::VRAM_TIER_CAP`.
+        assert_eq!(p.vram_cache_mb, 512);
     }
 
     #[test]
