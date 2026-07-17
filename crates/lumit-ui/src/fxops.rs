@@ -15,7 +15,18 @@ type Tex = egui_wgpu::wgpu::Texture;
 
 /// Run `ops` over `tex` in order, returning the final texture (the input
 /// unchanged when `ops` is empty). `w`/`h` are the texture's raster size.
-pub fn run_ops(fx: &FxEngine, ctx: &GpuContext, tex: Tex, w: u32, h: u32, ops: &[Resolved]) -> Tex {
+/// `neighbours` are the layer's decoded neighbour frames keyed by offset
+/// (empty unless the stack has a temporal effect); a temporal op like Echo
+/// reads them, single-frame ops ignore them.
+pub fn run_ops(
+    fx: &FxEngine,
+    ctx: &GpuContext,
+    tex: Tex,
+    w: u32,
+    h: u32,
+    ops: &[Resolved],
+    neighbours: &[(i32, Tex)],
+) -> Tex {
     let mut tex = tex;
     for op in ops {
         match op {
@@ -320,6 +331,23 @@ pub fn run_ops(fx: &FxEngine, ctx: &GpuContext, tex: Tex, w: u32, h: u32, ops: &
                         darkness: *darkness,
                         roll_px: *roll_px,
                         interlace: *interlace,
+                        mix: *mix,
+                    },
+                );
+            }
+            Resolved::Echo { weights, mode, mix } => {
+                // Echo reads the layer's neighbour frames (offsets -1..-8);
+                // the render decoded exactly the ones the window needs.
+                let by_offset: Vec<(i32, &Tex)> = neighbours.iter().map(|(o, t)| (*o, t)).collect();
+                tex = fx.echo(
+                    ctx,
+                    &tex,
+                    &by_offset,
+                    w,
+                    h,
+                    &lumit_gpu::fx::EchoOp {
+                        weights: *weights,
+                        mode: *mode,
                         mix: *mix,
                     },
                 );

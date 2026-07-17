@@ -696,3 +696,17 @@ no-retime" law is untouched and pre-existing Nearest keys stay shared. No `ALGO_
 bump: the new keys are strictly longer byte strings, so they cannot collide with the old
 buggy keys — stale entries simply stop being addressed, per the Global-Performance-Cache
 lesson.
+
+**K-094 · DECIDED · Temporal effects read neighbour source frames; those frames are cache-key
+content.** The machinery behind Echo (docs/08 §3.13) and the coming flow motion blur and
+datamosh: an effect declares a frame-offset window (`EffectTraits.temporal`), and
+`fx::stack_temporal_window` unions a layer's live stack into the offsets the render must
+supply. For a footage layer with a temporal stack, the decode path (preview and export
+alike, K-031) decodes the layer's source at each offset — mapped through the same retime and
+comp frame step as the primary frame, nearest and unmasked — and hands them to the effect.
+The frame-cache key hashes those stamped neighbour frames (a `temporal/` block in
+`feed_source`'s caller), because the synthesised output depends on them: two comp times that
+share a held leading frame can differ in their neighbours. Only footage layers with a live
+temporal stack pay this; every other key is byte-for-byte unchanged, so no `ALGO_VERSION`
+bump. v1 scope limits (echo's fixed 8-frame window and one-frame spacing, source-not-stack
+input, footage-only) are recorded in docs/08 §3.13's status note.

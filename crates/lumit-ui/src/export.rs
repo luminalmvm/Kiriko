@@ -551,8 +551,9 @@ impl Renderer<'_> {
             };
             let diag = ((nested.width as f32).powi(2) + (nested.height as f32).powi(2)).sqrt();
             let markers = lumit_core::fx::MarkerContext::for_layer(nested, l);
+            let neighbours = self.footage_neighbours(l, lt, nested)?;
             let p = Prepared {
-                tex: self.apply_fx(p.tex, l, lt, diag, &markers),
+                tex: self.apply_fx(p.tex, l, lt, diag, &markers, &neighbours),
                 natural: p.natural,
                 mask: p.mask,
             };
@@ -584,11 +585,61 @@ impl Renderer<'_> {
         Ok(())
     }
 
+    /// Decode a footage layer's neighbour source frames for a temporal
+    /// effect (echo etc.), returning them as linear textures keyed by offset
+    /// — the export twin of the preview's neighbour decode (K-031: same
+    /// window, same retime mapping, same nearest frame-pick, unmasked like
+    /// preview). Empty unless the stack is temporal, so a plain layer decodes
+    /// nothing extra.
+    fn footage_neighbours(
+        &mut self,
+        layer: &lumit_core::model::Layer,
+        lt: f64,
+        comp: &Composition,
+    ) -> Result<Vec<(i32, Tex)>, String> {
+        use lumit_core::model::LayerKind;
+        if !lumit_core::fx::stack_is_temporal(&layer.effects, layer.switches.fx) {
+            return Ok(Vec::new());
+        }
+        let LayerKind::Footage { item, retime } = &layer.kind else {
+            return Ok(Vec::new());
+        };
+        let (fps, frames, path) = {
+            let Some(info) = self.items.get(item) else {
+                return Ok(Vec::new());
+            };
+            (info.fps, info.frames, info.path.clone())
+        };
+        if !self.decoders.contains_key(item) {
+            let index = lumit_media::index::build_frame_index(&path).map_err(|e| e.to_string())?;
+            let dec = lumit_media::VideoDecoder::open(&path, index).map_err(|e| e.to_string())?;
+            self.decoders.insert(*item, dec);
+        }
+        let comp_dt = 1.0 / comp.frame_rate.fps().max(1.0);
+        let mut out = Vec::new();
+        for o in lumit_core::fx::stack_temporal_window(&layer.effects, layer.switches.fx)
+            .into_iter()
+            .filter(|&o| o != 0)
+        {
+            let nlt = lt + f64::from(o) * comp_dt;
+            let nst = retime.as_ref().map(|r| r.evaluate(nlt)).unwrap_or(nlt);
+            let (nf, _) = crate::pixels::frame_pick(nst, fps, frames, false);
+            let dec = self.decoders.get_mut(item).ok_or("decoder missing")?;
+            let px = dec.frame_rgba(nf, None).map_err(|e| e.to_string())?;
+            let src = self
+                .colour
+                .upload_srgb8(self.gpu, &px.rgba, px.width, px.height);
+            out.push((o, self.colour.linearise(self.gpu, &src)));
+        }
+        Ok(out)
+    }
+
     /// Run a layer's live effect stack on its prepared linear texture
     /// (docs/08 §1.5: after masks, before transform), resolved against the
     /// comp diagonal — export renders full-resolution, so no decode scaling.
     /// `markers` is the layer's §1.4 marker context, built by the same
-    /// shared constructor preview uses (K-031).
+    /// shared constructor preview uses (K-031); `neighbours` are the temporal
+    /// effect's neighbour frames (empty for a plain stack).
     fn apply_fx(
         &self,
         tex: Tex,
@@ -596,6 +647,7 @@ impl Renderer<'_> {
         lt: f64,
         comp_diag: f32,
         markers: &lumit_core::fx::MarkerContext,
+        neighbours: &[(i32, Tex)],
     ) -> Tex {
         if !layer.switches.fx || layer.effects.is_empty() {
             return tex;
@@ -604,7 +656,7 @@ impl Renderer<'_> {
         // raster pixels (§2.3 factor 1).
         let resolved = lumit_core::fx::resolve_stack(&layer.effects, lt, comp_diag, 1.0, markers);
         let (w, h) = (tex.width(), tex.height());
-        crate::fxops::run_ops(&self.fx, self.gpu, tex, w, h, &resolved)
+        crate::fxops::run_ops(&self.fx, self.gpu, tex, w, h, &resolved, neighbours)
     }
 
     /// Render a whole comp at time `t` into a linear fp16 texture (recursive
@@ -738,8 +790,9 @@ impl Renderer<'_> {
             if let Some(p) = self.prepare(l, t, visited)? {
                 let diag = ((comp.width as f32).powi(2) + (comp.height as f32).powi(2)).sqrt();
                 let markers = lumit_core::fx::MarkerContext::for_layer(comp, l);
+                let neighbours = self.footage_neighbours(l, lt, comp)?;
                 let p = Prepared {
-                    tex: self.apply_fx(p.tex, l, lt, diag, &markers),
+                    tex: self.apply_fx(p.tex, l, lt, diag, &markers, &neighbours),
                     natural: p.natural,
                     mask: p.mask,
                 };
@@ -848,6 +901,10 @@ impl Renderer<'_> {
                     comp.width,
                     comp.height,
                     &fx,
+                    // An adjustment layer processes the composite below; no
+                    // footage neighbour frames (temporal on adjustment layers
+                    // is a later refinement).
+                    &[],
                 );
                 let coverage = self.adjust_coverage(comp, l, lt, camera);
                 let opacity = (l.transform.opacity.value_at(lt) as f32 / 100.0).clamp(0.0, 1.0);

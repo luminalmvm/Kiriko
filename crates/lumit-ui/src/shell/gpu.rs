@@ -75,6 +75,10 @@ pub struct CompLayerDraw {
     /// frame (docs/08; radius already in texture pixels). Applied to the
     /// linear source texture after masks, before the transform.
     pub fx: Vec<lumit_core::fx::Resolved>,
+    /// Decoded neighbour source frames for a temporal effect (echo etc.),
+    /// keyed by frame offset — same sRGB8 form and decoded size as a Pixels
+    /// source. Empty unless the stack is temporal.
+    pub neighbours: Vec<(i32, Vec<u8>, u32, u32)>,
 }
 
 /// GPU display path (slice 5 completion): decoded sRGB bytes → linear fp16
@@ -177,8 +181,18 @@ impl GpuViewer {
             }
             let below =
                 self.realise_segment(camera, width, height, background, &layers[start..i], &acc);
-            let processed =
-                crate::fxops::run_ops(&self.fx, &self.ctx, below.clone(), width, height, &l.fx);
+            // An adjustment layer processes the composite below, which has no
+            // footage neighbour frames — temporal effects on an adjustment
+            // layer are a later refinement, so no neighbours here.
+            let processed = crate::fxops::run_ops(
+                &self.fx,
+                &self.ctx,
+                below.clone(),
+                width,
+                height,
+                &l.fx,
+                &[],
+            );
             let coverage = self.coverage_texture(camera, width, height, l);
             acc = Some(self.fx.adjust_blend(
                 &self.ctx,
@@ -279,7 +293,17 @@ impl GpuViewer {
                 tex
             } else {
                 let (w, h) = (tex.width(), tex.height());
-                crate::fxops::run_ops(&self.fx, &self.ctx, tex, w, h, &l.fx)
+                // Neighbour source frames a temporal effect (echo) reads;
+                // empty for a plain stack, so this uploads nothing then.
+                let neighbours: Vec<(i32, egui_wgpu::wgpu::Texture)> = l
+                    .neighbours
+                    .iter()
+                    .map(|(offset, rgba, nw, nh)| {
+                        let src = self.engine.upload_srgb8(&self.ctx, rgba, *nw, *nh);
+                        (*offset, self.engine.linearise(&self.ctx, &src))
+                    })
+                    .collect();
+                crate::fxops::run_ops(&self.fx, &self.ctx, tex, w, h, &l.fx, &neighbours)
             };
             linear_textures.push(tex);
         }

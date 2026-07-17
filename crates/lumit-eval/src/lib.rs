@@ -266,6 +266,33 @@ fn feed_layer(
         }
     }
 
+    // A temporal effect (echo, docs/08 §3.13) reads the layer's neighbour
+    // source frames, which are content the parameter hash cannot see (K-094):
+    // two comp times sharing the current frame — a held/frozen leading frame —
+    // can differ in their neighbours, so their echoes differ. Key the stamped
+    // neighbour frames, exactly the ones the render decodes (same window, same
+    // retime mapping, same comp frame step). Footage layers only, matching the
+    // render's neighbour decode; empty otherwise, so a plain layer's key is
+    // untouched.
+    if lumit_core::fx::stack_is_temporal(&layer.effects, layer.switches.fx) {
+        if let LayerKind::Footage { item, retime } = &layer.kind {
+            let comp_dt = 1.0 / comp.frame_rate.fps().max(1.0);
+            h.update(b"temporal/");
+            for o in lumit_core::fx::stack_temporal_window(&layer.effects, layer.switches.fx)
+                .into_iter()
+                .filter(|&o| o != 0)
+            {
+                let nlt = lt + f64::from(o) * comp_dt;
+                let nst = retime.as_ref().map(|r| r.evaluate(nlt)).unwrap_or(nlt);
+                if let Some((identity, frame)) = stamper.stamp(*item, nst) {
+                    h.update(&o.to_le_bytes());
+                    h.update(identity.as_bytes());
+                    h.update(&frame.to_le_bytes());
+                }
+            }
+        }
+    }
+
     // Masks: static paths are plain data (animated paths will evaluate here).
     if layer.masks.is_empty() {
         h.update(b"nomask");
@@ -1108,6 +1135,32 @@ mod tests {
             key(&nearest, 1.004),
             "Nearest shows the one stamped frame — its keys stay shared"
         );
+    }
+
+    /// K-094: an echo (temporal) layer's key hashes the neighbour source
+    /// frames it reads, so it differs from the same layer with the echo
+    /// bypassed, and it moves with time as the neighbours change — the cache
+    /// can't hold one echo frame across a span (the failure mode the flow bug
+    /// showed).
+    #[test]
+    fn echo_keys_its_neighbour_frames() {
+        let doc = Document::new();
+        let item = Uuid::now_v7();
+        let layer = |enabled: bool| {
+            let mut l = text_layer("", 0.0, 10.0, 0.0);
+            let mut echo = lumit_core::fx::instantiate("echo").unwrap();
+            echo.enabled = enabled;
+            l.effects.push(echo);
+            l.kind = LayerKind::Footage { item, retime: None };
+            comp_with(vec![l])
+        };
+        let k = |c: &Composition, t: f64| {
+            comp_frame_key(&doc, c, t, Quality::default(), &StubStamper).unwrap()
+        };
+        // Echo live hashes the temporal neighbour block; bypassed it does not.
+        assert_ne!(k(&layer(true), 1.0), k(&layer(false), 1.0));
+        // The neighbours move with time, so the key evolves.
+        assert_ne!(k(&layer(true), 1.0), k(&layer(true), 1.5));
     }
 
     /// A Sequence layer keys the active clip's source frame; a gap keys

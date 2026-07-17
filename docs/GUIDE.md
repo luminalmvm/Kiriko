@@ -137,6 +137,21 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   frame-cache lesson Shake taught the codebase: because Glitch is seeded, the cache
   automatically knows a frozen frame still needs the *current* moment's local time to look
   right, with no Glitch-specific code needed for that part at all.
+- **Echo / trails, and "temporal effects"** — the montage speed-line staple, and the first
+  effect that needs *more than the current frame*. Until now every effect looked only at the
+  single frame it was drawn on. Echo lays several earlier frames of the layer behind (or over)
+  the current one, each fainter than the last, so a fast move smears into a trail. That means
+  the app has to fetch those earlier frames and hand them to the effect — a new bit of
+  plumbing. Each effect now declares, up front, which frames it needs (a little list of
+  offsets like "this frame, one back, two back…"); the decode step reads the layer's footage
+  at exactly those moments (following the retiming, same as the frame you're on), and both the
+  live preview and the export do it the identical way so they still match. The picture cache
+  learned about it too: an echo frame's identity now includes the neighbours it's built from,
+  so — like the flow fix earlier — you never get a stale, frozen trail. In this first version
+  Echo reaches back up to eight frames one frame apart, fades each by a Decay you set, and
+  offers three ways to stack the trail (Add for bright streaks, Behind for ghosting, Max for a
+  lighten-only look); wider/looser trails, and the other effects that want neighbouring frames
+  (motion blur that follows real motion, the datamosh look), build on this same machinery.
 - **Blur gains a Radial mode** — the third and final mode of the §3.8 trio, alongside
   Gaussian and Directional. Drop a Centre point anywhere on the frame (as two percentages,
   Centre X and Centre Y, of the frame's width and height) and pick a Type: **Spin** streaks

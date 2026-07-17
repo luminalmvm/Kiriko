@@ -233,6 +233,9 @@ pub(crate) fn build_comp_draws(
                     }),
                     pre: None,
                     fx,
+                    // Adjustment layers process the composite below, not
+                    // footage frames — no neighbours here.
+                    neighbours: Vec::new(),
                 });
                 continue;
             }
@@ -312,6 +315,17 @@ pub(crate) fn build_comp_draws(
                 Vec::new()
             }
         };
+        // Decoded neighbour frames for a temporal effect (echo), carried from
+        // the layer's decode job; empty for a plain stack.
+        let neighbours: Vec<(i32, Vec<u8>, u32, u32)> = pixels_by_layer
+            .get(&layer.id)
+            .map(|lp| {
+                lp.temporal
+                    .iter()
+                    .map(|(o, rgba)| (*o, rgba.clone(), lp.width, lp.height))
+                    .collect()
+            })
+            .unwrap_or_default();
         draws.push(CompLayerDraw {
             source,
             natural_size: natural,
@@ -354,6 +368,7 @@ pub(crate) fn build_comp_draws(
             },
             pre: None,
             fx,
+            neighbours,
         });
     }
     draws

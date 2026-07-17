@@ -541,6 +541,18 @@ resolved through Retime so slow-motion echoes stretch correctly), each transform
 attenuated. Temporal window declared dynamically from Count × Spacing so the prefetcher
 plans decode. `moderate` cost, `full-frame` ROI.
 
+**v1 status (shipped).** Echo is the first temporal effect — the render decodes the layer's
+source at each offset in the stack's temporal window (`fx::stack_temporal_window`) and hands
+them to the pass; the frame-cache key hashes those neighbour frames too (K-094). Pinned
+simplifications for v1: **Echoes 1–8 at a fixed one-frame spacing** (the trait's `temporal`
+window is `&'static`, so the maximum reach is a fixed 8-frame cap; a Spacing control and a
+larger/dynamic window are a later refinement), **intensity `Decay^k`** per echo `k`, and
+**Modes Add / Behind / Max** (Screen / Front and the per-echo Transform fan follow). It reads
+the layer's **source** frames, not the upstream stack's output at those times (full temporal
+stacking is later), and echoes footage layers only — Sequence-clip and adjustment-layer
+temporal effects are deferred. Marker-triggerable intensity spikes come with the §1.4 wiring
+already in place.
+
 ---
 
 ## 4. Tier 2 — AE parity direction (post-v1)

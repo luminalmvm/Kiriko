@@ -1055,6 +1055,65 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
+    // Echo / trails (docs/08 §3.13): the montage speed-line staple — the
+    // first temporal effect (its window reaches back to previous frames, so
+    // the render decodes the layer's source at those offsets). v1 status,
+    // pinned here: echoes are spaced one comp frame apart (a Spacing control
+    // is a later refinement), so the window reaches back Echoes frames, up to
+    // 8 (the static trait cap). Each echo k is at offset -k with intensity
+    // Decay^k, a geometric trail. Mode chooses how the echoes combine with
+    // the leading frame — Add sums light (bright trails), Behind lays them
+    // under it (ghosting), Max lightens per channel. Cheap and full-frame
+    // (it reads whole neighbour frames). Operates on the layer's *source*
+    // frames, not the upstream stack's output at those times (full temporal
+    // stacking is later) — so it echoes the footage, placed by the layer's
+    // own transform like any effect output.
+    EffectSchema {
+        match_name: "echo",
+        label: "Echo",
+        version: 1,
+        category: FxCategory::Temporal,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            roi: Roi::FullFrame,
+            temporal: &[0, -1, -2, -3, -4, -5, -6, -7, -8],
+            premultiplied: true,
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "echoes",
+                label: "Echoes",
+                // Count of trailing frames; each is one comp frame further
+                // back (v1 fixed spacing). Capped at the 8-frame window.
+                kind: ParamKind::Float {
+                    default: 4.0,
+                    slider: (1.0, 8.0),
+                    hard: (Some(1.0), Some(8.0)),
+                },
+            },
+            ParamSchema {
+                id: "decay",
+                label: "Decay",
+                // Per-echo intensity falloff: echo k has intensity decay^k.
+                kind: ParamKind::Float {
+                    default: 0.6,
+                    slider: (0.0, 1.0),
+                    hard: (Some(0.0), Some(1.0)),
+                },
+            },
+            ParamSchema {
+                id: "mode",
+                label: "Mode",
+                kind: ParamKind::Choice {
+                    options: &["Add", "Behind", "Max"],
+                    default: 1,
+                },
+            },
+            MIX_PARAM,
+        ],
+    },
 ];
 
 /// Look a schema up by its match name.
@@ -1335,6 +1394,16 @@ pub enum Resolved {
         /// local time × period_px, host-computed).
         roll_px: f32,
         interlace: bool,
+        /// 0..1.
+        mix: f32,
+    },
+    /// Echo / trails (docs/08 §3.13). `weights[i]` is the intensity of the
+    /// echo at frame offset `-(i+1)` (0 = no echo there); the render supplies
+    /// the neighbour frame at each live offset. `mode`: 0 = Add, 1 = Behind,
+    /// 2 = Max.
+    Echo {
+        weights: [f32; 8],
+        mode: u32,
         /// 0..1.
         mix: f32,
     },
@@ -2109,6 +2178,26 @@ pub fn resolve_stack(
                     mix,
                 })
             }
+            "echo" => {
+                // Echoes k = 1..count sit at offset -k with intensity
+                // decay^k (v1 fixed one-frame spacing); the render supplies
+                // the neighbour frame at each offset. weights[i] is the echo
+                // at offset -(i+1).
+                let count = (e.float_at("echoes", lt).unwrap_or(4.0).round() as i32).clamp(1, 8);
+                let decay = (e.float_at("decay", lt).unwrap_or(0.6) as f32).clamp(0.0, 1.0);
+                let mode = match e.param("mode") {
+                    Some(EffectValue::Choice(c)) => (*c).min(2),
+                    _ => 1,
+                };
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                let mut weights = [0.0f32; 8];
+                for (i, w) in weights.iter_mut().enumerate() {
+                    if (i as i32) < count {
+                        *w = decay.powi(i as i32 + 1);
+                    }
+                }
+                Some(Resolved::Echo { weights, mode, mix })
+            }
             "transform" => {
                 // px@comp parameters scale by the preview factor (§2.3) so
                 // Half preview frames exactly like Full, only softer.
@@ -2284,6 +2373,11 @@ pub mod cpu {
                 *interlace,
                 *mix,
             ),
+            // Echo is temporal: it needs the layer's neighbour frames, which
+            // this single-buffer in-place dispatcher does not carry. The real
+            // path is [`echo`] (with neighbours) on the GPU; here it is a
+            // pass-through (the CPU-fallback render can't echo).
+            Resolved::Echo { .. } => {}
         }
     }
 
