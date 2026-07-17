@@ -8025,22 +8025,32 @@ impl GpuViewer {
                                 },
                             );
                         }
-                        lumit_core::fx::Resolved::Grade {
+                        lumit_core::fx::Resolved::ColourBalance {
                             lift,
                             gamma,
                             gain,
-                            saturation,
                             mix,
                         } => {
-                            tex = self.fx.grade(
+                            tex = self.fx.colour_balance(
                                 &self.ctx,
                                 &tex,
                                 w,
                                 h,
-                                &lumit_gpu::fx::GradeOp {
+                                &lumit_gpu::fx::ColourBalanceOp {
                                     lift: *lift,
                                     gamma: *gamma,
                                     gain: *gain,
+                                    mix: *mix,
+                                },
+                            );
+                        }
+                        lumit_core::fx::Resolved::Saturation { saturation, mix } => {
+                            tex = self.fx.saturation(
+                                &self.ctx,
+                                &tex,
+                                w,
+                                h,
+                                &lumit_gpu::fx::SaturationOp {
                                     saturation: *saturation,
                                     mix: *mix,
                                 },

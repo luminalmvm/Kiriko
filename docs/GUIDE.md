@@ -122,20 +122,25 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   the original blur maths, and the test that pins them to the CPU reference, are
   byte-for-byte what they were. Old projects saved before the switch existed simply
   read as Gaussian. (The third §3.8 mode, Radial spin/zoom, is still to come.)
-- **Grade (first stage).** The colour-correction engine begins: lift / gamma / gain per
-  channel plus saturation — the trackball grammar every colourist tool shares. *Gain*
-  multiplies (brightens everything proportionally), *lift* adds (raises the blacks —
-  or crushes them, negative values are allowed), *gamma* bends the mid-tones without
-  moving black or white. Each is a colour parameter, so warming the shadows while
-  cooling the highlights is just different numbers per channel. Two rules from the
-  design doc shape the code: it grades *unpremultiplied* colour (same reason as
-  Sharpen — grading premultiplied pixels shifts matte edges), and it never clips
-  highlights — a gain of 2 on an HDR value of 4 gives 8, and whatever glow comes later
-  gets all of it. Saturation pivots around proper Rec. 709 luma, so desaturating gives
-  true greyscale, not the grey-green mush of naive averaging. Neutral settings
-  short-circuit: a Grade at defaults passes pixels through untouched rather than
-  rounding them through power curves. The rest of §3.10 — exposure, white balance,
-  curves, vignette, and the Looks-style preset browser — builds on this stage.
+- **Grade splits into Colour balance and Saturation** (K-090's one-thing rule: an
+  effect does one job, so the young all-in-one Grade became two Colour-category
+  effects; a deliberate all-in-one grading suite may return much later, but
+  single-purpose is the default shape). **Colour balance** is lift / gamma / gain per
+  channel — the trackball grammar every colourist tool shares. *Gain* multiplies
+  (brightens everything proportionally), *lift* adds (raises the blacks — or crushes
+  them, negative values are allowed), *gamma* bends the mid-tones without moving black
+  or white. Each is a colour parameter, so warming the shadows while cooling the
+  highlights is just different numbers per channel. **Saturation** does exactly one
+  thing: it pivots colourfulness around proper Rec. 709 luma, so desaturating gives
+  true greyscale, not the grey-green mush of naive averaging. The same two design
+  rules shape both: they grade *unpremultiplied* colour (same reason as Sharpen —
+  grading premultiplied pixels shifts matte edges), and they never clip highlights — a
+  gain of 2 on an HDR value of 4 gives 8, and whatever glow comes later gets all of
+  it. Neutral settings now short-circuit the *whole effect*: at defaults each passes
+  pixels through bit-for-bit untouched (and there's a test holding it to that) rather
+  than rounding them through power curves. The rest of §3.10 — exposure, white
+  balance, curves, vignette, and the Looks-style preset browser — arrives as further
+  single-purpose colour effects.
 - **Flash.** The beat-strobe, in its manual form until beat markers exist. Its Trigger
   parameter reads unusually on purpose: *each keyframe is a hit*. Drop a keyframe with
   value 1 on a kick drum and the frame flashes to the flash colour, then fades out

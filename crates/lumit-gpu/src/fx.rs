@@ -134,14 +134,32 @@ struct FlashParams {
     _pad: [f32; 2],
 }
 
-/// One resolved grade (docs/08 §3.10, minimal v1): gain → lift → gamma per
-/// channel, then saturation, all in linear on unpremultiplied colour.
+/// One resolved colour balance (docs/08 §3.10 as amended by K-090): gain →
+/// lift → gamma per channel, in linear on unpremultiplied colour.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GradeOp {
+pub struct ColourBalanceOp {
     pub lift: [f32; 3],
     /// Per-channel, > 0 (the resolver clamps).
     pub gamma: [f32; 3],
     pub gain: [f32; 3],
+    /// 0..1, blended against the unprocessed input.
+    pub mix: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ColourBalanceParams {
+    lift: [f32; 4],
+    gamma: [f32; 4],
+    gain: [f32; 4],
+    mix_amt: f32,
+    _pad: [f32; 3],
+}
+
+/// One resolved saturation (docs/08 §3.10 as amended by K-090): scale about
+/// Rec. 709 luma, in linear on unpremultiplied colour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SaturationOp {
     /// 0 = greyscale, 1 = neutral, 2 = doubled.
     pub saturation: f32,
     /// 0..1, blended against the unprocessed input.
@@ -150,10 +168,7 @@ pub struct GradeOp {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct GradeParams {
-    lift: [f32; 4],
-    gamma: [f32; 4],
-    gain: [f32; 4],
+struct SaturationParams {
     saturation: f32,
     mix_amt: f32,
     _pad: [f32; 2],
@@ -168,7 +183,8 @@ pub struct FxEngine {
     sharpen_combine: wgpu::ComputePipeline,
     rgb_split: wgpu::ComputePipeline,
     flash: wgpu::ComputePipeline,
-    grade: wgpu::ComputePipeline,
+    colour_balance: wgpu::ComputePipeline,
+    saturation: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -233,14 +249,16 @@ impl FxEngine {
         let sharpen_mod = module(include_str!("fx_sharpen.wgsl"), "fx-sharpen");
         let rgb_split_mod = module(include_str!("fx_rgbsplit.wgsl"), "fx-rgb-split");
         let flash_mod = module(include_str!("fx_flash.wgsl"), "fx-flash");
-        let grade_mod = module(include_str!("fx_grade.wgsl"), "fx-grade");
+        let balance_mod = module(include_str!("fx_colourbalance.wgsl"), "fx-colour-balance");
+        let saturation_mod = module(include_str!("fx_saturation.wgsl"), "fx-saturation");
         let blur = pipeline(&blur_mod, "fx-blur", "blur_pass");
         let dir_blur = pipeline(&dir_blur_mod, "fx-dir-blur", "dir_blur");
         let sharpen_unpremultiply = pipeline(&sharpen_mod, "fx-sharpen-un", "unpremultiply");
         let sharpen_combine = pipeline(&sharpen_mod, "fx-sharpen", "sharpen_combine");
         let rgb_split = pipeline(&rgb_split_mod, "fx-rgb-split", "rgb_split");
         let flash = pipeline(&flash_mod, "fx-flash", "flash");
-        let grade = pipeline(&grade_mod, "fx-grade", "grade");
+        let colour_balance = pipeline(&balance_mod, "fx-colour-balance", "colour_balance");
+        let saturation = pipeline(&saturation_mod, "fx-saturation", "saturate_fx");
         Self {
             blur,
             dir_blur,
@@ -248,7 +266,8 @@ impl FxEngine {
             sharpen_combine,
             rgb_split,
             flash,
-            grade,
+            colour_balance,
+            saturation,
             layout,
         }
     }
@@ -468,31 +487,61 @@ impl FxEngine {
         out
     }
 
-    /// Apply one grade (docs/08 §3.10, minimal v1) to a linear working
-    /// texture, returning a new texture of the same size. One pointwise
-    /// pass; the §2.2 unpremultiply wrap is fused into the kernel.
-    pub fn grade(
+    /// Apply one colour balance (docs/08 §3.10 as amended by K-090) to a
+    /// linear working texture, returning a new texture of the same size.
+    /// One pointwise pass; the §2.2 unpremultiply wrap is fused into the
+    /// kernel, and fully neutral parameters short-circuit inside it.
+    pub fn colour_balance(
         &self,
         ctx: &GpuContext,
         src: &wgpu::Texture,
         w: u32,
         h: u32,
-        op: &GradeOp,
+        op: &ColourBalanceOp,
     ) -> wgpu::Texture {
-        let out = work_texture(ctx, w, h, "fx-grade-out");
+        let out = work_texture(ctx, w, h, "fx-colour-balance-out");
         let v4 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
         self.dispatch(
             ctx,
-            &self.grade,
+            &self.colour_balance,
             src,
             src,
             &out,
             w,
             h,
-            bytemuck::bytes_of(&GradeParams {
+            bytemuck::bytes_of(&ColourBalanceParams {
                 lift: v4(op.lift),
                 gamma: v4(op.gamma),
                 gain: v4(op.gain),
+                mix_amt: op.mix,
+                _pad: [0.0; 3],
+            }),
+        );
+        out
+    }
+
+    /// Apply one saturation (docs/08 §3.10 as amended by K-090) to a linear
+    /// working texture, returning a new texture of the same size. One
+    /// pointwise pass; the §2.2 unpremultiply wrap is fused into the
+    /// kernel, and saturation 1 short-circuits inside it.
+    pub fn saturation(
+        &self,
+        ctx: &GpuContext,
+        src: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        op: &SaturationOp,
+    ) -> wgpu::Texture {
+        let out = work_texture(ctx, w, h, "fx-saturation-out");
+        self.dispatch(
+            ctx,
+            &self.saturation,
+            src,
+            src,
+            &out,
+            w,
+            h,
+            bytemuck::bytes_of(&SaturationParams {
                 saturation: op.saturation,
                 mix_amt: op.mix,
                 _pad: [0.0; 2],
@@ -968,10 +1017,12 @@ mod tests {
         }
     }
 
-    /// The §1.6 oracle for grade: a cheap pointwise effect, so the CPU and
-    /// GPU must agree to ≤ 2 fp16 ULP, and the GPU is bit-stable (§2.4).
+    /// The §1.6 oracle for colour balance: a cheap pointwise effect, so the
+    /// CPU and GPU must agree to ≤ 2 fp16 ULP, the GPU is bit-stable (§2.4),
+    /// and — the K-090 split's promise — a fully neutral balance is the
+    /// bit-exact identity on both paths.
     #[test]
-    fn wgsl_grade_matches_the_cpu_oracle() {
+    fn wgsl_colour_balance_matches_the_cpu_oracle() {
         let Ok(ctx) = GpuContext::headless() else {
             eprintln!("no GPU adapter; skipping WGSL parity test");
             return;
@@ -979,25 +1030,22 @@ mod tests {
         let fx = FxEngine::new(&ctx);
         let (w, h) = (32u32, 24u32);
         let img = corpus(w, h);
-        let neutral = GradeOp {
+        let neutral = ColourBalanceOp {
             lift: [0.0; 3],
             gamma: [1.0; 3],
             gain: [1.0; 3],
-            saturation: 1.0,
             mix: 1.0,
         };
-        let teal_orange = GradeOp {
+        let teal_orange = ColourBalanceOp {
             lift: [-0.02, 0.0, 0.02],
             gamma: [1.1, 1.0, 0.9],
             gain: [1.2, 1.0, 0.8],
-            saturation: 1.3,
             mix: 1.0,
         };
-        let extreme = GradeOp {
+        let extreme = ColourBalanceOp {
             lift: [0.1; 3],
             gamma: [2.2, 0.6, 1.7],
             gain: [2.0, 0.5, 1.5],
-            saturation: 0.0,
             mix: 0.7,
         };
         for (name, op) in [
@@ -1006,19 +1054,87 @@ mod tests {
             ("extreme", extreme),
         ] {
             let mut cpu = img.clone();
-            lumit_core::fx::cpu::grade(&mut cpu, op.lift, op.gamma, op.gain, op.saturation, op.mix);
+            lumit_core::fx::cpu::colour_balance(&mut cpu, op.lift, op.gamma, op.gain, op.mix);
 
             let tex = upload_linear_f32(&ctx, &img, w, h);
-            let out = fx.grade(&ctx, &tex, w, h, &op);
+            let out = fx.colour_balance(&ctx, &tex, w, h, &op);
             let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
 
             let worst = worst_f16_ulp(&cpu, &gpu);
-            eprintln!("grade {name}: worst {worst} ulp");
+            eprintln!("colour balance {name}: worst {worst} ulp");
             assert!(worst <= 2, "{name}: worst {worst} fp16 ULP");
+            if name == "neutral" {
+                assert_eq!(gpu, img, "neutral balance must be the bit-exact identity");
+            }
 
-            let out2 = fx.grade(&ctx, &tex, w, h, &op);
+            let out2 = fx.colour_balance(&ctx, &tex, w, h, &op);
             let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
-            assert_eq!(gpu, gpu2, "GPU grade must be bit-stable");
+            assert_eq!(gpu, gpu2, "GPU colour balance must be bit-stable");
+        }
+    }
+
+    /// The §1.6 oracle for saturation: a cheap pointwise effect, so the CPU
+    /// and GPU must agree to ≤ 2 fp16 ULP, the GPU is bit-stable (§2.4),
+    /// and saturation 1 is the bit-exact identity on both paths.
+    #[test]
+    fn wgsl_saturation_matches_the_cpu_oracle() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        let img = corpus(w, h);
+        for (name, op) in [
+            (
+                "neutral",
+                SaturationOp {
+                    saturation: 1.0,
+                    mix: 1.0,
+                },
+            ),
+            (
+                "greyscale",
+                SaturationOp {
+                    saturation: 0.0,
+                    mix: 1.0,
+                },
+            ),
+            (
+                "boosted",
+                SaturationOp {
+                    saturation: 1.6,
+                    mix: 1.0,
+                },
+            ),
+            (
+                "mixed",
+                SaturationOp {
+                    saturation: 0.3,
+                    mix: 0.6,
+                },
+            ),
+        ] {
+            let mut cpu = img.clone();
+            lumit_core::fx::cpu::saturate(&mut cpu, op.saturation, op.mix);
+
+            let tex = upload_linear_f32(&ctx, &img, w, h);
+            let out = fx.saturation(&ctx, &tex, w, h, &op);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+
+            let worst = worst_f16_ulp(&cpu, &gpu);
+            eprintln!("saturation {name}: worst {worst} ulp");
+            assert!(worst <= 2, "{name}: worst {worst} fp16 ULP");
+            if name == "neutral" {
+                assert_eq!(
+                    gpu, img,
+                    "neutral saturation must be the bit-exact identity"
+                );
+            }
+
+            let out2 = fx.saturation(&ctx, &tex, w, h, &op);
+            let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
+            assert_eq!(gpu, gpu2, "GPU saturation must be bit-stable");
         }
     }
 

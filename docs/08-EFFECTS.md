@@ -107,9 +107,9 @@ clipping is the documented behaviour of a parameter.
 Colour-manipulation effects operate on unpremultiplied colour, because grading
 premultiplied values shifts matte edges. Effects declaring `alpha mode: unpremultiplied`
 are wrapped by the host: unpremultiply → effect → re-premultiply, fused into the effect's
-first/last passes where possible. The Tier 1 effects requiring this: **Grade, LUT,
-Sharpen** (edge haloes otherwise), and the hue/colour operations of **Glitch**. All others
-consume premultiplied input directly.
+first/last passes where possible. The Tier 1 effects requiring this: **the colour effects
+(Colour balance, Saturation), LUT, Sharpen** (edge haloes otherwise), and the hue/colour
+operations of **Glitch**. All others consume premultiplied input directly.
 
 ### 2.3 Resolution-independent units
 
@@ -163,7 +163,7 @@ specified in §3.1's original text but surfaced as layer UI, not an effect. Summ
 | 3.7 | Flash | strobe presets | trivial | `{0}` |
 | 3.8 | Blur (gaussian / directional / radial) | stock AE trio | moderate | `{0}` |
 | 3.9 | Sharpen | stock | cheap | `{0}` |
-| 3.10 | Grade + preset browser | Magic Bullet Looks | cheap | `{0}` |
+| 3.10 | Colour balance, Saturation + preset browser | Magic Bullet Looks | cheap | `{0}` |
 | 3.11 | LUT | stock + Looks | trivial | `{0}` |
 | 3.12 | Glitch | Universe / glitch packs | cheap | `{0}` (datamosh: `{-1, 0}`) |
 | 3.13 | Echo | stock Echo / speed-lines packs | moderate | `{-n..0}` |
@@ -366,25 +366,26 @@ Unsharp mask in linear light on unpremultiplied colour: Amount (0–300%), Radiu
 amount · (input − gaussian(input, radius))` gated by threshold. A luminance-only option
 avoids chroma fringing on compressed game capture.
 
-### 3.10 Grade — lift/gamma/gain colour with preset browser (Magic Bullet-class)
+### 3.10 The colour effects — Colour balance, Saturation, and the preset browser (Magic Bullet-class)
 
-The "CC" engine. One effect, ordered internal stages, all animatable:
+The "CC" engine, as single-purpose effects (K-090: the v1 all-in-one Grade split; an
+all-in-one grading suite MAY return later as the deliberate exception). Each is `cheap`,
+pointwise, unpremultiplied (§2.2), all parameters animatable, neutral by default (a
+grade's tasteful default is a preset choice — see the browser below):
 
-1. **Exposure** (stops, −6..+6) and **white balance**: Temperature (−100..+100, mapped via
-   Bradford-adapted CCT shift) and Tint (magenta–green).
-2. **Lift / gamma / gain** — per-master and per-channel trackballs (UI:
-   [07-UI-SPEC.md](07-UI-SPEC.md) colour workspace). Applied in linear (gain), with gamma
-   on a display-referred intermediate for familiar feel, documented precisely in the
-   implementation notes.
-3. **Saturation** (0–200%) and **Vibrance** (protects skin/already-saturated values).
-4. **Curves** — master + R/G/B bezier curves (curve-type parameters), evaluated as 1D LUTs
-   baked per frame when animated.
-5. **Vignette** (Amount, Size, Softness, Roundness) — because every CC pack has one.
+- **Colour balance** — **lift / gamma / gain** per channel (per-master and per-channel
+  trackballs, UI: [07-UI-SPEC.md](07-UI-SPEC.md) colour workspace). Applied in linear
+  (gain), with gamma on a display-referred intermediate for familiar feel, documented
+  precisely in the implementation notes.
+- **Saturation** (0–200%) — colourfulness about Rec. 709 luma in linear light.
 
-Operates unpremultiplied (§2.2). `cheap` cost — the whole stage chain fuses into one
-compute pass with baked 1D LUTs.
+The remaining "CC" stages arrive as further single-purpose colour effects: **exposure /
+white balance** (stops; Temperature via Bradford-adapted CCT shift; Tint), **vibrance**
+(protects skin/already-saturated values), **curves** (master + R/G/B bezier, evaluated as
+1D LUTs baked per frame when animated), and **vignette** (Amount, Size, Softness,
+Roundness) — because every CC pack has one.
 
-**Preset browser.** Grade presets get a dedicated browser (per
+**Preset browser.** Colour presets get a dedicated browser (per
 [07-UI-SPEC.md](07-UI-SPEC.md)): a panel of live thumbnails, each preset applied to the
 frame under the playhead, Magic Bullet Looks-style. Thumbnails are rendered by the normal
 engine at thumbnail resolution through the real effect — never approximations. Ships with
@@ -439,7 +440,7 @@ roughly by demand.
 
 | Effect | Scope |
 |---|---|
-| Levels / curves per channel | Histogram-backed levels; curves already partly in Grade — split out AE-parity versions with per-channel + alpha |
+| Levels / curves per channel | Histogram-backed levels; curves land as their own colour effect (§3.10) — AE-parity versions with per-channel + alpha |
 | Hue/saturation | Per-hue-range HSL adjustment (the AE "Hue/Saturation" workhorse) |
 | Tritone / tint | Map shadows/mids/highlights to three colours |
 | Keying | Luma key + colour key + a basic screen key (core matte generation, not Keylight parity at first) |
@@ -507,7 +508,7 @@ mask parameters, "composite on original", effect-only precomps).
    distribution size, and the CPU reference oracle. Decide before flow-engine
    implementation starts; the API (dense vectors + occlusion + confidence) is stable
    either way.
-2. **Gamma stage in Grade.** Applying gamma on a display-referred intermediate feels
+2. **Gamma stage in Colour balance.** Applying gamma on a display-referred intermediate feels
    familiar but is impure; a strictly scene-linear grade with a viewing-transform-aware UI
    is cleaner. Needs a side-by-side with real CC packs before locking.
 3. **Where Shake lives.** Specced as an effect that resamples the layer; an alternative is

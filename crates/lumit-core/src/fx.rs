@@ -393,15 +393,14 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
-    // Grade (docs/08 §3.10), minimal v1: the lift/gamma/gain stage plus
-    // saturation, per channel, in linear, on unpremultiplied colour (§2.2).
-    // Exposure/white balance, vibrance, curves, the vignette and the preset
-    // browser follow as the remaining §3.10 stages. Defaults are neutral —
+    // Colour balance (docs/08 §3.10 as amended by K-090: the v1 Grade split
+    // into single-purpose colour effects): lift / gamma / gain per channel,
+    // in linear, on unpremultiplied colour (§2.2). Defaults are neutral —
     // a grade's "tasteful default" is a preset choice, which is what the
-    // §3.10 browser is for.
+    // §3.10 preset browser is for.
     EffectSchema {
-        match_name: "grade",
-        label: "Grade",
+        match_name: "colour_balance",
+        label: "Colour balance",
         version: 1,
         category: FxCategory::Colour,
         traits: EffectTraits {
@@ -440,6 +439,27 @@ pub const BUILTINS: &[EffectSchema] = &[
                     range: (0.0, 4.0),
                 },
             },
+            MIX_PARAM,
+        ],
+    },
+    // Saturation (docs/08 §3.10 as amended by K-090): one job — scale
+    // colourfulness about Rec. 709 luma, in linear, on unpremultiplied
+    // colour (§2.2). Neutral default: like the balance above, its tasteful
+    // setting is a preset choice.
+    EffectSchema {
+        match_name: "saturation",
+        label: "Saturation",
+        version: 1,
+        category: FxCategory::Colour,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            roi: Roi::Exact,
+            temporal: &[0],
+            premultiplied: false, // §2.2: grading premult shifts matte edges
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
             ParamSchema {
                 id: "saturation",
                 label: "Saturation",
@@ -548,13 +568,17 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
-    Grade {
+    ColourBalance {
         /// Added per channel after gain (raises or crushes the blacks).
         lift: [f32; 3],
         /// Per-channel mid-tone exponent's base; 1 is neutral, > 0.
         gamma: [f32; 3],
         /// Per-channel linear multiplier; 1 is neutral.
         gain: [f32; 3],
+        /// 0..1.
+        mix: f32,
+    },
+    Saturation {
         /// Factor about Rec. 709 luma: 0 = greyscale, 1 = neutral, 2 = max.
         saturation: f32,
         /// 0..1.
@@ -689,21 +713,24 @@ pub fn resolve_stack(effects: &[EffectInstance], lt: f64, diag_px: f32) -> Vec<R
                     mix,
                 })
             }
-            "grade" => {
+            "colour_balance" => {
                 let rgb = |id: &str, neutral: f64| -> [f32; 3] {
                     let c = e.colour_at(id, lt).unwrap_or([neutral; 4]);
                     [c[0] as f32, c[1] as f32, c[2] as f32]
                 };
-                let saturation =
-                    (e.float_at("saturation", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 2.0);
                 let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Grade {
+                Some(Resolved::ColourBalance {
                     lift: rgb("lift", 0.0),
                     gamma: rgb("gamma", 1.0).map(|g| g.max(0.01)),
                     gain: rgb("gain", 1.0),
-                    saturation,
                     mix,
                 })
+            }
+            "saturation" => {
+                let saturation =
+                    (e.float_at("saturation", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 2.0);
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::Saturation { saturation, mix })
             }
             _ => None,
         })
@@ -750,31 +777,33 @@ pub mod cpu {
                 colour,
                 mix,
             } => flash(rgba, *strength, *colour, *mix),
-            Resolved::Grade {
+            Resolved::ColourBalance {
                 lift,
                 gamma,
                 gain,
-                saturation,
                 mix,
-            } => grade(rgba, *lift, *gamma, *gain, *saturation, *mix),
+            } => colour_balance(rgba, *lift, *gamma, *gain, *mix),
+            Resolved::Saturation { saturation, mix } => saturate(rgba, *saturation, *mix),
         }
     }
 
-    /// Grade (docs/08 §3.10, minimal v1): per-channel gain → lift → gamma,
-    /// then saturation about Rec. 709 luma, in linear light on
-    /// unpremultiplied colour (§2.2), re-premultiplied on the way out.
-    /// Neutral gamma and saturation short-circuit so a neutral grade is the
-    /// identity rather than a round trip through `powf`. Negative light
-    /// clamps at zero (that is what a crushing lift means); highlights are
-    /// never clipped (§2.1).
-    pub fn grade(
+    /// Colour balance (docs/08 §3.10 as amended by K-090): per-channel
+    /// gain → lift → gamma in linear light on unpremultiplied colour (§2.2),
+    /// re-premultiplied on the way out. Fully neutral parameters
+    /// short-circuit the whole effect, so a Colour balance at defaults is
+    /// the bit-exact identity rather than a round trip through `powf` and
+    /// the unpremultiply divide. Negative light clamps at zero (that is
+    /// what a crushing lift means); highlights are never clipped (§2.1).
+    pub fn colour_balance(
         rgba: &mut [f32],
         lift: [f32; 3],
         gamma: [f32; 3],
         gain: [f32; 3],
-        saturation: f32,
         mix: f32,
     ) {
+        if lift == [0.0; 3] && gamma == [1.0; 3] && gain == [1.0; 3] {
+            return; // neutral: bit-exact identity (the WGSL twin matches)
+        }
         for px in rgba.chunks_exact_mut(4) {
             let a = px[3];
             let u = unpremult(px);
@@ -786,15 +815,30 @@ pub mod cpu {
                 }
                 v[c] = x;
             }
-            if saturation != 1.0 {
-                let luma = v[0] * LUMA[0] + v[1] * LUMA[1] + v[2] * LUMA[2];
-                for x in &mut v {
-                    *x = (luma + (*x - luma) * saturation).max(0.0);
-                }
-            }
             for c in 0..3 {
                 let graded = v[c] * a;
                 px[c] = px[c] * (1.0 - mix) + graded * mix;
+            }
+        }
+    }
+
+    /// Saturation (docs/08 §3.10 as amended by K-090): scale colourfulness
+    /// about Rec. 709 luma, in linear light on unpremultiplied colour
+    /// (§2.2), re-premultiplied on the way out. Saturation 1 short-circuits
+    /// the whole effect (bit-exact identity); 0 collapses to true greyscale.
+    /// Named `saturate` so the parameter can keep the plain name.
+    pub fn saturate(rgba: &mut [f32], saturation: f32, mix: f32) {
+        if saturation == 1.0 {
+            return; // neutral: bit-exact identity (the WGSL twin matches)
+        }
+        for px in rgba.chunks_exact_mut(4) {
+            let a = px[3];
+            let u = unpremult(px);
+            let luma = u[0] * LUMA[0] + u[1] * LUMA[1] + u[2] * LUMA[2];
+            for c in 0..3 {
+                let v = (luma + (u[c] - luma) * saturation).max(0.0);
+                let s = v * a;
+                px[c] = px[c] * (1.0 - mix) + s * mix;
             }
         }
     }
@@ -1461,75 +1505,127 @@ mod tests {
     }
 
     #[test]
-    fn grade_instantiates_and_resolves_neutral() {
-        let e = instantiate("grade").unwrap();
+    fn colour_balance_instantiates_and_resolves_neutral() {
+        let e = instantiate("colour_balance").unwrap();
         assert_eq!(e.colour_at("lift", 0.0), Some([0.0, 0.0, 0.0, 1.0]));
         assert_eq!(e.colour_at("gamma", 0.0), Some([1.0; 4]));
         assert_eq!(e.colour_at("gain", 0.0), Some([1.0; 4]));
-        assert_eq!(e.float_at("saturation", 0.0), Some(100.0));
         let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0);
         assert_eq!(
             r,
-            vec![Resolved::Grade {
+            vec![Resolved::ColourBalance {
                 lift: [0.0; 3],
                 gamma: [1.0; 3],
                 gain: [1.0; 3],
-                saturation: 1.0,
                 mix: 1.0
             }]
         );
     }
 
     #[test]
-    fn cpu_grade_stages_behave() {
-        let neutral = ([0.0f32; 3], [1.0f32; 3], [1.0f32; 3]);
-        // One opaque mid-grey-ish pixel, one half-alpha, one HDR, one empty.
-        let img = vec![
+    fn saturation_instantiates_and_resolves_neutral() {
+        let e = instantiate("saturation").unwrap();
+        assert_eq!(e.float_at("saturation", 0.0), Some(100.0));
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0);
+        assert_eq!(
+            r,
+            vec![Resolved::Saturation {
+                saturation: 1.0,
+                mix: 1.0
+            }]
+        );
+    }
+
+    /// One opaque mid-grey-ish pixel, one half-alpha, one HDR, one empty —
+    /// the colour-effect test quartet.
+    fn colour_quartet() -> Vec<f32> {
+        vec![
             0.25, 0.5, 0.1, 1.0, //
             0.1, 0.2, 0.05, 0.5, //
             4.0, 2.0, 1.0, 1.0, //
             0.0, 0.0, 0.0, 0.0,
-        ];
+        ]
+    }
 
-        // A neutral grade is the identity on opaque pixels and within one
-        // rounding step elsewhere (unpremultiply round-trips).
+    #[test]
+    fn cpu_colour_balance_stages_behave() {
+        let img = colour_quartet();
+
+        // A neutral balance is the bit-exact identity (K-090 split: the
+        // whole effect short-circuits, no unpremultiply round trip).
         let mut n = img.clone();
-        cpu::grade(&mut n, neutral.0, neutral.1, neutral.2, 1.0, 1.0);
-        for (a, b) in n.iter().zip(&img) {
-            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
-        }
+        cpu::colour_balance(&mut n, [0.0; 3], [1.0; 3], [1.0; 3], 1.0);
+        assert_eq!(n, img);
 
-        // Mix 0 is the exact identity whatever the grade.
+        // Mix 0 is the exact identity whatever the balance.
         let mut m0 = img.clone();
-        cpu::grade(&mut m0, [0.5; 3], [2.0; 3], [3.0; 3], 0.0, 0.0);
+        cpu::colour_balance(&mut m0, [0.5; 3], [2.0; 3], [3.0; 3], 0.0);
         assert_eq!(m0, img);
 
         // Gain doubles linear values; HDR stays unclipped (§2.1).
         let mut g = img.clone();
-        cpu::grade(&mut g, [0.0; 3], [1.0; 3], [2.0; 3], 1.0, 1.0);
+        cpu::colour_balance(&mut g, [0.0; 3], [1.0; 3], [2.0; 3], 1.0);
         assert_eq!(g[0], 0.5);
         assert_eq!(g[8], 8.0, "highlights never clip");
 
         // Lift raises blacks (empty alpha stays empty: premultiplied zero).
         let mut l = img.clone();
-        cpu::grade(&mut l, [0.1; 3], [1.0; 3], [1.0; 3], 1.0, 1.0);
+        cpu::colour_balance(&mut l, [0.1; 3], [1.0; 3], [1.0; 3], 1.0);
         assert!((l[2] - 0.2).abs() < 1e-6, "0.1 blue lifted by 0.1");
         assert_eq!(&l[12..16], &[0.0; 4], "empty pixels stay empty");
 
         // Gamma 2 is a square root in linear: 0.25 → 0.5.
         let mut ga = img.clone();
-        cpu::grade(&mut ga, [0.0; 3], [2.0; 3], [1.0; 3], 1.0, 1.0);
+        cpu::colour_balance(&mut ga, [0.0; 3], [2.0; 3], [1.0; 3], 1.0);
         assert!((ga[0] - 0.5).abs() < 1e-6);
 
-        // Saturation 0 collapses to Rec. 709 luma (greyscale).
+        // Alpha is untouched by any of it.
+        for v in [&n, &m0, &g, &l, &ga] {
+            assert_eq!(v[3], 1.0);
+            assert_eq!(v[7], 0.5);
+        }
+    }
+
+    #[test]
+    fn cpu_saturation_behaves() {
+        let img = colour_quartet();
+
+        // Saturation 1 is the bit-exact identity (whole-effect
+        // short-circuit, K-090 split).
+        let mut n = img.clone();
+        cpu::saturate(&mut n, 1.0, 1.0);
+        assert_eq!(n, img);
+
+        // Mix 0 is the exact identity whatever the saturation.
+        let mut m0 = img.clone();
+        cpu::saturate(&mut m0, 0.0, 0.0);
+        assert_eq!(m0, img);
+
+        // Saturation 0 collapses to Rec. 709 luma (true greyscale).
         let mut s = img.clone();
-        cpu::grade(&mut s, neutral.0, neutral.1, neutral.2, 0.0, 1.0);
+        cpu::saturate(&mut s, 0.0, 1.0);
         let luma = 0.25 * cpu::LUMA[0] + 0.5 * cpu::LUMA[1] + 0.1 * cpu::LUMA[2];
         for (c, v) in s.iter().take(3).enumerate() {
             assert!((v - luma).abs() < 1e-6, "channel {c} at luma");
         }
+        // The half-alpha pixel desaturates in unpremultiplied space: its
+        // premultiplied channels all land on (unpremult luma) × alpha.
+        let luma_half = (0.2 * cpu::LUMA[0] + 0.4 * cpu::LUMA[1] + 0.1 * cpu::LUMA[2]) * 0.5;
+        for c in 0..3 {
+            assert!((s[4 + c] - luma_half).abs() < 1e-6, "channel {c}");
+        }
+        assert_eq!(&s[12..16], &[0.0; 4], "empty pixels stay empty");
+
+        // Oversaturation spreads channels apart and clamps at zero, never
+        // clipping highlights (§2.1).
+        let mut o = img.clone();
+        cpu::saturate(&mut o, 2.0, 1.0);
+        assert!(o[1] > 0.5, "dominant green pushes up");
+        assert!(o[2] >= 0.0, "recessive blue clamps at zero, not negative");
+        assert!(o[8] > 4.0, "HDR red keeps its headroom");
+
         // Alpha is untouched by any of it.
-        for v in [&n, &m0, &g, &l, &ga, &s] {
+        for v in [&n, &m0, &s, &o] {
             assert_eq!(v[3], 1.0);
             assert_eq!(v[7], 0.5);
         }
