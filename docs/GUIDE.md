@@ -250,11 +250,39 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   rendered through the *exact same* colour engine and compositor the Viewer uses, then
   compressed to an .mp4. Using one shared path isn't laziness — it's the design's central
   promise (what you preview IS what you export), and it runs on its own worker so the app
-  stays responsive while exporting, with live progress and a real cancel. Besides the comp's
-  own size you can pick an **export preset** — YouTube 1080p/4K, or vertical 1080×1920 — and
-  Lumit fits the picture into that frame keeping its shape, adding black bars where the
-  aspect ratios differ (a wide comp gets bars top and bottom in a vertical export). The
-  fitting maths (`fit_contain` / `letterbox_resize` in `pixels.rs`) is unit-tested.
+  stays responsive while exporting, with live progress and a real cancel. The **export
+  dialogue** offers presets — *YouTube 1080p60*, *YouTube 4K60*, *Vertical 1080×1920p60* —
+  which are just rows of numbers (frame size, codec, bitrates) stamped into fields you can
+  still edit, so the custom path is always open. Presets are pinned by a unit test, so a
+  stray edit can't quietly change what "YouTube 1080p60" means. When the comp's shape
+  differs from the preset's, Lumit fits the picture keeping its proportions and adds black
+  bars (a wide comp gets bars top and bottom in a vertical export); the fitting maths
+  (`fit_contain` / `letterbox_resize` in `pixels.rs`) is unit-tested. **Sound comes too**:
+  the comp's audio is mixed by the very same code that plays it back (one shared `mixdown`
+  — playback, beat detection, and export literally cannot hear different things), then
+  written as an AAC track fed to the file in step with the picture, a video frame's worth
+  of samples at a time, so players never see sound and image drift. Exports now **queue**:
+  ask for another while one runs and it waits its turn, each item frozen exactly as the
+  project stood when you queued it — later edits never sneak into a queued export. The
+  status bar shows which file is exporting, how far along it is, which encoder is doing the
+  work, and how many items wait; one failed item never stalls the rest.
+- `crates/lumit-media/src/encode.rs` — **compressing the file, and how export picks an
+  encoder.** Compressing video is heavy work, and every GPU vendor ships a dedicated chip
+  for it: NVIDIA calls theirs NVENC, AMD has AMF, Intel has Quick Sync. They are far faster
+  than doing it on the CPU, but temperamental — a machine can have the NVIDIA *software*
+  installed with no NVIDIA card present, or the card can refuse because too many programs
+  are already encoding. So Lumit works down a ladder: try NVENC, then AMF, then Quick Sync,
+  then plain software (x264/x265, always works). And it doesn't just ask "are you there?" —
+  it *proves* each rung by encoding sixteen blank frames at the export's exact size before
+  trusting it, because these chips are notorious for saying yes and failing a moment later.
+  Whichever rung passes first does the export, and the finished dialogue tells you which
+  ("Encoded with NVENC"). The ladder order and the fallback rule are plain data plus a tiny
+  pure function, so the "hardware exists but won't open" cases are ordinary unit tests, and
+  one integration test runs the real ladder on whatever machine the tests run on. The same
+  module now also writes **HEVC** (H.265 — newer, smaller files than H.264 at the same
+  quality) and an **AAC audio track**, interleaved with the video the way streaming players
+  expect, with a `+faststart` flag so the file's table of contents sits at the front and
+  playback can begin before the download ends.
 - `crates/lumit-audio/` — **playback and the clock.** The sound card asks for samples on
   its own strict schedule through a "realtime callback" — a tiny function that must never
   wait for anything (if it's ever late, you hear a glitch). The count of samples it has

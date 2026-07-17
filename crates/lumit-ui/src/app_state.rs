@@ -2953,24 +2953,17 @@ impl AppState {
         }
     }
 
-    /// Kick off background decode + mix of a comp's audio layers into one
-    /// buffer (Hibiki mix): the layers' sound laid on the comp timeline at
-    /// their offsets and trims. The result arrives via [`Self::poll_comp_audio`].
-    /// A comp with no audio layers prepares nothing (it plays on the fallback
-    /// wall clock).
+    /// Every audible footage layer with an audio stream, as mixdown jobs:
+    /// the one list playback, beat detection, and export all mix from, so
+    /// they always hear the same comp.
     #[cfg(feature = "media")]
-    pub fn prepare_comp_audio(&mut self, comp_id: Uuid) {
+    pub fn comp_audio_jobs(
+        &self,
+        doc: &lumit_core::model::Document,
+        comp: &lumit_core::model::Composition,
+    ) -> Vec<crate::export::AudioJob> {
         use lumit_core::model::LayerKind;
-        let doc = self.store.snapshot();
-        let Some(comp) = doc.comp(comp_id) else {
-            return;
-        };
-        let rate = self
-            .ensure_audio_engine()
-            .map(|e| e.device_rate())
-            .unwrap_or(48_000);
-        // (path, in_s, out_s, offset_s) for every footage layer that has audio.
-        let mut jobs: Vec<(PathBuf, f64, f64, f64)> = Vec::new();
+        let mut jobs = Vec::new();
         for layer in &comp.layers {
             if !layer.switches.audible {
                 continue;
@@ -2988,48 +2981,39 @@ impl AppState {
             let Some(ProjectItem::Footage(f)) = doc.item(*item) else {
                 continue;
             };
-            jobs.push((
-                PathBuf::from(&f.media.absolute_path),
-                layer.in_point.0.to_f64(),
-                layer.out_point.0.to_f64(),
-                layer.start_offset.0.to_f64(),
-            ));
+            jobs.push(crate::export::AudioJob {
+                path: PathBuf::from(&f.media.absolute_path),
+                in_s: layer.in_point.0.to_f64(),
+                out_s: layer.out_point.0.to_f64(),
+                offset_s: layer.start_offset.0.to_f64(),
+            });
         }
+        jobs
+    }
+
+    /// Kick off background decode + mix of a comp's audio layers into one
+    /// buffer (Hibiki mix): the layers' sound laid on the comp timeline at
+    /// their offsets and trims. The result arrives via [`Self::poll_comp_audio`].
+    /// A comp with no audio layers prepares nothing (it plays on the fallback
+    /// wall clock).
+    #[cfg(feature = "media")]
+    pub fn prepare_comp_audio(&mut self, comp_id: Uuid) {
+        let doc = self.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let rate = self
+            .ensure_audio_engine()
+            .map(|e| e.device_rate())
+            .unwrap_or(48_000);
+        let jobs = self.comp_audio_jobs(&doc, comp);
         if jobs.is_empty() {
             return; // silent comp: wall-clock fallback drives playback
         }
         let duration_s = comp.duration.0.to_f64();
         let tx = self.comp_audio_tx.clone();
         std::thread::spawn(move || {
-            // Decode every layer's audio (resampled to the device rate), then
-            // lay each on the strip and sum.
-            let decoded: Vec<(lumit_media::AudioBuffer, f64, f64, f64)> = jobs
-                .into_iter()
-                .filter_map(|(path, in_s, out_s, off_s)| {
-                    lumit_media::audio::decode_all(&path, rate)
-                        .ok()
-                        .map(|buf| (buf, in_s, out_s, off_s))
-                })
-                .collect();
-            let total_frames = (duration_s * f64::from(rate)).round().max(0.0) as usize;
-            let placements: Vec<lumit_audio::mix::PlacedAudio> = decoded
-                .iter()
-                .filter_map(|(buf, in_s, out_s, off_s)| {
-                    let (start_frame, src_start, len) = lumit_audio::mix::place_on_timeline(
-                        *in_s,
-                        *out_s,
-                        *off_s,
-                        buf.samples.len() / 2,
-                        rate,
-                    )?;
-                    Some(lumit_audio::mix::PlacedAudio {
-                        start_frame,
-                        samples: &buf.samples[src_start * 2..(src_start + len) * 2],
-                        gain: 1.0,
-                    })
-                })
-                .collect();
-            let samples = lumit_audio::mix::mix_stereo(&placements, total_frames);
+            let samples = crate::export::mixdown(&jobs, rate, duration_s);
             let _ = tx.send((comp_id, lumit_media::AudioBuffer { rate, samples }));
         });
     }
@@ -3182,7 +3166,6 @@ impl AppState {
     /// with an error note — for a silent comp.
     #[cfg(feature = "media")]
     pub fn detect_beats(&mut self, comp_id: Uuid, sensitivity: f32) {
-        use lumit_core::model::LayerKind;
         let doc = self.store.snapshot();
         let Some(comp) = doc.comp(comp_id) else {
             return;
@@ -3191,31 +3174,7 @@ impl AppState {
             .ensure_audio_engine()
             .map(|e| e.device_rate())
             .unwrap_or(48_000);
-        let mut jobs: Vec<(PathBuf, f64, f64, f64)> = Vec::new();
-        for layer in &comp.layers {
-            if !layer.switches.audible {
-                continue;
-            }
-            let LayerKind::Footage { item, .. } = &layer.kind else {
-                continue;
-            };
-            let has_audio = matches!(
-                self.media.map.get(item),
-                Some(media::MediaStatus::Ready { probe, .. }) if probe.audio.is_some()
-            );
-            if !has_audio {
-                continue;
-            }
-            let Some(ProjectItem::Footage(f)) = doc.item(*item) else {
-                continue;
-            };
-            jobs.push((
-                PathBuf::from(&f.media.absolute_path),
-                layer.in_point.0.to_f64(),
-                layer.out_point.0.to_f64(),
-                layer.start_offset.0.to_f64(),
-            ));
-        }
+        let jobs = self.comp_audio_jobs(&doc, comp);
         if jobs.is_empty() {
             self.error = Some("no audio in this composition to detect beats from".into());
             return;
@@ -3223,33 +3182,7 @@ impl AppState {
         let duration_s = comp.duration.0.to_f64();
         let tx = self.beats_tx.clone();
         std::thread::spawn(move || {
-            let decoded: Vec<(lumit_media::AudioBuffer, f64, f64, f64)> = jobs
-                .into_iter()
-                .filter_map(|(path, in_s, out_s, off_s)| {
-                    lumit_media::audio::decode_all(&path, rate)
-                        .ok()
-                        .map(|buf| (buf, in_s, out_s, off_s))
-                })
-                .collect();
-            let total_frames = (duration_s * f64::from(rate)).round().max(0.0) as usize;
-            let placements: Vec<lumit_audio::mix::PlacedAudio> = decoded
-                .iter()
-                .filter_map(|(buf, in_s, out_s, off_s)| {
-                    let (start_frame, src_start, len) = lumit_audio::mix::place_on_timeline(
-                        *in_s,
-                        *out_s,
-                        *off_s,
-                        buf.samples.len() / 2,
-                        rate,
-                    )?;
-                    Some(lumit_audio::mix::PlacedAudio {
-                        start_frame,
-                        samples: &buf.samples[src_start * 2..(src_start + len) * 2],
-                        gain: 1.0,
-                    })
-                })
-                .collect();
-            let samples = lumit_audio::mix::mix_stereo(&placements, total_frames);
+            let samples = crate::export::mixdown(&jobs, rate, duration_s);
             let analysis = lumit_audio::beat::analyse_stereo(&samples, rate, sensitivity);
             // Grid-assist: nudge near-grid onsets onto the tempo grid (≤45ms),
             // which removes the small analysis latency without moving outliers.

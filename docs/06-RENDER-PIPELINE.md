@@ -502,6 +502,7 @@ export straight or premultiplied per output settings.
 |---|---|---|---|
 | YouTube 1080p60 | 1920×1080 @ 60 | H.264 high, 4:2:0 | VBR target 16 Mbps, peak 24 |
 | YouTube 1440p60 | 2560×1440 @ 60 | HEVC (H.264 fallback) | VBR target 25 Mbps, peak 35 |
+| YouTube 4K60 | 3840×2160 @ 60 | HEVC (H.264 fallback) | VBR target 45 Mbps, peak 60 |
 | Vertical 1080×1920 | 1080×1920 @ 60 | H.264 high | VBR target 16 Mbps, peak 24 |
 | Master (intermediate) | comp size/rate | DNxHR HQX or ProRes 422 HQ | codec-defined |
 

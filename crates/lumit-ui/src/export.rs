@@ -22,7 +22,13 @@ use uuid::Uuid;
 type Tex = egui_wgpu::wgpu::Texture;
 
 pub enum ExportEvent {
-    Progress { frame: usize, total: usize },
+    /// Which encoder the ladder settled on ("NVENC", "software x264", …),
+    /// sent once the file is open.
+    Encoder(&'static str),
+    Progress {
+        frame: usize,
+        total: usize,
+    },
     Done(PathBuf),
     Failed(String),
 }
@@ -46,53 +52,143 @@ pub struct ItemInfo {
     pub frames: usize,
 }
 
-/// A named export size. Native keeps the composition's own resolution; the
-/// others letterbox the comp into a standard delivery frame (K-002 gate: the
-/// YouTube/vertical presets).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ExportPreset {
-    Native,
-    Youtube1080,
-    Youtube2160,
-    Vertical1080,
+/// One audio-bearing layer, as the export thread needs it: where its file
+/// is, its comp-timeline span, and its start offset (the same trio the
+/// preview mix uses, so export audio matches playback).
+#[derive(Clone)]
+pub struct AudioJob {
+    pub path: PathBuf,
+    pub in_s: f64,
+    pub out_s: f64,
+    pub offset_s: f64,
 }
 
+/// Delivery presets (docs/06-RENDER-PIPELINE.md §7.5): frame, codec, and
+/// bitrates as data, not code. Custom keeps the comp's own size and the
+/// dialogue's choices.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ExportPreset {
+    Custom,
+    Youtube1080p60,
+    Youtube4k60,
+    Vertical1080p60,
+}
+
+/// The parameter row one preset stamps into the export dialogue.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PresetParams {
+    pub size: (u32, u32),
+    pub codec: lumit_media::encode::VideoCodec,
+    /// VBR average target, bits/second.
+    pub target_bps: i64,
+    /// VBR peak, bits/second.
+    pub peak_bps: i64,
+}
+
+/// Audio on all delivery presets: AAC 320 kbps, 48 kHz (docs/06 §7.5).
+pub const PRESET_AUDIO_BPS: i64 = 320_000;
+/// Export audio sample rate (docs/06 §7.5: 48 kHz on delivery presets).
+pub const EXPORT_AUDIO_RATE: u32 = 48_000;
+
 impl ExportPreset {
-    /// The target pixel size for this preset given the comp's own size.
-    pub fn target(self, comp_w: u32, comp_h: u32) -> (u32, u32) {
-        match self {
-            ExportPreset::Native => (comp_w, comp_h),
-            ExportPreset::Youtube1080 => (1920, 1080),
-            ExportPreset::Youtube2160 => (3840, 2160),
-            ExportPreset::Vertical1080 => (1080, 1920),
-        }
-    }
+    pub const ALL: [ExportPreset; 4] = [
+        ExportPreset::Custom,
+        ExportPreset::Youtube1080p60,
+        ExportPreset::Youtube4k60,
+        ExportPreset::Vertical1080p60,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
-            ExportPreset::Native => "Native (comp size)",
-            ExportPreset::Youtube1080 => "YouTube 1080p",
-            ExportPreset::Youtube2160 => "YouTube 4K",
-            ExportPreset::Vertical1080 => "Vertical 1080×1920",
+            ExportPreset::Custom => "Custom (comp size)",
+            ExportPreset::Youtube1080p60 => "YouTube 1080p60",
+            ExportPreset::Youtube4k60 => "YouTube 4K60",
+            ExportPreset::Vertical1080p60 => "Vertical 1080×1920p60",
         }
     }
+
+    /// The parameters this preset stamps; None for Custom (the dialogue's
+    /// own fields apply).
+    pub fn params(self) -> Option<PresetParams> {
+        use lumit_media::encode::VideoCodec;
+        match self {
+            ExportPreset::Custom => None,
+            // H.264 high, VBR 16 target / 24 peak (docs/06 §7.5).
+            ExportPreset::Youtube1080p60 => Some(PresetParams {
+                size: (1920, 1080),
+                codec: VideoCodec::H264,
+                target_bps: 16_000_000,
+                peak_bps: 24_000_000,
+            }),
+            // HEVC (the ladder falls back to x265 when no hardware offers
+            // it), VBR 45 target / 60 peak — YouTube's 2160p60 band.
+            ExportPreset::Youtube4k60 => Some(PresetParams {
+                size: (3840, 2160),
+                codec: VideoCodec::Hevc,
+                target_bps: 45_000_000,
+                peak_bps: 60_000_000,
+            }),
+            // The vertical variant of the 1080p60 preset (docs/06 §7.5).
+            ExportPreset::Vertical1080p60 => Some(PresetParams {
+                size: (1080, 1920),
+                codec: VideoCodec::H264,
+                target_bps: 16_000_000,
+                peak_bps: 24_000_000,
+            }),
+        }
+    }
+
+    /// Suggested file name for the save dialogue.
+    pub fn default_file_name(self) -> &'static str {
+        match self {
+            ExportPreset::Custom => "export.mp4",
+            ExportPreset::Youtube1080p60 => "youtube-1080p60.mp4",
+            ExportPreset::Youtube4k60 => "youtube-4k60.mp4",
+            ExportPreset::Vertical1080p60 => "vertical-1080x1920.mp4",
+        }
+    }
+}
+
+/// Everything one queued export needs beyond the document snapshot: the
+/// resolved output size, codec, rates, and whether audio joins.
+#[derive(Clone)]
+pub struct ExportSpec {
+    pub codec: lumit_media::encode::VideoCodec,
+    pub target: (u32, u32),
+    /// Average video bitrate in bits/second; None = encoder default quality.
+    pub bit_rate: Option<i64>,
+    /// VBR peak in bits/second.
+    pub max_rate: Option<i64>,
+    pub include_audio: bool,
+    pub audio_bit_rate: i64,
+}
+
+/// One export waiting its turn. The document and audio jobs are snapshotted
+/// at queue time (docs/06 §7.1): later edits never alter a queued item.
+pub struct QueuedExport {
+    pub doc: Arc<Document>,
+    pub comp_id: Uuid,
+    pub items: HashMap<Uuid, ItemInfo>,
+    pub audio: Vec<AudioJob>,
+    pub out_path: PathBuf,
+    pub spec: ExportSpec,
 }
 
 pub fn start(
     doc: Arc<Document>,
     comp_id: Uuid,
     items: HashMap<Uuid, ItemInfo>,
+    audio: Vec<AudioJob>,
     gpu: lumit_gpu::GpuContext,
     out_path: PathBuf,
-    bit_rate: Option<i64>,
-    target: (u32, u32),
+    spec: ExportSpec,
 ) -> ExportHandle {
     let (tx, events) = channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let flag = cancel.clone();
     std::thread::spawn(move || {
         let result = run(
-            &doc, comp_id, &items, &gpu, &out_path, bit_rate, target, &tx, &flag,
+            &doc, comp_id, &items, &audio, &gpu, &out_path, &spec, &tx, &flag,
         );
         let _ = match result {
             Ok(()) if flag.load(Ordering::Relaxed) => {
@@ -107,6 +203,50 @@ pub fn start(
         };
     });
     ExportHandle { events, cancel }
+}
+
+/// Decode every audio job (resampled to `rate`), lay each on the comp strip
+/// at its offset and trim, and sum — the one mixdown all comp audio flows
+/// through: preview playback, beat detection, and export, so they cannot
+/// disagree about what the comp sounds like.
+pub fn mixdown(jobs: &[AudioJob], rate: u32, duration_s: f64) -> Vec<f32> {
+    let decoded: Vec<(lumit_media::AudioBuffer, &AudioJob)> = jobs
+        .iter()
+        .filter_map(|job| {
+            lumit_media::audio::decode_all(&job.path, rate)
+                .ok()
+                .map(|buf| (buf, job))
+        })
+        .collect();
+    let total_frames = (duration_s * f64::from(rate)).round().max(0.0) as usize;
+    let placements: Vec<lumit_audio::mix::PlacedAudio> = decoded
+        .iter()
+        .filter_map(|(buf, job)| {
+            let (start_frame, src_start, len) = lumit_audio::mix::place_on_timeline(
+                job.in_s,
+                job.out_s,
+                job.offset_s,
+                buf.samples.len() / 2,
+                rate,
+            )?;
+            Some(lumit_audio::mix::PlacedAudio {
+                start_frame,
+                samples: &buf.samples[src_start * 2..(src_start + len) * 2],
+                gain: 1.0,
+            })
+        })
+        .collect();
+    lumit_audio::mix::mix_stereo(&placements, total_frames)
+}
+
+/// How many audio samples (per channel) belong before the end of video
+/// frame `frame_count` — the A/V interleaving rule. Cumulative rounding, so
+/// the running total never drifts from `frames / fps × rate`.
+pub fn audio_samples_through(frame_count: usize, fps: f64, rate: u32) -> usize {
+    if fps <= 0.0 {
+        return 0;
+    }
+    ((frame_count as f64 / fps) * f64::from(rate)).round() as usize
 }
 
 /// Renderer state carried down the precomp recursion.
@@ -457,10 +597,10 @@ fn run(
     doc: &Document,
     comp_id: Uuid,
     items: &HashMap<Uuid, ItemInfo>,
+    audio_jobs: &[AudioJob],
     gpu: &lumit_gpu::GpuContext,
     out_path: &std::path::Path,
-    bit_rate: Option<i64>,
-    target: (u32, u32),
+    spec: &ExportSpec,
     tx: &Sender<ExportEvent>,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
@@ -477,6 +617,24 @@ fn run(
         None => (0, comp_frames),
     };
     let total = end - first;
+    let _ = tx.send(ExportEvent::Progress { frame: 0, total });
+
+    // The comp's audio, mixed exactly as playback mixes it, then cut to the
+    // export range and padded so sound and picture end together.
+    let rate = EXPORT_AUDIO_RATE;
+    let audio_mix: Option<Vec<f32>> = if spec.include_audio && !audio_jobs.is_empty() {
+        let full = mixdown(audio_jobs, rate, comp.duration.0.to_f64());
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let start = audio_samples_through(first, fps, rate).min(full.len() / 2);
+        let expect = audio_samples_through(total, fps, rate);
+        let mut cut = full[start * 2..(start + expect).min(full.len() / 2) * 2].to_vec();
+        cut.resize(expect * 2, 0.0);
+        Some(cut)
+    } else {
+        None
+    };
 
     let mut renderer = Renderer {
         doc,
@@ -487,19 +645,32 @@ fn run(
         decoders: HashMap::new(),
     };
     // Encoded frame dimensions must be even for 4:2:0 H.264/HEVC.
-    let (tw, th) = (target.0 & !1, target.1 & !1);
+    let (tw, th) = (spec.target.0 & !1, spec.target.1 & !1);
     let (tw, th) = (tw.max(2), th.max(2));
     let resize = (tw, th) != (comp.width, comp.height);
-    let mut encoder = lumit_media::Encoder::open_with_bitrate(
+    let audio_settings = audio_mix
+        .as_ref()
+        .map(|_| lumit_media::encode::AudioSettings {
+            rate,
+            bit_rate: spec.audio_bit_rate,
+        });
+    let mut encoder = lumit_media::Encoder::open(
         out_path,
-        tw,
-        th,
-        i32::try_from(comp.frame_rate.fps().round() as i64).unwrap_or(60),
-        1,
-        bit_rate,
+        &lumit_media::encode::VideoSettings {
+            codec: spec.codec,
+            width: tw,
+            height: th,
+            fps_num: i32::try_from(comp.frame_rate.fps().round() as i64).unwrap_or(60),
+            fps_den: 1,
+            bit_rate: spec.bit_rate,
+            max_rate: spec.max_rate,
+        },
+        audio_settings.as_ref(),
     )
     .map_err(|e| e.to_string())?;
+    let _ = tx.send(ExportEvent::Encoder(encoder.encoder_label()));
 
+    let mut audio_fed = 0usize;
     for frame_n in 0..total {
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
@@ -519,10 +690,29 @@ fn run(
             rgba
         };
         encoder.write_rgba(&rgba).map_err(|e| e.to_string())?;
+        // Interleave: after each picture frame, the samples that cover it,
+        // so the muxer keeps sound and picture together in the file.
+        if let Some(mix) = &audio_mix {
+            let upto = audio_samples_through(frame_n + 1, fps, rate).min(mix.len() / 2);
+            if upto > audio_fed {
+                encoder
+                    .write_audio(&mix[audio_fed * 2..upto * 2])
+                    .map_err(|e| e.to_string())?;
+                audio_fed = upto;
+            }
+        }
         let _ = tx.send(ExportEvent::Progress {
             frame: frame_n + 1,
             total,
         });
+    }
+    // Any samples the per-frame rounding left behind.
+    if let Some(mix) = &audio_mix {
+        if mix.len() / 2 > audio_fed {
+            encoder
+                .write_audio(&mix[audio_fed * 2..])
+                .map_err(|e| e.to_string())?;
+        }
     }
     encoder.finish().map_err(|e| e.to_string())?;
     Ok(())
@@ -600,4 +790,80 @@ pub fn item_infos(
         }
     }
     map
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use lumit_media::encode::VideoCodec;
+
+    /// The delivery-preset table is spec (docs/06 §7.5): frame, codec, and
+    /// bitrates are pinned here so a stray edit can't silently change what
+    /// "YouTube 1080p60" means.
+    #[test]
+    fn preset_table_matches_the_spec() {
+        let p = ExportPreset::Youtube1080p60.params().unwrap();
+        assert_eq!(p.size, (1920, 1080));
+        assert_eq!(p.codec, VideoCodec::H264);
+        assert_eq!(p.target_bps, 16_000_000);
+        assert_eq!(p.peak_bps, 24_000_000);
+
+        let p = ExportPreset::Youtube4k60.params().unwrap();
+        assert_eq!(p.size, (3840, 2160));
+        assert_eq!(p.codec, VideoCodec::Hevc);
+        assert_eq!(p.target_bps, 45_000_000);
+        assert_eq!(p.peak_bps, 60_000_000);
+
+        let p = ExportPreset::Vertical1080p60.params().unwrap();
+        assert_eq!(p.size, (1080, 1920));
+        assert_eq!(p.codec, VideoCodec::H264);
+        assert_eq!(p.target_bps, 16_000_000);
+        assert_eq!(p.peak_bps, 24_000_000);
+
+        assert!(ExportPreset::Custom.params().is_none());
+        assert_eq!(PRESET_AUDIO_BPS, 320_000);
+        assert_eq!(EXPORT_AUDIO_RATE, 48_000);
+    }
+
+    #[test]
+    fn every_preset_has_a_label_and_file_name() {
+        for preset in ExportPreset::ALL {
+            assert!(!preset.label().is_empty());
+            assert!(preset.default_file_name().ends_with(".mp4"));
+        }
+    }
+
+    /// The A/V interleave rule: cumulative rounding never drifts, and the
+    /// total after all frames equals the whole soundtrack.
+    #[test]
+    fn audio_samples_through_never_drifts() {
+        let (fps, rate) = (60.0, 48_000u32);
+        // 60 fps at 48 kHz is exactly 800 samples per frame.
+        assert_eq!(audio_samples_through(1, fps, rate), 800);
+        assert_eq!(audio_samples_through(300, fps, rate), 240_000);
+        // An awkward rate: 29.97 fps. Per-frame chunks vary by ±1 sample but
+        // the cumulative total stays glued to the exact value.
+        let fps = 30_000.0 / 1001.0;
+        let mut prev = 0;
+        for n in 1..=1000 {
+            let now = audio_samples_through(n, fps, rate);
+            let chunk = now - prev;
+            assert!((1601..=1602).contains(&chunk), "frame {n} chunk {chunk}");
+            let exact = n as f64 / fps * 48_000.0;
+            assert!((now as f64 - exact).abs() <= 0.5, "frame {n} drifted");
+            prev = now;
+        }
+        // Degenerate input answers zero, never panics.
+        assert_eq!(audio_samples_through(100, 0.0, rate), 0);
+    }
+
+    /// A silent comp exports video-only; the padding rule keeps sound and
+    /// picture the same length when there is audio.
+    #[test]
+    fn mixdown_of_no_jobs_is_silence_of_the_right_length() {
+        let mix = mixdown(&[], 48_000, 2.0);
+        assert_eq!(mix.len(), 96_000 * 2);
+        assert!(mix.iter().all(|s| *s == 0.0));
+    }
 }
