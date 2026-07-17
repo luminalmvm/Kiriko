@@ -112,6 +112,31 @@ Two mechanisms make this safe, and you'll see them by name in the code:
 - `crates/lumit-core/src/model.rs` — **What a project is.** Structs for the document,
   comps, layers, footage items. Each has an `extra` field that preserves anything a future
   Lumit version adds — so old and new versions can share project files.
+- **Flash fires on the beat.** The Flash effect's Mode switch now has three positions.
+  *Manual* is exactly the old behaviour — keyframed hits with an exponential fade — and
+  stays the default, so nothing saved earlier changes by a single byte. *Trigger* lights
+  the flash from the comp's beat markers themselves: on each beat the envelope jumps to
+  full, then either cuts off after Duration frames (Shape: Hard) or ramps linearly to
+  zero across them (Shape: Fade); Phase offset slides every hit earlier or later by
+  whole frames. *Strobe* is Trigger that counts: only every Nth beat fires, which is how
+  "flash on the kick, not the hi-hat" works when the detector marked both. All of this
+  is worked out on the CPU while parameters resolve — the GPU kernel still receives one
+  strength number, untouched, so the existing Flash oracle passes as it was. The frame
+  cache learned the matching lesson in the same commit: a beat-driven flash's cache key
+  now includes the frame's local time and the small window of triggers its envelope
+  actually reads, so nudging a distant marker never re-renders frames it cannot affect,
+  while a Manual-mode flash keeps its time-free keys.
+- **Beat markers reach the effects engine** (the docs/08 §1.4 plumbing). When a layer's
+  effect stack is resolved for a frame, it now receives a small *marker context*: the
+  comp's beat-marker times, each translated into the layer's own clock (a layer that
+  starts three seconds into the comp sees a beat at comp second five as “two seconds
+  in”), plus the comp's frame rate so parameters authored in frames can become seconds.
+  Nothing draws differently yet — this is the wiring the beat-driven effect modes
+  (Flash first) plug into. Two details matter: the context is built by one shared
+  constructor that preview and export both call, so the two can never disagree about
+  where a beat falls (the K-031 promise); and a caller with no markers passes an
+  obvious empty context, because a marker-driven effect must always degrade to doing
+  nothing rather than misbehaving — a project with no music still renders.
 - **Shake.** The beatshake workhorse: a virtual camera wobble. The layer is resampled
   once through the same kernel the Transform effect uses — never pixel noise — so the
   whole frame sways as one. The wobble comes from *seeded value noise*: a deterministic

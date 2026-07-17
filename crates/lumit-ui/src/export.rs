@@ -550,8 +550,9 @@ impl Renderer<'_> {
                 continue;
             };
             let diag = ((nested.width as f32).powi(2) + (nested.height as f32).powi(2)).sqrt();
+            let markers = lumit_core::fx::MarkerContext::for_layer(nested, l);
             let p = Prepared {
-                tex: self.apply_fx(p.tex, l, lt, diag),
+                tex: self.apply_fx(p.tex, l, lt, diag, &markers),
                 natural: p.natural,
                 mask: p.mask,
             };
@@ -586,13 +587,22 @@ impl Renderer<'_> {
     /// Run a layer's live effect stack on its prepared linear texture
     /// (docs/08 §1.5: after masks, before transform), resolved against the
     /// comp diagonal — export renders full-resolution, so no decode scaling.
-    fn apply_fx(&self, tex: Tex, layer: &lumit_core::model::Layer, lt: f64, comp_diag: f32) -> Tex {
+    /// `markers` is the layer's §1.4 marker context, built by the same
+    /// shared constructor preview uses (K-031).
+    fn apply_fx(
+        &self,
+        tex: Tex,
+        layer: &lumit_core::model::Layer,
+        lt: f64,
+        comp_diag: f32,
+        markers: &lumit_core::fx::MarkerContext,
+    ) -> Tex {
         if !layer.switches.fx || layer.effects.is_empty() {
             return tex;
         }
         // Export renders at full resolution: px@comp parameters are already
         // raster pixels (§2.3 factor 1).
-        let resolved = lumit_core::fx::resolve_stack(&layer.effects, lt, comp_diag, 1.0);
+        let resolved = lumit_core::fx::resolve_stack(&layer.effects, lt, comp_diag, 1.0, markers);
         let (w, h) = (tex.width(), tex.height());
         crate::fxops::run_ops(&self.fx, self.gpu, tex, w, h, &resolved)
     }
@@ -727,8 +737,9 @@ impl Renderer<'_> {
             }
             if let Some(p) = self.prepare(l, t, visited)? {
                 let diag = ((comp.width as f32).powi(2) + (comp.height as f32).powi(2)).sqrt();
+                let markers = lumit_core::fx::MarkerContext::for_layer(comp, l);
                 let p = Prepared {
-                    tex: self.apply_fx(p.tex, l, lt, diag),
+                    tex: self.apply_fx(p.tex, l, lt, diag, &markers),
                     natural: p.natural,
                     mask: p.mask,
                 };
@@ -810,7 +821,10 @@ impl Renderer<'_> {
                 }
                 let lt = t - l.start_offset.0.to_f64();
                 let fx = if l.switches.fx {
-                    lumit_core::fx::resolve_stack(&l.effects, lt, comp_diag, 1.0)
+                    // The §1.4 marker context, built by the same shared
+                    // constructor preview uses (K-031).
+                    let markers = lumit_core::fx::MarkerContext::for_layer(comp, l);
+                    lumit_core::fx::resolve_stack(&l.effects, lt, comp_diag, 1.0, &markers)
                 } else {
                     Vec::new()
                 };

@@ -15,7 +15,9 @@
 //! agree with the CPU" a testable promise.
 
 use crate::anim::{Animation, Property};
-use crate::model::{EffectInstance, EffectKey, EffectNamespace, EffectParam, EffectValue};
+use crate::model::{
+    Composition, EffectInstance, EffectKey, EffectNamespace, EffectParam, EffectValue, Layer,
+};
 
 /// Cost class (docs/08 §1.3) — consumed by degradation ordering and budgets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,13 +354,14 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
-    // Beat-aware strobe (docs/08 §3.7), in its manual form for now: each
-    // keyframe on Trigger is a hit (its value = how hard, 0..1) that decays
-    // exponentially over Decay; a static Trigger holds a constant flash.
-    // The §1.4 marker-trigger binding (trigger source, strobe mode, every
-    // Nth beat) follows once marker plumbing exists — these parameters stay
-    // stable when it does. Default is a no-op by design: §1.2 exempts
-    // inherently trigger-driven effects.
+    // Beat-aware strobe (docs/08 §3.7). Manual mode is the original manual
+    // form: each keyframe on Trigger is a hit (its value = how hard, 0..1)
+    // that decays exponentially over Decay; a static Trigger holds a
+    // constant flash. Trigger mode fires the §1.4 envelope from the comp's
+    // beat markers; Strobe fires every Nth beat only. Instances saved
+    // before the marker modes existed carry no "mode" parameter and
+    // resolve as Manual, byte-identically. Default is a no-op by design:
+    // §1.2 exempts inherently trigger-driven effects.
     EffectSchema {
         match_name: "flash",
         label: "Flash",
@@ -370,9 +373,20 @@ pub const BUILTINS: &[EffectSchema] = &[
             temporal: &[0],
             premultiplied: true,
             seeded: false,
-            beat_input: true, // binds to beat markers per §1.4, later
+            beat_input: true, // binds to comp beat markers per §1.4
         },
         params: &[
+            ParamSchema {
+                id: "mode",
+                label: "Mode",
+                // Manual = keyframed hits on Trigger (the original form);
+                // Trigger = the §1.4 beat envelope; Strobe = every Nth
+                // beat only.
+                kind: ParamKind::Choice {
+                    options: &["Manual", "Trigger", "Strobe"],
+                    default: 0,
+                },
+            },
             ParamSchema {
                 id: "trigger",
                 label: "Trigger",
@@ -380,6 +394,52 @@ pub const BUILTINS: &[EffectSchema] = &[
                     default: 0.0,
                     slider: (0.0, 1.0),
                     hard: (Some(0.0), Some(1.0)),
+                },
+            },
+            ParamSchema {
+                id: "duration",
+                label: "Duration",
+                // Frames (comp-rate, §2.3) a marker-driven flash lasts.
+                // Hard floor 0, unbounded above (the K-090 one-sided
+                // clamp); 0 is honestly a flash zero frames long — never
+                // shown.
+                kind: ParamKind::Float {
+                    default: 2.0,
+                    slider: (0.0, 12.0),
+                    hard: (Some(0.0), None),
+                },
+            },
+            ParamSchema {
+                id: "shape",
+                label: "Shape",
+                // Hard holds full strength for Duration then cuts; Fade
+                // decays linearly to zero across it.
+                kind: ParamKind::Choice {
+                    options: &["Hard", "Fade"],
+                    default: 0,
+                },
+            },
+            ParamSchema {
+                id: "every_nth",
+                label: "Every Nth beat",
+                // Strobe mode: fire beats 0, N, 2N, … of the comp's beat
+                // list. The spec's integer ≥ 1, carried as a Float row —
+                // the resolver rounds and clamps at 1.
+                kind: ParamKind::Float {
+                    default: 1.0,
+                    slider: (1.0, 8.0),
+                    hard: (Some(1.0), None),
+                },
+            },
+            ParamSchema {
+                id: "phase",
+                label: "Phase offset",
+                // Frames a marker-driven flash trails (> 0) or leads (< 0)
+                // its beat.
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-8.0, 8.0),
+                    hard: (None, None),
                 },
             },
             ParamSchema {
@@ -1028,6 +1088,133 @@ pub fn flash_envelope(trigger: &Property, t: f64, decay_s: f64) -> f64 {
     }
 }
 
+/// The trigger times a marker-driven Flash reads (docs/08 §3.7): every
+/// `nth`-th beat of the ordered §1.4 context — indices 0, n, 2n, … of the
+/// beat list, the comp's first beat being index 0 — shifted by
+/// `phase_frames` comp frames. Yields layer-local seconds, ascending. One
+/// iterator shared by the envelope and the frame-key window
+/// ([`marker_window`]) so cache invalidation can never drift from what
+/// resolution computes.
+fn flash_trigger_times<'a>(
+    markers: &'a MarkerContext,
+    nth: u32,
+    phase_frames: f64,
+) -> impl Iterator<Item = f64> + 'a {
+    let dt = if markers.fps > 0.0 {
+        phase_frames / markers.fps
+    } else {
+        0.0
+    };
+    markers
+        .beats
+        .iter()
+        .step_by(nth.max(1) as usize)
+        .map(move |b| b + dt)
+}
+
+/// The Flash beat envelope (docs/08 §3.7 Trigger and Strobe modes), pinned
+/// once for resolution, its unit tests and the frame key alike. From the
+/// nearest trigger at/before the frame ([`flash_trigger_times`]), with
+/// `elapsed = (lt − trigger) · fps` in comp frames: Hard holds 1 while
+/// `0 ≤ elapsed < duration_frames`, Fade ramps `1 − elapsed/duration_frames`
+/// over the same span; past it — and before the first trigger — the
+/// envelope is 0. No markers, a non-positive frame rate (the [`MarkerContext::NONE`]
+/// caller) or a non-positive duration all yield 0: the §1.4 graceful
+/// fallback. Pure function of its inputs, so determinism (§2.4) holds.
+pub fn flash_beat_envelope(
+    markers: &MarkerContext,
+    lt: f64,
+    duration_frames: f64,
+    fade: bool,
+    nth: u32,
+    phase_frames: f64,
+) -> f64 {
+    if markers.fps <= 0.0 || duration_frames <= 0.0 {
+        return 0.0;
+    }
+    let mut env = 0.0;
+    for tt in flash_trigger_times(markers, nth, phase_frames) {
+        let elapsed = (lt - tt) * markers.fps;
+        if elapsed < 0.0 {
+            break; // ascending: every later trigger is in the future too
+        }
+        env = if elapsed < duration_frames {
+            if fade {
+                1.0 - elapsed / duration_frames
+            } else {
+                1.0
+            }
+        } else {
+            0.0 // the nearest trigger at/before wins, even once spent
+        };
+    }
+    env
+}
+
+/// Strobe's Every Nth beat parameter, read as the spec's integer ≥ 1
+/// (docs/08 §3.7): rounded to the nearest whole beat count, clamped at 1,
+/// non-finite values degrading to 1.
+fn flash_nth(e: &EffectInstance, lt: f64) -> u32 {
+    let n = e.float_at("every_nth", lt).unwrap_or(1.0);
+    if n.is_finite() && n >= 1.0 {
+        n.round() as u32
+    } else {
+        1
+    }
+}
+
+/// What one marker-driven effect instance sees of the §1.4 context at a
+/// frame — the nearest trigger either side of it, exactly as its envelope
+/// consumes them (Nth-filtered and phase-shifted for a Strobe flash), plus
+/// the comp frame rate its frame-authored parameters convert through. Fed
+/// into the frame key (lumit-eval) so a cached frame is retired exactly
+/// when a marker edit can change what this instance computes, and left
+/// alone otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MarkerWindow {
+    /// Comp frames per second.
+    pub fps: f64,
+    /// The nearest trigger at/before the frame, layer-local seconds.
+    pub before: Option<f64>,
+    /// The nearest trigger strictly after, layer-local seconds.
+    pub after: Option<f64>,
+}
+
+/// The §1.4 window `e` consumes at layer time `lt` — None when the
+/// instance is not marker-driven right now (an effect without marker
+/// input, or a Flash in Manual mode), which is what keeps such instances'
+/// frame keys time-free. v1: Flash is the only marker consumer; a new
+/// marker-driven effect adds its arm here, so the frame key learns it in
+/// the same place resolution does.
+pub fn marker_window(e: &EffectInstance, lt: f64, markers: &MarkerContext) -> Option<MarkerWindow> {
+    if e.effect.namespace != EffectNamespace::Builtin || e.effect.match_name != "flash" {
+        return None;
+    }
+    let mode = match e.param("mode") {
+        Some(EffectValue::Choice(c)) => *c,
+        _ => 0,
+    };
+    if mode != 1 && mode != 2 {
+        return None; // Manual: no marker input, no time in the key
+    }
+    let nth = if mode == 2 { flash_nth(e, lt) } else { 1 };
+    let phase = e.float_at("phase", lt).unwrap_or(0.0);
+    let mut w = MarkerWindow {
+        fps: markers.fps,
+        before: None,
+        after: None,
+    };
+    for tt in flash_trigger_times(markers, nth, phase) {
+        if tt <= lt {
+            w.before = Some(tt);
+        } else {
+            w.after = Some(tt);
+            break;
+        }
+    }
+    Some(w)
+}
+
 /// The glow bright pass on one channel (docs/08 §3.3 step 1):
 /// `max(0, x − threshold)` with a soft knee — the hinge's onset is weighted
 /// by a smoothstep over `threshold ± knee`, so the bloom fades in over the
@@ -1200,17 +1387,88 @@ pub fn spectral_basis_vec4() -> [[f32; 4]; 9] {
     out
 }
 
+/// The §1.4 marker resolve context: what marker-driven effects see at
+/// resolution time. It carries the comp's beat-marker times **translated
+/// into the layer's local time** — comp marker time minus the layer's start
+/// offset, the same one f64 subtraction that produces the `lt` handed to
+/// [`resolve_stack`], so a beat and a frame at the same comp moment compare
+/// exactly equal and the envelope maths lives in a single time base — plus
+/// the comp frame rate, because duration-class parameters are authored in
+/// comp frames (§2.3). Built by [`MarkerContext::for_layer`], the one
+/// constructor preview and export both call (K-031), so the two can never
+/// drift. A caller with no comp to hand passes [`MarkerContext::NONE`];
+/// marker-driven effects MUST fall back gracefully on it (§1.4).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MarkerContext {
+    /// Beat-marker times in the layer's local time base, seconds, sorted
+    /// ascending.
+    pub beats: Vec<f64>,
+    /// Comp frames per second; 0 in the no-comp default (guarded wherever
+    /// frames convert to seconds).
+    pub fps: f64,
+}
+
+impl MarkerContext {
+    /// The obvious empty context — no beats, no frame rate — for callers
+    /// without markers. Every marker-driven effect resolves to its
+    /// graceful fallback on it (§1.4).
+    pub const NONE: MarkerContext = MarkerContext {
+        beats: Vec::new(),
+        fps: 0.0,
+    };
+
+    /// The context for one layer of `comp`: the comp's beat markers only
+    /// (the v1 §1.4 scope — named-layer binding and label filters follow),
+    /// each translated into the layer's local time, sorted ascending.
+    pub fn for_layer(comp: &Composition, layer: &Layer) -> Self {
+        let off = layer.start_offset.0.to_f64();
+        let mut beats: Vec<f64> = comp
+            .markers
+            .iter()
+            .filter(|m| m.is_beat())
+            .map(|m| m.time.0.to_f64() - off)
+            .collect();
+        beats.sort_by(f64::total_cmp);
+        Self {
+            beats,
+            fps: comp.frame_rate.fps(),
+        }
+    }
+
+    /// The ordered beat times within `[from_s, to_s]` local seconds — the
+    /// §1.4 "inside the effect's temporal window" view.
+    pub fn window(&self, from_s: f64, to_s: f64) -> &[f64] {
+        let a = self.beats.partition_point(|b| *b < from_s);
+        let z = self.beats.partition_point(|b| *b <= to_s).max(a);
+        &self.beats[a..z]
+    }
+
+    /// The nearest beat at/before `lt` and the nearest strictly after —
+    /// the §1.4 "either side of the current frame" pair.
+    pub fn nearest(&self, lt: f64) -> (Option<f64>, Option<f64>) {
+        let i = self.beats.partition_point(|b| *b <= lt);
+        (
+            i.checked_sub(1).map(|j| self.beats[j]),
+            self.beats.get(i).copied(),
+        )
+    }
+}
+
 /// Resolve a layer's live stack at layer time `lt` for a raster whose
 /// diagonal is `diag_px` pixels; `px_scale` is raster pixels per comp pixel
 /// (the §2.3 preview-resolution factor — 1.0 at full resolution), which
 /// converts px@comp parameters exactly as `diag_px` converts % diag ones.
-/// Placeholders, unknown names and bypassed effects resolve to nothing
-/// (they render as identity, docs/03 §8).
+/// `markers` is the layer's §1.4 marker context ([`MarkerContext::for_layer`],
+/// or [`MarkerContext::NONE`] where no comp is in play), consumed by the
+/// marker-driven modes (Flash's Trigger and Strobe, §3.7). Placeholders,
+/// unknown names and bypassed effects resolve to nothing (they render as
+/// identity, docs/03 §8).
 pub fn resolve_stack(
     effects: &[EffectInstance],
     lt: f64,
     diag_px: f32,
     px_scale: f32,
+    markers: &MarkerContext,
 ) -> Vec<Resolved> {
     effects
         .iter()
@@ -1296,10 +1554,32 @@ pub fn resolve_stack(
                 })
             }
             "flash" => {
-                let decay_s = (e.float_at("decay", lt).unwrap_or(120.0) / 1000.0).max(0.0);
-                let envelope = match e.param("trigger") {
-                    Some(EffectValue::Float(p)) => flash_envelope(p, lt, decay_s),
-                    _ => 0.0,
+                // Instances saved before the marker modes existed carry no
+                // "mode" parameter and resolve as Manual — byte-identically.
+                let mode = match e.param("mode") {
+                    Some(EffectValue::Choice(c)) => *c,
+                    _ => 0,
+                };
+                let envelope = match mode {
+                    // Trigger (1) and Strobe (2): the §3.7 beat envelope
+                    // from the §1.4 context; Strobe thins the beat list to
+                    // every Nth.
+                    1 | 2 => {
+                        let duration = e.float_at("duration", lt).unwrap_or(2.0).max(0.0);
+                        let fade = matches!(e.param("shape"), Some(EffectValue::Choice(1)));
+                        let nth = if mode == 2 { flash_nth(e, lt) } else { 1 };
+                        let phase = e.float_at("phase", lt).unwrap_or(0.0);
+                        flash_beat_envelope(markers, lt, duration, fade, nth, phase)
+                    }
+                    // Manual: keyframed hits on Trigger, decaying over
+                    // Decay — the original form, untouched.
+                    _ => {
+                        let decay_s = (e.float_at("decay", lt).unwrap_or(120.0) / 1000.0).max(0.0);
+                        match e.param("trigger") {
+                            Some(EffectValue::Float(p)) => flash_envelope(p, lt, decay_s),
+                            _ => 0.0,
+                        }
+                    }
                 };
                 let intensity = e.float_at("intensity", lt).unwrap_or(100.0).max(0.0) / 100.0;
                 let colour = e.colour_at("colour", lt).unwrap_or([1.0; 4]);
@@ -2044,7 +2324,7 @@ mod tests {
     fn resolve_stack_evaluates_converts_and_skips_dead_effects() {
         let mut e = instantiate("blur").unwrap();
         // 1.5% of a 1000px diagonal = 15px.
-        let r = resolve_stack(&[e.clone()], 0.0, 1000.0, 1.0);
+        let r = resolve_stack(&[e.clone()], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
         assert_eq!(
             r,
             vec![Resolved::Blur {
@@ -2054,11 +2334,11 @@ mod tests {
             }]
         );
         e.enabled = false;
-        assert!(resolve_stack(&[e.clone()], 0.0, 1000.0, 1.0).is_empty());
+        assert!(resolve_stack(&[e.clone()], 0.0, 1000.0, 1.0, &MarkerContext::NONE).is_empty());
         e.enabled = true;
         e.effect.namespace = EffectNamespace::Placeholder;
         assert!(
-            resolve_stack(&[e], 0.0, 1000.0, 1.0).is_empty(),
+            resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE).is_empty(),
             "placeholders render as identity"
         );
     }
@@ -2110,7 +2390,7 @@ mod tests {
             Some(EffectValue::Bool(true))
         ));
         // 0.4% of a 1000px diagonal = 4px; amount 60% = 0.6.
-        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0);
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
         assert_eq!(
             r,
             vec![Resolved::Sharpen {
@@ -2219,7 +2499,7 @@ mod tests {
         assert_eq!(e.float_at("angle", 0.0), Some(0.0));
         assert!(matches!(e.param("radial"), Some(EffectValue::Bool(false))));
         // 0.4% of a 1000px diagonal = 4px.
-        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0);
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
         assert_eq!(
             r,
             vec![Resolved::RgbSplit {
@@ -2288,7 +2568,13 @@ mod tests {
             radial: false,
             mix: 1.0,
         };
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(r, vec![classic]);
 
         // Wavelength on: the same numbers arrive as SpectralSplit.
@@ -2297,7 +2583,13 @@ mod tests {
                 p.value = EffectValue::Bool(true);
             }
         }
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::SpectralSplit {
@@ -2311,7 +2603,13 @@ mod tests {
         // A legacy instance (saved before the Bool existed) has no
         // wavelength parameter and still resolves as the classic split.
         e.params.retain(|p| p.id != "wavelength");
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(r, vec![classic]);
     }
 
@@ -2424,7 +2722,13 @@ mod tests {
         assert_eq!(e.colour_at("colour", 0.0), Some([1.0, 1.0, 1.0, 1.0]));
         // Trigger 0: resolves to a zero-strength (identity) flash — the
         // §1.2 trigger-driven exemption.
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::Flash {
@@ -2465,7 +2769,13 @@ mod tests {
         assert_eq!(e.colour_at("lift", 0.0), Some([0.0, 0.0, 0.0, 1.0]));
         assert_eq!(e.colour_at("gamma", 0.0), Some([1.0; 4]));
         assert_eq!(e.colour_at("gain", 0.0), Some([1.0; 4]));
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::ColourBalance {
@@ -2481,7 +2791,13 @@ mod tests {
     fn saturation_instantiates_and_resolves_neutral() {
         let e = instantiate("saturation").unwrap();
         assert_eq!(e.float_at("saturation", 0.0), Some(100.0));
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::Saturation {
@@ -2593,7 +2909,13 @@ mod tests {
         let mut e = instantiate("blur").unwrap();
         assert!(matches!(e.param("mode"), Some(EffectValue::Choice(0))));
         assert_eq!(e.float_at("length", 0.0), Some(10.0));
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::Blur {
@@ -2609,7 +2931,13 @@ mod tests {
                 p.value = EffectValue::Choice(1);
             }
         }
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::DirBlur {
@@ -2624,7 +2952,13 @@ mod tests {
         // parameter and still resolves as Gaussian.
         e.params
             .retain(|p| !matches!(p.id.as_str(), "mode" | "length" | "angle"));
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert!(matches!(r[..], [Resolved::Blur { .. }]));
     }
 
@@ -2679,7 +3013,13 @@ mod tests {
         assert_eq!(e.float_at("rotation", 0.0), Some(0.0));
         assert_eq!(e.float_at("opacity", 0.0), Some(100.0));
         // Defaults resolve to the exact identity op.
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::Transform {
@@ -2704,7 +3044,13 @@ mod tests {
                 _ => {}
             }
         }
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 500.0, 0.5);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            500.0,
+            0.5,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::Transform {
@@ -2739,7 +3085,7 @@ mod tests {
         assert_eq!(e.float_at("intensity", 0.0), Some(1.0));
         assert_eq!(e.colour_at("tint", 0.0), Some([1.0; 4]));
         // 8% of a 1000px diagonal = 80px.
-        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0);
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
         assert_eq!(
             r,
             vec![Resolved::Glow {
@@ -2932,8 +3278,20 @@ mod tests {
 
         // Resolving is deterministic: the same instance at the same time
         // yields the identical wobble, twice.
-        let a = resolve_stack(std::slice::from_ref(&e), 0.4, 1000.0, 1.0);
-        let b = resolve_stack(std::slice::from_ref(&e), 0.4, 1000.0, 1.0);
+        let a = resolve_stack(
+            std::slice::from_ref(&e),
+            0.4,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
+        let b = resolve_stack(
+            std::slice::from_ref(&e),
+            0.4,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(a, b);
         let Resolved::Shake {
             offset_px,
@@ -2957,7 +3315,13 @@ mod tests {
         assert_eq!(mix, 1.0);
 
         // Different frames wobble differently; different seeds too.
-        let later = resolve_stack(std::slice::from_ref(&e), 0.9, 1000.0, 1.0);
+        let later = resolve_stack(
+            std::slice::from_ref(&e),
+            0.9,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_ne!(a, later, "the wobble moves between frames");
         let mut reseeded = e.clone();
         for p in &mut reseeded.params {
@@ -2969,7 +3333,13 @@ mod tests {
                 p.value = EffectValue::Seed(old.wrapping_add(1));
             }
         }
-        let other = resolve_stack(std::slice::from_ref(&reseeded), 0.4, 1000.0, 1.0);
+        let other = resolve_stack(
+            std::slice::from_ref(&reseeded),
+            0.4,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_ne!(a, other, "a different seed wobbles differently");
     }
 
@@ -3145,5 +3515,322 @@ mod tests {
         for c in 0..4 {
             assert_eq!(o[mid + c], 0.5, "channel {c} at half");
         }
+    }
+
+    /// A minimal comp + layer pair for marker-context tests: a comp at the
+    /// given frame rate carrying `markers`, and an adjustment layer whose
+    /// start offset is `offset_s` seconds.
+    fn marker_rig(
+        fps: (u32, u32),
+        markers: Vec<crate::markers::Marker>,
+        offset_s: (i64, i64),
+    ) -> (Composition, Layer) {
+        use crate::model::{LayerKind, LinearColour, Switches, TransformGroup};
+        use crate::time::{CompTime, Duration, FrameRate, Rational};
+        let secs = |n, d| CompTime(Rational::new(n, d).unwrap());
+        let comp = Composition {
+            id: uuid::Uuid::now_v7(),
+            name: "c".into(),
+            width: 1920,
+            height: 1080,
+            frame_rate: FrameRate::new(fps.0, fps.1).unwrap(),
+            duration: Duration(Rational::new(10, 1).unwrap()),
+            background: LinearColour([0.0, 0.0, 0.0, 1.0]),
+            work_area: None,
+            layers: Vec::new(),
+            markers,
+            extra: serde_json::Map::new(),
+        };
+        let layer = Layer {
+            id: uuid::Uuid::now_v7(),
+            name: "l".into(),
+            kind: LayerKind::Adjustment,
+            in_point: secs(0, 1),
+            out_point: secs(10, 1),
+            start_offset: secs(offset_s.0, offset_s.1),
+            transform: TransformGroup::default(),
+            matte: None,
+            blend: Default::default(),
+            masks: Vec::new(),
+            effects: Vec::new(),
+            switches: Switches::default(),
+            extra: serde_json::Map::new(),
+        };
+        (comp, layer)
+    }
+
+    #[test]
+    fn marker_context_builds_layer_local_ordered_beats() {
+        use crate::markers::{Marker, MarkerKind};
+        use crate::time::{CompTime, Rational};
+        let rat = |n, d| Rational::new(n, d).unwrap();
+        // Beats out of order, plus a user and a chapter marker to ignore.
+        let user = Marker::user(uuid::Uuid::now_v7(), rat(1, 2));
+        let chapter = Marker {
+            kind: MarkerKind::Chapter,
+            time: CompTime(rat(3, 1)),
+            ..Marker::user(uuid::Uuid::now_v7(), rat(3, 1))
+        };
+        let late = Marker::beat(uuid::Uuid::now_v7(), rat(2, 1), 0.9);
+        let early = Marker::beat(uuid::Uuid::now_v7(), rat(1, 1), 0.5);
+        let (comp, layer) = marker_rig((30, 1), vec![user, late, chapter, early], (1, 4));
+        let ctx = MarkerContext::for_layer(&comp, &layer);
+        // Beat kind only, layer-local (comp time − start offset), sorted.
+        assert_eq!(ctx.beats, vec![0.75, 1.75]);
+        assert_eq!(ctx.fps, 30.0);
+        // The local translation matches the resolver's own lt subtraction
+        // exactly: a beat at comp second 1 and a frame evaluated there land
+        // on the identical f64.
+        let lt = 1.0 - layer.start_offset.0.to_f64();
+        assert_eq!(ctx.beats[0], lt);
+        // The obvious no-marker default (§1.4 graceful fallback).
+        assert_eq!(MarkerContext::NONE.beats, Vec::<f64>::new());
+        assert_eq!(MarkerContext::NONE.fps, 0.0);
+        assert_eq!(MarkerContext::default(), MarkerContext::NONE);
+    }
+
+    #[test]
+    fn marker_context_window_and_nearest() {
+        let ctx = MarkerContext {
+            beats: vec![1.0, 2.0, 4.0],
+            fps: 30.0,
+        };
+        // The §1.4 temporal-window view: inclusive both ends.
+        assert_eq!(ctx.window(1.0, 2.0), &[1.0, 2.0]);
+        assert_eq!(ctx.window(1.5, 3.9), &[2.0]);
+        assert_eq!(ctx.window(2.5, 3.5), &[] as &[f64]);
+        assert_eq!(
+            ctx.window(3.0, 1.0),
+            &[] as &[f64],
+            "inverted span is empty"
+        );
+        // The nearest-either-side pair: "before" is at/before the frame.
+        assert_eq!(ctx.nearest(2.0), (Some(2.0), Some(4.0)));
+        assert_eq!(ctx.nearest(2.5), (Some(2.0), Some(4.0)));
+        assert_eq!(ctx.nearest(0.5), (None, Some(1.0)));
+        assert_eq!(ctx.nearest(9.0), (Some(4.0), None));
+        assert_eq!(MarkerContext::NONE.nearest(1.0), (None, None));
+    }
+
+    /// A context whose beats and rate use exactly representable values, so
+    /// envelope boundary assertions are exact rather than tolerance games.
+    fn beat_ctx(beats: &[f64], fps: f64) -> MarkerContext {
+        MarkerContext {
+            beats: beats.to_vec(),
+            fps,
+        }
+    }
+
+    #[test]
+    fn flash_beat_envelope_hard_and_fade_shapes() {
+        let ctx = beat_ctx(&[1.0], 4.0);
+        // On the beat: full strength, whichever the shape.
+        assert_eq!(flash_beat_envelope(&ctx, 1.0, 2.0, false, 1, 0.0), 1.0);
+        assert_eq!(flash_beat_envelope(&ctx, 1.0, 2.0, true, 1, 0.0), 1.0);
+        // One frame in (0.25 s at 4 fps): Hard still full, Fade at the
+        // midpoint of a 2-frame duration.
+        assert_eq!(flash_beat_envelope(&ctx, 1.25, 2.0, false, 1, 0.0), 1.0);
+        assert_eq!(flash_beat_envelope(&ctx, 1.25, 2.0, true, 1, 0.0), 0.5);
+        // The span is [0, duration): at exactly two frames both shapes are
+        // spent, and well past the duration they stay zero.
+        assert_eq!(flash_beat_envelope(&ctx, 1.5, 2.0, false, 1, 0.0), 0.0);
+        assert_eq!(flash_beat_envelope(&ctx, 1.5, 2.0, true, 1, 0.0), 0.0);
+        assert_eq!(flash_beat_envelope(&ctx, 3.0, 2.0, false, 1, 0.0), 0.0);
+        // Before the first trigger there is nothing to decay from.
+        assert_eq!(flash_beat_envelope(&ctx, 0.75, 2.0, false, 1, 0.0), 0.0);
+        // A fresh beat wins over a spent one (nearest at/before rule).
+        let two = beat_ctx(&[1.0, 2.0], 4.0);
+        assert_eq!(flash_beat_envelope(&two, 2.0, 2.0, true, 1, 0.0), 1.0);
+    }
+
+    #[test]
+    fn flash_beat_envelope_phase_shifts_the_triggers() {
+        let ctx = beat_ctx(&[1.0], 4.0);
+        // Phase +2 frames at 4 fps = +0.5 s: the beat itself no longer
+        // fires; the shifted moment does, at full strength.
+        assert_eq!(flash_beat_envelope(&ctx, 1.0, 2.0, false, 1, 2.0), 0.0);
+        assert_eq!(flash_beat_envelope(&ctx, 1.5, 2.0, false, 1, 2.0), 1.0);
+        // Negative phase leads the beat.
+        assert_eq!(flash_beat_envelope(&ctx, 0.5, 2.0, false, 1, -2.0), 1.0);
+        assert_eq!(
+            flash_beat_envelope(&ctx, 0.75, 2.0, true, 1, -2.0),
+            0.5,
+            "fade measures from the shifted trigger"
+        );
+    }
+
+    #[test]
+    fn flash_beat_envelope_strobe_skips_to_every_nth() {
+        // Beats each second; every 2nd fires indices 0 and 2 (the comp's
+        // first beat is index 0).
+        let ctx = beat_ctx(&[1.0, 2.0, 3.0, 4.0], 4.0);
+        assert_eq!(flash_beat_envelope(&ctx, 1.0, 2.0, false, 2, 0.0), 1.0);
+        assert_eq!(
+            flash_beat_envelope(&ctx, 2.0, 2.0, false, 2, 0.0),
+            0.0,
+            "the skipped beat does not fire"
+        );
+        assert_eq!(flash_beat_envelope(&ctx, 3.0, 2.0, false, 2, 0.0), 1.0);
+        // Nth 1 fires them all; a degenerate 0 clamps to 1.
+        assert_eq!(flash_beat_envelope(&ctx, 2.0, 2.0, false, 1, 0.0), 1.0);
+        assert_eq!(flash_beat_envelope(&ctx, 2.0, 2.0, false, 0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn flash_beat_envelope_falls_back_gracefully() {
+        // No markers, the NONE context, a zero duration and a zero frame
+        // rate all yield exactly nothing (§1.4: MUST work with no markers).
+        assert_eq!(
+            flash_beat_envelope(&MarkerContext::NONE, 1.0, 2.0, false, 1, 0.0),
+            0.0
+        );
+        assert_eq!(
+            flash_beat_envelope(&beat_ctx(&[], 30.0), 1.0, 2.0, true, 1, 0.0),
+            0.0
+        );
+        let ctx = beat_ctx(&[1.0], 4.0);
+        assert_eq!(flash_beat_envelope(&ctx, 1.0, 0.0, false, 1, 0.0), 0.0);
+        assert_eq!(
+            flash_beat_envelope(&beat_ctx(&[1.0], 0.0), 1.0, 2.0, false, 1, 0.0),
+            0.0
+        );
+    }
+
+    #[test]
+    fn flash_mode_resolves_manual_trigger_strobe_and_legacy() {
+        let ctx = beat_ctx(&[1.0, 2.0, 3.0], 4.0);
+        // A fresh instance defaults to Manual and resolves exactly as the
+        // pre-mode flash did, markers or none.
+        let mut e = instantiate("flash").unwrap();
+        assert!(matches!(e.param("mode"), Some(EffectValue::Choice(0))));
+        assert_eq!(e.float_at("duration", 0.0), Some(2.0));
+        assert!(matches!(e.param("shape"), Some(EffectValue::Choice(0))));
+        assert_eq!(e.float_at("every_nth", 0.0), Some(1.0));
+        assert_eq!(e.float_at("phase", 0.0), Some(0.0));
+        let dark = Resolved::Flash {
+            strength: 0.0,
+            colour: [1.0; 4],
+            mix: 1.0,
+        };
+        let r = resolve_stack(std::slice::from_ref(&e), 1.0, 1000.0, 1.0, &ctx);
+        assert_eq!(r, vec![dark], "Manual ignores markers entirely");
+
+        // Trigger mode lights on the beat and is spent past Duration.
+        for p in &mut e.params {
+            if p.id == "mode" {
+                p.value = EffectValue::Choice(1);
+            }
+        }
+        let lit = Resolved::Flash {
+            strength: 1.0,
+            colour: [1.0; 4],
+            mix: 1.0,
+        };
+        let r = resolve_stack(std::slice::from_ref(&e), 1.0, 1000.0, 1.0, &ctx);
+        assert_eq!(r, vec![lit]);
+        let r = resolve_stack(std::slice::from_ref(&e), 1.75, 1000.0, 1.0, &ctx);
+        assert_eq!(r, vec![dark], "3 frames past a 2-frame flash");
+        // And with no markers at all it resolves dark — never an error
+        // (§1.4 graceful fallback).
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            1.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
+        assert_eq!(r, vec![dark]);
+
+        // Strobe every 2nd beat: beat index 1 (2 s) does not fire, index 2
+        // (3 s) does.
+        for p in &mut e.params {
+            match p.id.as_str() {
+                "mode" => p.value = EffectValue::Choice(2),
+                "every_nth" => p.value = EffectValue::Float(Property::fixed(2.0)),
+                _ => {}
+            }
+        }
+        let r = resolve_stack(std::slice::from_ref(&e), 2.0, 1000.0, 1.0, &ctx);
+        assert_eq!(r, vec![dark]);
+        let r = resolve_stack(std::slice::from_ref(&e), 3.0, 1000.0, 1.0, &ctx);
+        assert_eq!(r, vec![lit]);
+
+        // A legacy instance (saved before the marker modes existed) has no
+        // mode parameter and still resolves Manual: a static Trigger of
+        // 0.4 holds a 0.4 flash whatever the markers say.
+        let mut legacy = instantiate("flash").unwrap();
+        legacy.params.retain(|p| {
+            !matches!(
+                p.id.as_str(),
+                "mode" | "duration" | "shape" | "every_nth" | "phase"
+            )
+        });
+        for p in &mut legacy.params {
+            if p.id == "trigger" {
+                p.value = EffectValue::Float(Property::fixed(0.4));
+            }
+        }
+        let r = resolve_stack(std::slice::from_ref(&legacy), 1.0, 1000.0, 1.0, &ctx);
+        assert_eq!(
+            r,
+            vec![Resolved::Flash {
+                strength: 0.4,
+                colour: [1.0; 4],
+                mix: 1.0
+            }]
+        );
+    }
+
+    #[test]
+    fn marker_window_reports_what_the_envelope_reads() {
+        let ctx = beat_ctx(&[1.0, 2.0, 3.0], 4.0);
+        // Manual mode — and any effect without marker input — has no
+        // window, which is what keeps its frame keys time-free.
+        let mut e = instantiate("flash").unwrap();
+        assert_eq!(marker_window(&e, 1.5, &ctx), None);
+        let blur = instantiate("blur").unwrap();
+        assert_eq!(marker_window(&blur, 1.5, &ctx), None);
+
+        // Trigger mode: the nearest trigger either side of the frame.
+        for p in &mut e.params {
+            if p.id == "mode" {
+                p.value = EffectValue::Choice(1);
+            }
+        }
+        assert_eq!(
+            marker_window(&e, 1.5, &ctx),
+            Some(MarkerWindow {
+                fps: 4.0,
+                before: Some(1.0),
+                after: Some(2.0),
+            })
+        );
+        assert_eq!(
+            marker_window(&e, 0.5, &ctx),
+            Some(MarkerWindow {
+                fps: 4.0,
+                before: None,
+                after: Some(1.0),
+            })
+        );
+
+        // Strobe filters first: with every 2nd beat, the frame after beat
+        // index 1 still sees indices 0 and 2 as its neighbours — the
+        // window is the triggers the envelope actually consumes.
+        for p in &mut e.params {
+            match p.id.as_str() {
+                "mode" => p.value = EffectValue::Choice(2),
+                "every_nth" => p.value = EffectValue::Float(Property::fixed(2.0)),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            marker_window(&e, 2.5, &ctx),
+            Some(MarkerWindow {
+                fps: 4.0,
+                before: Some(1.0),
+                after: Some(3.0),
+            })
+        );
     }
 }
