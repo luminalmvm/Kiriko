@@ -260,6 +260,12 @@ impl egui_tiles::Behavior<Panel> for DockBehavior<'_> {
                     .shadow(t.card_shadow)
                     .inner_margin(t.card_padding)
                     .show(ui, |ui| {
+                        // A Frame sizes to its content, so a panel that draws
+                        // little (an empty Project, a Scopes/Effect-controls
+                        // hint) would leave a short card. Claim the whole
+                        // tile up front so every card is as tall as the pane
+                        // it fills — the Viewer's height, not its content's.
+                        ui.set_min_size(ui.available_size());
                         if self.bare_tiles.contains(&tile_id) {
                             self.bare_pane_ui(ui, tile_id, pane);
                         } else {
@@ -343,13 +349,19 @@ impl egui_tiles::Behavior<Panel> for DockBehavior<'_> {
         }
     }
 
-    // Rerun-style panel chrome (K-084): the tab bar sits one surface step above
-    // the panel; the active tab takes the panel's own fill so it reads as part
-    // of the content below; inactive tabs melt into the bar until hovered.
+    // The tab bar's own background. Sharp keeps the rerun-style step above the
+    // panel (surface_2); Round paints it the canvas colour (surface_0) so the
+    // pill tabs read as floating chips in a strip separated from the body card
+    // below (owner request, the SVG's "bar with a pill, apart from the panel").
     fn tab_bar_color(&self, _visuals: &egui::Visuals) -> egui::Color32 {
-        self.theme.surface_2
+        match self.theme.shape {
+            crate::theme::ThemeShape::Sharp => self.theme.surface_2,
+            crate::theme::ThemeShape::Round => self.theme.surface_0,
+        }
     }
 
+    // Kept for the drag-ghost preview, which egui_tiles paints from these
+    // rather than through our `tab_ui` (so the floating tab stays on-theme).
     fn tab_bg_color(
         &self,
         _visuals: &egui::Visuals,
@@ -376,6 +388,66 @@ impl egui_tiles::Behavior<Panel> for DockBehavior<'_> {
         } else {
             self.theme.text_muted
         }
+    }
+
+    // Panel tabs render as rounded pills (owner request, matching the
+    // comp-name pills), themed and inset within the tab-bar strip so they read
+    // as chips rather than base-egui rectangles. Replaces the default
+    // `tab_ui`'s rectangle; drag/click behaviour is preserved exactly (the
+    // same `click_and_drag` interact and the drag-hide gap).
+    fn tab_ui(
+        &mut self,
+        tiles: &mut egui_tiles::Tiles<Panel>,
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        tile_id: egui_tiles::TileId,
+        state: &egui_tiles::TabState,
+    ) -> egui::Response {
+        let text = self.tab_title_for_tile(tiles, tile_id);
+        let font_id = egui::TextStyle::Button.resolve(ui.style());
+        let galley = text.into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, font_id);
+        let x_margin = 10.0;
+        let width = galley.size().x + 2.0 * x_margin;
+        let (_, tab_rect) = ui.allocate_space(egui::vec2(width, ui.available_height()));
+        let resp = ui
+            .interact(tab_rect, id, egui::Sense::click_and_drag())
+            .on_hover_cursor(egui::CursorIcon::Grab);
+        // While dragged, egui_tiles wants a gap here (the ghost floats
+        // separately) — so paint nothing, exactly like the default.
+        if ui.is_rect_visible(tab_rect) && !state.is_being_dragged {
+            let pill = tab_rect.shrink2(egui::vec2(2.0, 4.0));
+            let (fill, text_col, stroke) = if state.active {
+                (
+                    self.theme.surface_1,
+                    self.theme.text_primary,
+                    egui::Stroke::new(1.0_f32, self.theme.accent),
+                )
+            } else if resp.hovered() {
+                (
+                    self.theme.surface_3,
+                    self.theme.text_primary,
+                    egui::Stroke::new(1.0_f32, self.theme.hairline_strong),
+                )
+            } else {
+                (
+                    self.theme.surface_2,
+                    self.theme.text_muted,
+                    egui::Stroke::NONE,
+                )
+            };
+            ui.painter().rect(
+                pill,
+                self.theme.tokens.control_radius,
+                fill,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            let text_pos = egui::Align2::CENTER_CENTER
+                .align_size_within_rect(galley.size(), pill)
+                .min;
+            ui.painter().galley(text_pos, galley, text_col);
+        }
+        resp
     }
 
     fn simplification_options(&self) -> egui_tiles::SimplificationOptions {

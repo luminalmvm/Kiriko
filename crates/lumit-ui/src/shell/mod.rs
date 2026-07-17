@@ -1601,58 +1601,95 @@ impl Shell {
         // Tool strip: the pointer's mode (docs/07-UI-SPEC toolbar). Object
         // tools join as they land; today: navigation and mask drawing.
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            // Under Round the tools sit in their own rounded bar (owner
+            // request); under Sharp the wrap is transparent with no margin,
+            // so the row is pixel-identical to before.
+            let theme = self.theme;
+            let round = theme.shape == crate::theme::ThemeShape::Round;
+            let t = theme.tokens;
+            let wrap = egui::Frame::new()
+                .fill(if round {
+                    theme.surface_2
+                } else {
+                    egui::Color32::TRANSPARENT
+                })
+                .corner_radius(if round { t.control_radius } else { 0 })
+                .shadow(if round {
+                    t.card_shadow
+                } else {
+                    egui::Shadow::NONE
+                })
+                .inner_margin(if round {
+                    egui::Margin::symmetric(5, 2)
+                } else {
+                    egui::Margin::ZERO
+                });
+            if round {
+                ui.add_space(3.0);
+            }
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let tool = self.app.tool;
-                if icon_button(ui, &self.theme, Icon::Pointer, tool == ToolMode::Select)
-                    .on_hover_text("Select / move the view (V)")
-                    .clicked()
-                {
-                    self.app.tool = ToolMode::Select;
+                if round {
+                    ui.add_space(t.window_inset);
                 }
-                if icon_button(ui, &self.theme, Icon::Move, tool == ToolMode::Hand)
-                    .on_hover_text("Drag to pan the view (H)")
-                    .clicked()
-                {
-                    self.app.tool = ToolMode::Hand;
-                }
-                // The Shape button wears the current shape; right-click to switch.
-                let shape_icon = match self.app.shape_kind {
-                    ShapeKind::Rectangle => Icon::Rectangle,
-                    ShapeKind::Ellipse => Icon::Ellipse,
-                    ShapeKind::Star => Icon::Star,
-                };
-                let shape_resp = icon_button(ui, &self.theme, shape_icon, tool == ToolMode::Shape)
-                    .on_hover_text(format!(
-                        "Draw a {} mask — right-click to pick a shape (Q)",
-                        self.app.shape_kind.label().to_lowercase()
-                    ));
-                if shape_resp.clicked() {
-                    self.app.tool = ToolMode::Shape;
-                }
-                shape_resp.context_menu(|ui| {
-                    for kind in [ShapeKind::Rectangle, ShapeKind::Ellipse, ShapeKind::Star] {
-                        if ui
-                            .selectable_label(self.app.shape_kind == kind, kind.label())
+                wrap.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let tool = self.app.tool;
+                        if icon_button(ui, &theme, Icon::Pointer, tool == ToolMode::Select)
+                            .on_hover_text("Select / move the view (V)")
                             .clicked()
                         {
-                            self.app.shape_kind = kind;
-                            self.app.tool = ToolMode::Shape;
-                            ui.close_menu();
+                            self.app.tool = ToolMode::Select;
                         }
-                    }
+                        if icon_button(ui, &theme, Icon::Move, tool == ToolMode::Hand)
+                            .on_hover_text("Drag to pan the view (H)")
+                            .clicked()
+                        {
+                            self.app.tool = ToolMode::Hand;
+                        }
+                        // The Shape button wears the current shape; right-click to switch.
+                        let shape_icon = match self.app.shape_kind {
+                            ShapeKind::Rectangle => Icon::Rectangle,
+                            ShapeKind::Ellipse => Icon::Ellipse,
+                            ShapeKind::Star => Icon::Star,
+                        };
+                        let shape_resp =
+                            icon_button(ui, &theme, shape_icon, tool == ToolMode::Shape)
+                                .on_hover_text(format!(
+                                    "Draw a {} mask — right-click to pick a shape (Q)",
+                                    self.app.shape_kind.label().to_lowercase()
+                                ));
+                        if shape_resp.clicked() {
+                            self.app.tool = ToolMode::Shape;
+                        }
+                        shape_resp.context_menu(|ui| {
+                            for kind in [ShapeKind::Rectangle, ShapeKind::Ellipse, ShapeKind::Star]
+                            {
+                                if ui
+                                    .selectable_label(self.app.shape_kind == kind, kind.label())
+                                    .clicked()
+                                {
+                                    self.app.shape_kind = kind;
+                                    self.app.tool = ToolMode::Shape;
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        if icon_button(ui, &theme, Icon::Pen, tool == ToolMode::Pen)
+                            .on_hover_text(
+                                "Click points to draw a mask; click the first to close (G)",
+                            )
+                            .clicked()
+                        {
+                            self.app.tool = if tool == ToolMode::Pen {
+                                ToolMode::Select
+                            } else {
+                                ToolMode::Pen
+                            };
+                            self.app.pen_path.clear();
+                        }
+                    });
                 });
-                if icon_button(ui, &self.theme, Icon::Pen, tool == ToolMode::Pen)
-                    .on_hover_text("Click points to draw a mask; click the first to close (G)")
-                    .clicked()
-                {
-                    self.app.tool = if tool == ToolMode::Pen {
-                        ToolMode::Select
-                    } else {
-                        ToolMode::Pen
-                    };
-                    self.app.pen_path.clear();
-                }
             });
         });
         // Single-key tool shortcuts, ignored while a text field has focus.
@@ -2731,7 +2768,7 @@ mod dock_tests {
             behavior.resize_stroke(&style, egui_tiles::ResizeState::Idle),
             egui::Stroke::new(1.0_f32, behavior.tab_bar_color(&style.visuals))
         );
-        // tab_bar_color is untouched by shape either way.
+        // Sharp keeps the rerun-style tab-bar fill one step above the panel.
         assert_eq!(behavior.tab_bar_color(&style.visuals), sharp.surface_2);
 
         let round = crate::theme::Theme::for_settings(
@@ -2745,10 +2782,12 @@ mod dock_tests {
             behavior.resize_stroke(&style, egui_tiles::ResizeState::Idle),
             egui::Stroke::new(round.tokens.tile_gap, round.surface_0)
         );
+        // Under Round the tab bar takes the canvas colour so the pill tabs
+        // read as floating chips in a strip separated from the body card.
         assert_eq!(
             behavior.tab_bar_color(&style.visuals),
-            round.surface_2,
-            "tab_bar_color must stay the tab-bar fill, not the canvas, under Round too"
+            round.surface_0,
+            "Round tab bar should be the canvas colour so pills float in it"
         );
     }
 

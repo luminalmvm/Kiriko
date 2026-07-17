@@ -433,12 +433,15 @@ pub(crate) fn icon_button(
     icon: Icon,
     active: bool,
 ) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(28.0, 26.0), egui::Sense::click());
     let hovered = resp.hovered();
+    // The chip radius follows the theme (K-092) rather than a hardcoded 4px,
+    // so icon buttons round with everything else under the Round shape.
+    let radius = theme.tokens.control_radius;
     if active || hovered {
         ui.painter().rect_filled(
             rect.shrink(1.0),
-            4.0,
+            radius,
             if active {
                 theme.surface_3
             } else {
@@ -449,7 +452,7 @@ pub(crate) fn icon_button(
     if active {
         ui.painter().rect_stroke(
             rect.shrink(1.0),
-            4.0,
+            radius,
             egui::Stroke::new(1.0_f32, theme.accent),
             egui::StrokeKind::Inside,
         );
@@ -461,7 +464,9 @@ pub(crate) fn icon_button(
     } else {
         theme.text_secondary
     };
-    crate::icons::paint(ui.painter(), rect, icon, color, 1.5);
+    // Paint the glyph into an inset rect so it keeps breathing room from the
+    // chip edge instead of filling it corner-to-corner.
+    crate::icons::paint(ui.painter(), rect.shrink(6.0), icon, color, 1.5);
     resp
 }
 
@@ -673,17 +678,13 @@ pub(crate) fn comp_tab_strip(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
             // renders bare (K-086).
             let bg = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     for (id, name) in &tabs {
                         let is_active = active == Some(*id);
-                        let name_btn = ui.add(
-                            egui::Button::new(egui::RichText::new(trim_title(name)).small().color(
-                                if is_active {
-                                    theme.text_primary
-                                } else {
-                                    theme.text_secondary
-                                },
-                            ))
+                        // Name and close (×) share one rounded pill (owner
+                        // request): the Frame is the pill; the label inside
+                        // activates the tab, the × inside closes it.
+                        let pill = egui::Frame::new()
                             .fill(if is_active {
                                 theme.surface_3
                             } else {
@@ -696,23 +697,43 @@ pub(crate) fn comp_tab_strip(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                                 } else {
                                     theme.hairline
                                 },
-                            )),
-                        );
+                            ))
+                            .corner_radius(theme.tokens.control_radius)
+                            .inner_margin(egui::Margin::symmetric(7, 2))
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.x = 5.0;
+                                let name_resp = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(trim_title(name)).small().color(
+                                            if is_active {
+                                                theme.text_primary
+                                            } else {
+                                                theme.text_secondary
+                                            },
+                                        ),
+                                    )
+                                    .sense(egui::Sense::click())
+                                    .selectable(false),
+                                );
+                                let close_resp = ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("×")
+                                                .small()
+                                                .color(theme.text_muted),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .on_hover_text("Close this comp tab");
+                                (name_resp, close_resp)
+                            });
+                        let (name_resp, close_resp) = pill.inner;
                         // Re-clicking the active tab is a no-op (don't reset its
                         // playhead); only switching tabs re-activates.
-                        if name_btn.clicked() && !is_active {
+                        if name_resp.clicked() && !is_active {
                             activate = Some(*id);
                         }
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("×").small().color(theme.text_muted),
-                                )
-                                .frame(false),
-                            )
-                            .on_hover_text("Close this comp tab")
-                            .clicked()
-                        {
+                        if close_resp.clicked() {
                             close = Some(*id);
                         }
                     }
