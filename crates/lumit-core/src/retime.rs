@@ -133,11 +133,28 @@ pub enum Interpolation {
 /// Optical-flow parameters (docs/08-EFFECTS.md). Placeholder for now: the
 /// flow engine is future work, but the policy must already round-trip
 /// project files, so the shape exists with only the forward-compat map.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlowParams {
+    /// Compute flow fields at half working resolution (the fast default,
+    /// docs/08 §3.1 quality knob); false = full resolution.
+    #[serde(default = "default_true")]
+    pub half_resolution: bool,
     /// Unknown fields from newer Lumit versions (docs/10-FILE-FORMAT.md §1.1).
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Default for FlowParams {
+    fn default() -> Self {
+        Self {
+            half_resolution: true,
+            extra: serde_json::Map::new(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One point where two segments meet (or the curve starts/ends). Stores the

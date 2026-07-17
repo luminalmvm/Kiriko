@@ -302,6 +302,18 @@ fn feed_source(
             h.update(b"footage/");
             h.update(identity.as_bytes());
             h.update(&frame.to_le_bytes());
+            // A non-Nearest interpolation policy synthesises different
+            // in-between pixels (blend/flow, K-088), so it is content. Nearest
+            // shows exactly the stamped frame — pixel-identical to no retime —
+            // so it hashes nothing and those keys stay shared. (At an exactly
+            // integral position blend/flow also degenerate to the source
+            // frame; hashing them anyway over-segments harmlessly — a spare
+            // render, never a wrong pixel.)
+            if let Some(r) = retime {
+                if !matches!(r.interpolation, lumit_core::retime::Interpolation::Nearest) {
+                    h.update(&[interp_tag(&r.interpolation)]);
+                }
+            }
         }
         LayerKind::Solid { def } => match doc.solid(*def) {
             None => {
@@ -356,6 +368,14 @@ fn feed_source(
                     h.update(b"seq-footage/");
                     h.update(identity.as_bytes());
                     h.update(&frame.to_le_bytes());
+                    if let Some(clip) = lumit_core::sequence::active_clip(clips, lt) {
+                        if !matches!(
+                            clip.interpolation,
+                            lumit_core::retime::Interpolation::Nearest
+                        ) {
+                            h.update(&[interp_tag(&clip.interpolation)]);
+                        }
+                    }
                 }
                 Some((_id, lumit_core::sequence::ClipSource::Comp(comp), st)) => {
                     if visited.contains(&comp) {
@@ -382,6 +402,17 @@ fn feed_source(
         }
     }
     Some(())
+}
+
+/// Stable one-byte tag per frame-interpolation policy (never reuse a value).
+fn interp_tag(i: &lumit_core::retime::Interpolation) -> u8 {
+    use lumit_core::retime::Interpolation;
+    match i {
+        Interpolation::Nearest => 1,
+        Interpolation::Blend => 2,
+        Interpolation::Flow(p) if p.half_resolution => 3,
+        Interpolation::Flow(_) => 4,
+    }
 }
 
 fn feed_f64(h: &mut blake3::Hasher, v: f64) {
@@ -755,6 +786,45 @@ mod tests {
         assert_eq!(k(&half, 2.0), k(&plain, 1.0));
         // and differs from plain at t=2 (source 2.0).
         assert_ne!(k(&half, 2.0), k(&plain, 2.0));
+    }
+
+    /// The frame-interpolation policy is content only when it synthesises
+    /// (K-088): Nearest keys identically to no retime at the same source
+    /// frame, while Blend and Flow (and Flow's quality) each key apart.
+    #[test]
+    fn interpolation_policy_keys_only_when_it_synthesises() {
+        use lumit_core::retime::{FlowParams, Interpolation, Retime};
+        use lumit_core::time::Rational;
+        let doc = Document::new();
+        let item = Uuid::now_v7();
+        let footage = |interp: Option<Interpolation>| {
+            let mut l = text_layer("", 0.0, 10.0, 0.0);
+            let retime = interp.map(|i| {
+                let mut r = Retime::constant_speed(
+                    Rational::new(10, 1).unwrap(),
+                    Rational::ZERO,
+                    Rational::ONE,
+                );
+                r.interpolation = i;
+                r
+            });
+            l.kind = LayerKind::Footage { item, retime };
+            comp_with(vec![l])
+        };
+        let k = |c: &Composition| {
+            comp_frame_key(&doc, c, 1.0, Quality::default(), &StubStamper).unwrap()
+        };
+        let plain = k(&footage(None));
+        assert_eq!(plain, k(&footage(Some(Interpolation::Nearest))));
+        let blend = k(&footage(Some(Interpolation::Blend)));
+        assert_ne!(plain, blend);
+        let half = k(&footage(Some(Interpolation::Flow(FlowParams::default()))));
+        let full = k(&footage(Some(Interpolation::Flow(FlowParams {
+            half_resolution: false,
+            extra: serde_json::Map::new(),
+        }))));
+        assert_ne!(blend, half);
+        assert_ne!(half, full);
     }
 
     /// A Sequence layer keys the active clip's source frame; a gap keys

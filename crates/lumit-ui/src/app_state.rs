@@ -61,6 +61,8 @@ pub mod preview {
         /// When true, `blend`'s pair is combined with optical-flow synthesis
         /// rather than a plain crossfade (K-021 Flow policy).
         pub flow: bool,
+        /// Full-resolution flow fields (FlowParams.half_resolution = false).
+        pub flow_full: bool,
     }
 
     pub struct CompLayerPixels {
@@ -276,14 +278,20 @@ pub mod preview {
                 };
                 let px2 = decode(decoders, cache, &req2)?;
                 if job.flow {
+                    let quality = if job.flow_full {
+                        lumit_flow::FlowQuality::Full
+                    } else {
+                        lumit_flow::FlowQuality::Half
+                    };
                     flow_engine
                         .get_or_insert_with(lumit_flow::FlowEngine::new_auto)
-                        .interpolate(
+                        .interpolate_at(
                             &px.rgba,
                             &px2.rgba,
                             px.width as usize,
                             px.height as usize,
                             w,
+                            quality,
                         )
                 } else {
                     crate::pixels::blend_rgba(&px.rgba, &px2.rgba, w)
@@ -2819,6 +2827,10 @@ impl AppState {
                                     Some(Interpolation::Blend | Interpolation::Flow(_))
                                 );
                                 let flow = matches!(interp, Some(Interpolation::Flow(_)));
+                                let flow_full = matches!(
+                                    &interp,
+                                    Some(Interpolation::Flow(p)) if !p.half_resolution
+                                );
                                 let (source_frame, blend) = crate::pixels::frame_pick(
                                     st,
                                     video.fps(),
@@ -2835,6 +2847,7 @@ impl AppState {
                                     natural_h: video.height,
                                     blend,
                                     flow,
+                                    flow_full,
                                 });
                             }
                         }
@@ -2873,6 +2886,8 @@ impl AppState {
                     let blend_on =
                         matches!(interp, Some(Interpolation::Blend | Interpolation::Flow(_)));
                     let flow = matches!(interp, Some(Interpolation::Flow(_)));
+                    let flow_full =
+                        matches!(interp, Some(Interpolation::Flow(p)) if !p.half_resolution);
                     let (source_frame, blend) =
                         crate::pixels::frame_pick(source_time, video.fps(), *src_frames, blend_on);
                     jobs.push(preview::CompJob {
@@ -2885,6 +2900,7 @@ impl AppState {
                         natural_h: video.height,
                         blend,
                         flow,
+                        flow_full,
                     });
                 }
             }
