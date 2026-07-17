@@ -20,6 +20,8 @@
 //! synthesis step falls back to a plain crossfade wherever both frames lost
 //! sight of a pixel (the documented graceful degradation).
 
+pub mod gpu;
+
 /// Patch side in pixels (impl note §1: 8×8 patches).
 pub(crate) const PATCH: usize = 8;
 /// Patch grid stride (impl note §1: stride-4 grid).
@@ -813,6 +815,89 @@ pub fn interpolate(a: &[u8], b: &[u8], w: usize, h: usize, phi: f32) -> Vec<u8> 
     interpolate_at(a, b, w, h, phi, FlowQuality::Half)
 }
 
+/// The backend-choosing engine callers hold on to: WGSL DIS on a GPU when one
+/// is available, the CPU oracle otherwise. A GPU failure mid-flight degrades
+/// permanently to CPU for this engine — never a fault (the K-018 spirit:
+/// device trouble costs speed, not the frame).
+pub struct FlowEngine {
+    gpu: Option<gpu::GpuFlow>,
+}
+
+impl FlowEngine {
+    /// Try for a GPU of our own (headless); fall back to CPU quietly.
+    pub fn new_auto() -> Self {
+        match lumit_gpu::GpuContext::headless() {
+            Ok(ctx) => Self::with_context(&ctx),
+            Err(_) => Self::cpu(),
+        }
+    }
+
+    /// Share an existing device (the app's). Falls back to CPU if the flow
+    /// pipelines cannot be built on it.
+    pub fn with_context(ctx: &lumit_gpu::GpuContext) -> Self {
+        FlowEngine {
+            gpu: gpu::GpuFlow::new(ctx).ok(),
+        }
+    }
+
+    /// CPU only (tests, or by explicit choice).
+    pub fn cpu() -> Self {
+        FlowEngine { gpu: None }
+    }
+
+    /// Which backend this engine currently uses.
+    pub fn backend(&self) -> &'static str {
+        if self.gpu.is_some() {
+            "dis-gpu"
+        } else {
+            "dis-cpu"
+        }
+    }
+
+    /// Both flow directions at the frames' own resolution, on whichever
+    /// backend is live.
+    pub fn flow_pair(&mut self, a: &Gray, b: &Gray) -> (FlowField, FlowField) {
+        if let Some(g) = self.gpu.as_mut() {
+            match g.flow_pair(a, b) {
+                Ok(pair) => return pair,
+                Err(_) => self.gpu = None, // degrade to CPU from here on
+            }
+        }
+        flow_pair(a, b)
+    }
+
+    /// The flow-interpolated frame at `phi`, at the given working quality.
+    pub fn interpolate_at(
+        &mut self,
+        a: &[u8],
+        b: &[u8],
+        w: usize,
+        h: usize,
+        phi: f32,
+        quality: FlowQuality,
+    ) -> Vec<u8> {
+        if phi <= 0.0 {
+            return a.to_vec();
+        }
+        if phi >= 1.0 {
+            return b.to_vec();
+        }
+        let (ga, gb, halved) = grays_at(a, b, w, h, quality);
+        let (fwd, bwd) = self.flow_pair(&ga, &gb);
+        let (fwd, bwd) = if halved {
+            (upsample_field(&fwd, w, h), upsample_field(&bwd, w, h))
+        } else {
+            (fwd, bwd)
+        };
+        synthesize(a, b, w, h, &fwd, &bwd, phi)
+    }
+
+    /// Default-quality interpolation (half working resolution).
+    pub fn interpolate(&mut self, a: &[u8], b: &[u8], w: usize, h: usize, phi: f32) -> Vec<u8> {
+        self.interpolate_at(a, b, w, h, phi, FlowQuality::Half)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 pub(crate) mod testutil {
@@ -1122,5 +1207,165 @@ mod tests {
         assert_eq!(f1.valid, f2.valid);
         assert_eq!(g1.u, g2.u);
         assert_eq!(g1.v, g2.v);
+    }
+
+    // ---- The WGSL backend against the CPU oracle (impl note §6.5) ----
+
+    fn gpu_flow() -> Option<gpu::GpuFlow> {
+        let Ok(ctx) = lumit_gpu::GpuContext::headless() else {
+            eprintln!("skipping: no GPU adapter available");
+            return None;
+        };
+        match gpu::GpuFlow::new(&ctx) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                eprintln!("skipping: flow pipelines failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Mean absolute difference between two fields, per component.
+    fn mean_abs_diff(a: &FlowField, b: &FlowField) -> f32 {
+        let n = a.u.len();
+        let mut sum = 0f64;
+        for i in 0..n {
+            sum += f64::from((a.u[i] - b.u[i]).abs()) + f64::from((a.v[i] - b.v[i]).abs());
+        }
+        (sum / (2 * n) as f64) as f32
+    }
+
+    /// The CPU implementation is the oracle: the WGSL backend must match it
+    /// within 1e-3 on the analytic scenes (impl note §6.5).
+    #[test]
+    fn gpu_matches_the_cpu_oracle() {
+        let Some(mut g) = gpu_flow() else { return };
+        let (w, h) = (192, 160);
+        // Translation and rotation, same scenes the CPU tests use.
+        let scenes = [
+            (
+                render(w, h, |x, y| perlin(x, y, 1)),
+                render(w, h, |x, y| perlin(x - 7.3, y - 3.9, 1)),
+            ),
+            (
+                render(w, h, |x, y| perlin(x, y, 2)),
+                render(w, h, |x, y| {
+                    let (rx, ry) = (x - 95.5, y - 79.5);
+                    let ang = 4.0f32.to_radians();
+                    perlin(
+                        95.5 + ang.cos() * rx + ang.sin() * ry,
+                        79.5 - ang.sin() * rx + ang.cos() * ry,
+                        2,
+                    )
+                }),
+            ),
+        ];
+        for (i, (a, b)) in scenes.iter().enumerate() {
+            let (cf, cg) = flow_pair(a, b);
+            let (gf, gg) = g.flow_pair(a, b).unwrap();
+            let (df, dg) = (mean_abs_diff(&cf, &gf), mean_abs_diff(&cg, &gg));
+            assert!(df < 1e-3, "scene {i}: fwd CPU/GPU diff {df}");
+            assert!(dg < 1e-3, "scene {i}: bwd CPU/GPU diff {dg}");
+            let same_valid = cf
+                .valid
+                .iter()
+                .zip(&gf.valid)
+                .filter(|(a, b)| a == b)
+                .count();
+            assert!(
+                same_valid as f64 / cf.valid.len() as f64 > 0.999,
+                "scene {i}: validity masks diverge"
+            );
+        }
+    }
+
+    /// Same inputs → same flow on the GPU too, bit for bit against itself.
+    #[test]
+    fn gpu_flow_is_deterministic() {
+        let Some(mut g) = gpu_flow() else { return };
+        let (w, h) = (160, 128);
+        let a = render(w, h, |x, y| perlin(x, y, 9));
+        let b = render(w, h, |x, y| perlin(x - 5.2, y + 3.4, 9));
+        let (f1, g1) = g.flow_pair(&a, &b).unwrap();
+        let (f2, g2) = g.flow_pair(&a, &b).unwrap();
+        assert_eq!(f1.u, f2.u);
+        assert_eq!(f1.v, f2.v);
+        assert_eq!(f1.valid, f2.valid);
+        assert_eq!(g1.u, g2.u);
+        assert_eq!(g1.v, g2.v);
+    }
+
+    /// The engine degrades, interpolates, and honours the endpoint contract
+    /// whichever backend it holds.
+    #[test]
+    fn engine_interpolates_on_any_backend() {
+        let mut eng = FlowEngine::new_auto();
+        eprintln!("engine backend: {}", eng.backend());
+        let (w, h) = (96, 96);
+        let a = vec![40u8; w * h * 4];
+        let b = vec![200u8; w * h * 4];
+        assert_eq!(eng.interpolate(&a, &b, w, h, 0.0), a);
+        assert_eq!(eng.interpolate(&a, &b, w, h, 1.0), b);
+        let mid = eng.interpolate(&a, &b, w, h, 0.5);
+        assert_eq!(mid.len(), w * h * 4);
+        // A CPU-only engine must behave identically to the free function.
+        let mut cpu = FlowEngine::cpu();
+        assert_eq!(cpu.backend(), "dis-cpu");
+        assert_eq!(
+            cpu.interpolate(&a, &b, w, h, 0.5),
+            interpolate(&a, &b, w, h, 0.5)
+        );
+    }
+
+    /// Perf numbers (impl note §6.5: flow pair ≤ 4 ms at half-res 1080p on
+    /// the reference GPU). Run by hand:
+    /// `cargo test -p lumit-flow --release bench_flow -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual benchmark; prints timings"]
+    fn bench_flow_1080p() {
+        let Some(mut g) = gpu_flow() else { return };
+        // 1080p at the default Half working quality = 960×540 flow fields.
+        let (w, h) = (960, 540);
+        let a = render(w, h, |x, y| perlin(x, y, 3));
+        let b = render(w, h, |x, y| perlin(x - 9.7, y + 4.3, 3));
+        for _ in 0..3 {
+            let _ = g.flow_pair(&a, &b); // warm-up (plan + pipeline caches)
+        }
+        let runs = 20;
+        let t0 = std::time::Instant::now();
+        for _ in 0..runs {
+            let _ = g.flow_pair(&a, &b);
+        }
+        let per_pair = t0.elapsed() / runs;
+        eprintln!("gpu flow pair (960x540): {per_pair:?}");
+
+        let t0 = std::time::Instant::now();
+        let _ = flow_pair(&a, &b);
+        eprintln!("cpu flow pair (960x540): {:?}", t0.elapsed());
+
+        // End-to-end 1080p interpolate (gray + halve + flow + synthesis).
+        let px = |g: &Gray| -> Vec<u8> {
+            let mut f = vec![0u8; g.w * g.h * 4];
+            for i in 0..g.w * g.h {
+                let v = (g.data[i] * 255.0).round().clamp(0.0, 255.0) as u8;
+                f[i * 4] = v;
+                f[i * 4 + 1] = v;
+                f[i * 4 + 2] = v;
+                f[i * 4 + 3] = 255;
+            }
+            f
+        };
+        let (fw, fh) = (1920, 1080);
+        let fa = px(&render(fw, fh, |x, y| perlin(x, y, 4)));
+        let fb = px(&render(fw, fh, |x, y| perlin(x - 9.7, y + 4.3, 4)));
+        let mut eng = FlowEngine::new_auto();
+        eprintln!("engine backend: {}", eng.backend());
+        let _ = eng.interpolate(&fa, &fb, fw, fh, 0.5); // warm-up
+        let t0 = std::time::Instant::now();
+        let _ = eng.interpolate(&fa, &fb, fw, fh, 0.5);
+        eprintln!(
+            "end-to-end 1080p interpolate at phi 0.5: {:?}",
+            t0.elapsed()
+        );
     }
 }

@@ -145,10 +145,19 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   of rubber-sheeting. Pixels visible in only one frame (things being covered or revealed —
   where slow-mo artefacts live) are found by checking the two directions of motion against
   each other, and the synthesis quietly falls back to a plain crossfade wherever both frames
-  lost sight of something. The whole thing is a pure, deterministic CPU implementation — the
-  "oracle" the fast GPU version must match — tested against scenes with mathematically known
-  motion (translations, rotations, checkerboards, a sliding square's occlusion) and against a
-  plain crossfade (sharper on textured motion). The
+  lost sight of something. It ships as **two backends behind one door**: a pure, deterministic
+  CPU implementation — the "oracle", also the export path on machines with no usable GPU
+  (K-019) — and a GPU compute version (`gpu.rs` + `dis.wgsl`) that runs the identical
+  algorithm as shader code, thousands of patches at once instead of one after another. The
+  shader mirrors the CPU maths operation for operation, and a test holds the two to agreeing
+  within a thousandth of a pixel; another proves the GPU gives bit-identical answers run to
+  run. Callers hold a `FlowEngine`, which picks the GPU when one is available and quietly
+  drops to the CPU if anything about the GPU ever fails — flow never crashes a preview, it
+  just slows down. On the dev machine the GPU solves a 1080p flow pair in about 4 ms where
+  the CPU takes about 400 ms — the difference between slow-motion preview being usable and
+  not. Both are tested against scenes with mathematically known motion (translations,
+  rotations, checkerboards, a sliding square's occlusion) and against a plain crossfade
+  (sharper on textured motion). The
   frame-pick and each interpolation are shared functions used by *both* preview and export, so a
   slow-mo frame is identical in each — the preview-equals-export promise holds for interpolation
   too. The same Frames toggle appears per-clip on Sequence layers (next to Clip speed %), so a

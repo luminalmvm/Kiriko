@@ -40,7 +40,9 @@ selects), then box-downsample ×2 per level to ~24 px min dimension (≈ 5 level
 half res). Any deeper and the 8×8 patches are frame-scale: every patch straddles every
 motion boundary and whole strips of the coarsest field start as garbage the finer levels
 cannot always heal (measured in the §6.1 occlusion test; originally ~16 px).
-Also build Sobel gradient textures per level (Rg16Float: dx, dy).
+Also build Sobel gradients per level (v1: f32 storage buffers throughout, not fp16
+textures — fp16 rounding would eat the §6.5 CPU-parity budget; textures return when
+synthesis itself moves GPU-side).
 
 **Per level, coarse → fine:**
 
@@ -75,7 +77,16 @@ Also build Sobel gradient textures per level (Rg16Float: dx, dy).
    measure first; it is the difference between 2 ms and 10 ms and mostly helps large
    untextured regions, rare in game footage.
 
-**Output**: `Rg16Float` flow texture at working res, plus a validity mask (R8) from step 2.
+**Output**: the dense flow at working res plus a per-pixel validity mask (v1: one f32
+storage buffer read back to the CPU, since synthesis still runs there; `Rg16Float`
+texture + R8 mask when the GPU-resident synthesis path lands).
+
+**Kernel shape (v1)**: one *thread* per patch rather than one workgroup — the sums then
+run in the same sequential order as the CPU oracle (which makes the §6.5 parity bound
+meaningful), the WGSL needs no shared-memory/uniformity choreography, and the whole
+search is far inside budget (measured ~4 ms per 960×540 flow *pair* including readback
+on the dev RTX). Revisit workgroup-per-patch with shared memory only if profiling ever
+says the search dominates.
 
 ## 2. Occlusion: forward–backward consistency
 
