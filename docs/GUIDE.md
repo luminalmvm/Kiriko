@@ -112,6 +112,16 @@ Two mechanisms make this safe, and you'll see them by name in the code:
 - `crates/lumit-core/src/model.rs` — **What a project is.** Structs for the document,
   comps, layers, footage items. Each has an `extra` field that preserves anything a future
   Lumit version adds — so old and new versions can share project files.
+- **Blur grows a Directional mode.** The Blur effect now has a Mode switch: *Gaussian*
+  (the soft circular blur it has always been) or *Directional* — a streak along an
+  angle, the speed-line look. Under the hood directional blur is a *line integral*:
+  for each pixel, the kernel walks a short line through it (Length long, pointing
+  along Angle), samples the image at evenly spaced points on that line, and averages
+  them — as if the image slid past an open shutter in that direction. The two modes
+  are separate GPU programs, so adding Directional changed nothing about Gaussian:
+  the original blur maths, and the test that pins them to the CPU reference, are
+  byte-for-byte what they were. Old projects saved before the switch existed simply
+  read as Gaussian. (The third §3.8 mode, Radial spin/zoom, is still to come.)
 - **Grade (first stage).** The colour-correction engine begins: lift / gamma / gain per
   channel plus saturation — the trackball grammar every colourist tool shares. *Gain*
   multiplies (brightens everything proportionally), *lift* adds (raises the blacks —

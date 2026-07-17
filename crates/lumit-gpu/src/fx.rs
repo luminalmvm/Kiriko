@@ -21,6 +21,37 @@ pub struct BlurOp {
     pub mix: f32,
 }
 
+/// One resolved directional blur (docs/08 §3.8): a line integral along a
+/// host-computed unit direction. `taps` must equal
+/// `lumit_core::fx::cpu::dir_blur_taps(length_px)` so the GPU dispatches
+/// the oracle's exact kernel size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DirBlurOp {
+    /// Unit streak direction (host-computed cos/sin).
+    pub dx: f32,
+    pub dy: f32,
+    /// Full streak length, raster pixels.
+    pub length_px: f32,
+    /// Evenly spaced bilinear taps across the streak.
+    pub taps: i32,
+    /// 0 = Transparent, 1 = Repeat, 2 = Mirror.
+    pub edge: u32,
+    /// 0..1, blended against the unprocessed input.
+    pub mix: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DirBlurParams {
+    dx: f32,
+    dy: f32,
+    length: f32,
+    taps: i32,
+    edge: u32,
+    mix_amt: f32,
+    _pad: [f32; 2],
+}
+
 /// One resolved sharpen (docs/08 §3.9), amounts already fractional and the
 /// gaussian radius already in raster pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -132,6 +163,7 @@ struct GradeParams {
 /// device (owned alongside the Compositor by whoever renders).
 pub struct FxEngine {
     blur: wgpu::ComputePipeline,
+    dir_blur: wgpu::ComputePipeline,
     sharpen_unpremultiply: wgpu::ComputePipeline,
     sharpen_combine: wgpu::ComputePipeline,
     rgb_split: wgpu::ComputePipeline,
@@ -197,11 +229,13 @@ impl FxEngine {
                 })
         };
         let blur_mod = module(include_str!("fx_blur.wgsl"), "fx-blur");
+        let dir_blur_mod = module(include_str!("fx_dirblur.wgsl"), "fx-dir-blur");
         let sharpen_mod = module(include_str!("fx_sharpen.wgsl"), "fx-sharpen");
         let rgb_split_mod = module(include_str!("fx_rgbsplit.wgsl"), "fx-rgb-split");
         let flash_mod = module(include_str!("fx_flash.wgsl"), "fx-flash");
         let grade_mod = module(include_str!("fx_grade.wgsl"), "fx-grade");
         let blur = pipeline(&blur_mod, "fx-blur", "blur_pass");
+        let dir_blur = pipeline(&dir_blur_mod, "fx-dir-blur", "dir_blur");
         let sharpen_unpremultiply = pipeline(&sharpen_mod, "fx-sharpen-un", "unpremultiply");
         let sharpen_combine = pipeline(&sharpen_mod, "fx-sharpen", "sharpen_combine");
         let rgb_split = pipeline(&rgb_split_mod, "fx-rgb-split", "rgb_split");
@@ -209,6 +243,7 @@ impl FxEngine {
         let grade = pipeline(&grade_mod, "fx-grade", "grade");
         Self {
             blur,
+            dir_blur,
             sharpen_unpremultiply,
             sharpen_combine,
             rgb_split,
@@ -263,6 +298,39 @@ impl FxEngine {
                 dir: [0.0, 1.0],
                 radius: op.radius_px,
                 sigma,
+                edge: op.edge,
+                mix_amt: op.mix,
+                _pad: [0.0; 2],
+            }),
+        );
+        out
+    }
+
+    /// Apply one directional blur (docs/08 §3.8) to a linear working
+    /// texture, returning a new texture of the same size. One pass: a
+    /// box-weighted line integral of bilinear taps along the unit direction.
+    pub fn dir_blur(
+        &self,
+        ctx: &GpuContext,
+        src: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        op: &DirBlurOp,
+    ) -> wgpu::Texture {
+        let out = work_texture(ctx, w, h, "fx-dir-blur-out");
+        self.dispatch(
+            ctx,
+            &self.dir_blur,
+            src,
+            src,
+            &out,
+            w,
+            h,
+            bytemuck::bytes_of(&DirBlurParams {
+                dx: op.dx,
+                dy: op.dy,
+                length: op.length_px,
+                taps: op.taps,
                 edge: op.edge,
                 mix_amt: op.mix,
                 _pad: [0.0; 2],
@@ -951,6 +1019,56 @@ mod tests {
             let out2 = fx.grade(&ctx, &tex, w, h, &op);
             let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
             assert_eq!(gpu, gpu2, "GPU grade must be bit-stable");
+        }
+    }
+
+    /// The §1.6 oracle for the directional blur mode: WGSL agrees with the
+    /// CPU reference on the corpus per edge policy, and is bit-stable
+    /// (§2.4). Both sides accumulate the same taps in f32 from the same
+    /// fp16-quantised input, so the bound is tight even for this
+    /// moderate-class kernel; the gaussian mode's own oracle is untouched
+    /// above (same kernel, byte-identical maths).
+    #[test]
+    fn wgsl_dir_blur_matches_the_cpu_oracle() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        let img = corpus(w, h);
+        for edge in [0u32, 1, 2] {
+            for (length, angle, mix) in
+                [(6.0f32, 0.0f32, 1.0f32), (9.5, 33.0, 0.6), (0.0, 90.0, 1.0)]
+            {
+                let mut cpu = img.clone();
+                lumit_core::fx::cpu::blur_directional(&mut cpu, w, h, length, angle, edge, mix);
+
+                let (dx, dy) = lumit_core::fx::rgb_split_offset(1.0, angle);
+                let tex = upload_linear_f32(&ctx, &img, w, h);
+                let op = DirBlurOp {
+                    dx,
+                    dy,
+                    length_px: length,
+                    taps: lumit_core::fx::cpu::dir_blur_taps(length),
+                    edge,
+                    mix,
+                };
+                let out = fx.dir_blur(&ctx, &tex, w, h, &op);
+                let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+
+                let worst = worst_f16_ulp(&cpu, &gpu);
+                eprintln!("dir blur e={edge} l={length} a={angle}: worst {worst} ulp");
+                assert!(
+                    worst <= 2,
+                    "edge {edge} length {length} angle {angle} mix {mix}: \
+                     worst {worst} fp16 ULP"
+                );
+
+                let out2 = fx.dir_blur(&ctx, &tex, w, h, &op);
+                let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
+                assert_eq!(gpu, gpu2, "GPU directional blur must be bit-stable");
+            }
         }
     }
 }

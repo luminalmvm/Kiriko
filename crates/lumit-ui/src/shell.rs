@@ -7781,6 +7781,28 @@ impl GpuViewer {
                                 },
                             );
                         }
+                        lumit_core::fx::Resolved::DirBlur {
+                            length_px,
+                            angle_deg,
+                            edge,
+                            mix,
+                        } => {
+                            let (dx, dy) = lumit_core::fx::rgb_split_offset(1.0, *angle_deg);
+                            tex = self.fx.dir_blur(
+                                &self.ctx,
+                                &tex,
+                                w,
+                                h,
+                                &lumit_gpu::fx::DirBlurOp {
+                                    dx,
+                                    dy,
+                                    length_px: *length_px,
+                                    taps: lumit_core::fx::cpu::dir_blur_taps(*length_px),
+                                    edge: *edge,
+                                    mix: *mix,
+                                },
+                            );
+                        }
                         lumit_core::fx::Resolved::Sharpen {
                             amount,
                             radius_px,

@@ -115,19 +115,34 @@ const MIX_PARAM: ParamSchema = ParamSchema {
 /// The catalogue. Grows one entry per landed effect; the schema is the single
 /// source of truth the UI menu, instantiation and resolution all read.
 pub const BUILTINS: &[EffectSchema] = &[
+    // One blur, several modes (docs/08 §3.8): Gaussian (separable two-pass)
+    // and Directional (line-integral streak along an angle); Radial follows.
+    // Mode selects which extra parameters matter — Radius drives Gaussian,
+    // Length/Angle drive Directional. Instances saved before the mode
+    // existed resolve as Gaussian, and the gaussian maths are untouched by
+    // the other modes (same kernel, same version).
     EffectSchema {
         match_name: "blur",
         label: "Blur",
         version: 1,
         traits: EffectTraits {
             cost: CostClass::Moderate,
-            roi: Roi::PaddedPctDiag(25.0),
+            // The largest slider across modes (Directional length, 50).
+            roi: Roi::PaddedPctDiag(50.0),
             temporal: &[0],
             premultiplied: true,
             seeded: false,
             beat_input: false,
         },
         params: &[
+            ParamSchema {
+                id: "mode",
+                label: "Mode",
+                kind: ParamKind::Choice {
+                    options: &["Gaussian", "Directional"],
+                    default: 0,
+                },
+            },
             ParamSchema {
                 id: "radius",
                 label: "Radius",
@@ -137,6 +152,26 @@ pub const BUILTINS: &[EffectSchema] = &[
                     default: 1.5,
                     slider: (0.0, 25.0),
                     hard: (0.0, 100.0),
+                },
+            },
+            ParamSchema {
+                id: "length",
+                label: "Length",
+                // Directional mode: the full streak length, % diag (§2.3).
+                kind: ParamKind::Float {
+                    default: 10.0,
+                    slider: (0.0, 50.0),
+                    hard: (0.0, 100.0),
+                },
+            },
+            ParamSchema {
+                id: "angle",
+                label: "Angle",
+                // Directional mode: streak direction, degrees (0° = +x).
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-180.0, 180.0),
+                    hard: (-3600.0, 3600.0),
                 },
             },
             ParamSchema {
@@ -429,6 +464,16 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
+    DirBlur {
+        /// Full streak length in raster pixels.
+        length_px: f32,
+        /// Streak direction, degrees (0° = +x, y-down raster).
+        angle_deg: f32,
+        /// 0 = Transparent, 1 = Repeat, 2 = Mirror.
+        edge: u32,
+        /// 0..1.
+        mix: f32,
+    },
     Sharpen {
         /// Fraction of the detail signal added back (0..3 = 0–300%).
         amount: f32,
@@ -524,17 +569,34 @@ pub fn resolve_stack(effects: &[EffectInstance], lt: f64, diag_px: f32) -> Vec<R
         .filter(|e| e.enabled && e.effect.namespace == EffectNamespace::Builtin)
         .filter_map(|e| match e.effect.match_name.as_str() {
             "blur" => {
-                let radius_pct = e.float_at("radius", lt)? as f32;
                 let edge = match e.param("edge") {
                     Some(EffectValue::Choice(c)) => (*c).min(2),
                     _ => 1,
                 };
                 let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Blur {
-                    radius_px: (radius_pct / 100.0 * diag_px).max(0.0),
-                    edge,
-                    mix,
-                })
+                // Instances saved before the mode existed carry no "mode"
+                // parameter and resolve as Gaussian.
+                let mode = match e.param("mode") {
+                    Some(EffectValue::Choice(c)) => *c,
+                    _ => 0,
+                };
+                if mode == 1 {
+                    let length_pct = e.float_at("length", lt).unwrap_or(0.0) as f32;
+                    let angle_deg = e.float_at("angle", lt).unwrap_or(0.0) as f32;
+                    Some(Resolved::DirBlur {
+                        length_px: (length_pct / 100.0 * diag_px).max(0.0),
+                        angle_deg,
+                        edge,
+                        mix,
+                    })
+                } else {
+                    let radius_pct = e.float_at("radius", lt)? as f32;
+                    Some(Resolved::Blur {
+                        radius_px: (radius_pct / 100.0 * diag_px).max(0.0),
+                        edge,
+                        mix,
+                    })
+                }
             }
             "sharpen" => {
                 let amount = (e.float_at("amount", lt)? as f32 / 100.0).clamp(0.0, 3.0);
@@ -619,6 +681,12 @@ pub mod cpu {
                 edge,
                 mix,
             } => blur_gaussian(rgba, w, h, *radius_px, *edge, *mix),
+            Resolved::DirBlur {
+                length_px,
+                angle_deg,
+                edge,
+                mix,
+            } => blur_directional(rgba, w, h, *length_px, *angle_deg, *edge, *mix),
             Resolved::Sharpen {
                 amount,
                 radius_px,
@@ -882,6 +950,83 @@ pub mod cpu {
                 Some(m.clamp(0, len - 1))
             }
             _ => None, // transparent
+        }
+    }
+
+    /// The directional blur's tap count for a streak length in pixels —
+    /// shared with the GPU op construction so both paths dispatch the same
+    /// kernel size (§1.6).
+    pub fn dir_blur_taps(length_px: f32) -> i32 {
+        (length_px.ceil() as i32).clamp(1, 511)
+    }
+
+    /// Bilinear sample under a blur edge policy: out-of-frame taps repeat or
+    /// mirror per axis, or read as transparent (contributing nothing while
+    /// keeping full weight, exactly like the gaussian's normalisation).
+    fn bilinear_edge(rgba: &[f32], w: u32, h: u32, sx: f32, sy: f32, edge: u32) -> [f32; 4] {
+        let fx = sx - 0.5;
+        let fy = sy - 0.5;
+        let x0 = fx.floor();
+        let y0 = fy.floor();
+        let tx = fx - x0;
+        let ty = fy - y0;
+        let (wi, hi) = (w as i64, h as i64);
+        let at = |x: i64, y: i64| match (edge_index(x, wi, edge), edge_index(y, hi, edge)) {
+            (Some(x), Some(y)) => {
+                let s = ((y * wi + x) * 4) as usize;
+                [rgba[s], rgba[s + 1], rgba[s + 2], rgba[s + 3]]
+            }
+            _ => [0.0; 4],
+        };
+        let (x0, y0) = (x0 as i64, y0 as i64);
+        let c00 = at(x0, y0);
+        let c10 = at(x0 + 1, y0);
+        let c01 = at(x0, y0 + 1);
+        let c11 = at(x0 + 1, y0 + 1);
+        let mut out = [0.0f32; 4];
+        for c in 0..4 {
+            let top = c00[c] * (1.0 - tx) + c10[c] * tx;
+            let bottom = c01[c] * (1.0 - tx) + c11[c] * tx;
+            out[c] = top * (1.0 - ty) + bottom * ty;
+        }
+        out
+    }
+
+    /// Directional blur (docs/08 §3.8): a line integral along the angle —
+    /// evenly spaced bilinear taps across a segment `length_px` long centred
+    /// on the pixel, box weighted, normalised over the full kernel whatever
+    /// the edge policy (matching the gaussian's rule). Fixed tap order for
+    /// determinism (§2.4).
+    pub fn blur_directional(
+        rgba: &mut [f32],
+        w: u32,
+        h: u32,
+        length_px: f32,
+        angle_deg: f32,
+        edge: u32,
+        mix: f32,
+    ) {
+        let original = rgba.to_vec();
+        let (dx, dy) = super::rgb_split_offset(1.0, angle_deg); // unit vector
+        let n = dir_blur_taps(length_px);
+        let nf = n as f32;
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let pos = (x as f32 + 0.5, y as f32 + 0.5);
+                let mut acc = [0.0f32; 4];
+                for k in 0..n {
+                    let t = ((k as f32 + 0.5) / nf - 0.5) * length_px;
+                    let s = bilinear_edge(&original, w, h, pos.0 + t * dx, pos.1 + t * dy, edge);
+                    for c in 0..4 {
+                        acc[c] += s[c];
+                    }
+                }
+                for c in 0..4 {
+                    let v = acc[c] / nf;
+                    rgba[i + c] = original[i + c] * (1.0 - mix) + v * mix;
+                }
+            }
         }
     }
 
@@ -1345,5 +1490,89 @@ mod tests {
             assert_eq!(v[3], 1.0);
             assert_eq!(v[7], 0.5);
         }
+    }
+
+    #[test]
+    fn blur_mode_resolves_gaussian_directional_and_legacy() {
+        // A fresh instance defaults to Gaussian and resolves exactly as the
+        // pre-mode blur did.
+        let mut e = instantiate("blur").unwrap();
+        assert!(matches!(e.param("mode"), Some(EffectValue::Choice(0))));
+        assert_eq!(e.float_at("length", 0.0), Some(10.0));
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0);
+        assert_eq!(
+            r,
+            vec![Resolved::Blur {
+                radius_px: 15.0,
+                edge: 1,
+                mix: 1.0
+            }]
+        );
+
+        // Directional mode reads Length/Angle instead (10% of 1000 = 100px).
+        for p in &mut e.params {
+            if p.id == "mode" {
+                p.value = EffectValue::Choice(1);
+            }
+        }
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0);
+        assert_eq!(
+            r,
+            vec![Resolved::DirBlur {
+                length_px: 100.0,
+                angle_deg: 0.0,
+                edge: 1,
+                mix: 1.0
+            }]
+        );
+
+        // A legacy instance (saved before the mode existed) has no mode
+        // parameter and still resolves as Gaussian.
+        e.params
+            .retain(|p| !matches!(p.id.as_str(), "mode" | "length" | "angle"));
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0);
+        assert!(matches!(r[..], [Resolved::Blur { .. }]));
+    }
+
+    #[test]
+    fn cpu_directional_blur_streaks_along_the_angle() {
+        // A white impulse in the middle of a transparent frame.
+        let (w, h) = (17u32, 9u32);
+        let mut img = vec![0.0f32; (w * h * 4) as usize];
+        let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+        let mid = at(8, 4);
+        img[mid..mid + 4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+
+        // Length 0 and mix 0 are both the exact identity.
+        let mut l0 = img.clone();
+        cpu::blur_directional(&mut l0, w, h, 0.0, 0.0, 1, 1.0);
+        assert_eq!(l0, img);
+        let mut m0 = img.clone();
+        cpu::blur_directional(&mut m0, w, h, 6.0, 45.0, 1, 0.0);
+        assert_eq!(m0, img);
+
+        // Angle 0, length 5: the impulse smears along x only — energy
+        // appears beside it on its own row, none above or below.
+        let mut s = img.clone();
+        cpu::blur_directional(&mut s, w, h, 5.0, 0.0, 1, 1.0);
+        assert!(s[mid] < 1.0, "peak flattens");
+        assert!(
+            s[at(7, 4)] > 0.0 && s[at(9, 4)] > 0.0,
+            "streak spreads in x"
+        );
+        assert_eq!(s[at(8, 3)], 0.0, "no bleed upward");
+        assert_eq!(s[at(8, 5)], 0.0, "no bleed downward");
+        // Box weights conserve energy away from edges (5 interior taps).
+        let sum = |v: &[f32]| v.iter().step_by(4).sum::<f32>();
+        assert!((sum(&s) - sum(&img)).abs() < 1e-4, "energy conserved");
+
+        // Angle 90 streaks along y instead.
+        let mut v = img.clone();
+        cpu::blur_directional(&mut v, w, h, 5.0, 90.0, 1, 1.0);
+        assert!(
+            v[at(8, 3)] > 0.0 && v[at(8, 5)] > 0.0,
+            "streak spreads in y"
+        );
+        assert!(v[at(7, 4)] < 1e-6, "x row stays clean");
     }
 }
