@@ -725,3 +725,23 @@ bump — Native keys are byte-for-byte unchanged, and a conformed key gains a `c
 The Flow group's "Input rate" dropdown offers Native and common rates. (Manual on/off already
 exists — the wind toggle forces Flow unconditionally.) Separate near/far-blur-style controls
 belong to the future depth-of-field effects, not here.
+
+**K-096 · DECIDED · Scopes v1 read the banked composited frame on the CPU; GPU-live scopes
+deferred.** The Scopes panel (docs/07 §8) ships: `Panel::Scopes(ScopeKind)` carries the
+scope each instance shows (waveform luma, RGB waveform, vectorscope, histogram), chosen in
+its header, persisted with the workspace, so two Scopes panels can show different scopes.
+§8 specifies scopes "GPU-computed from the Viewer's displayed frame … live during playback";
+v1 narrows that: scopes are computed on the CPU from the composited frame Lumit already
+banks in RAM (`comp_frame_cache`, the RAM tier of docs/06), which *is* the Viewer's displayed
+frame. That frame is banked only while paused or scrubbing — during playback the readback is
+skipped to protect the frame budget (docs/13) — so a v1 scope updates on every paused frame
+and holds the last shown frame during playback, rather than tracing live. Live-during-playback
+scopes wait on a GPU-side scope pass (a compute shader over the presented texture); recorded
+as a v1 limit, not a reversal of §8's intent. Banked frames are always specified-resolution
+(draft frames are never banked), so §8's "computed at Half" note never fires in v1. Scope
+colours are one fixed `ScopeColours` set on the theme — a near-black graticule and bright
+trace whatever the light/dark chrome, the same grading-accuracy reasoning that keeps
+`viewer_surround` neutral (docs/15 §2.1). The frame cache gains a recency-neutral `peek`
+(alongside `contains_key`) so a scope reading the current frame every paint does not distort
+LRU eviction. The §8 tap-point open question (pre- vs post-display-transform) is untouched —
+v1 has no display transform, so the banked sRGB frame is both.

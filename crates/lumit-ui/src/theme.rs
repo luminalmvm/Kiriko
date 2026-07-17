@@ -65,6 +65,43 @@ pub struct Theme {
     pub curve: [Color32; 4],
     /// Layer-type identity colours (15-DESIGN §6.1).
     pub layer: LayerColours,
+    /// Scope graticule + trace colours (15-DESIGN §8). Like
+    /// `viewer_surround`, deliberately NOT mode-mirrored — see [`ScopeColours`].
+    pub scope: ScopeColours,
+}
+
+/// Colours the Scopes panel draws with (15-DESIGN §8, K-096). A waveform,
+/// vectorscope or histogram is always read on a near-black graticule with a
+/// bright trace, whatever the chrome's light/dark setting — the same
+/// grading-accuracy reasoning that keeps `viewer_surround` neutral and fixed
+/// (§2.1/§11). So there is one standard set, shared by every theme; it lives
+/// here only so the no-hex-outside-theme rule still holds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScopeColours {
+    /// The graticule backdrop the trace sits on.
+    pub bg: Color32,
+    /// Grid lines, and the vectorscope's circle.
+    pub graticule: Color32,
+    /// The monochrome trace (luma waveform, vectorscope).
+    pub trace: Color32,
+    /// Per-channel trace colours (RGB waveform, histogram overlays).
+    pub red: Color32,
+    pub green: Color32,
+    pub blue: Color32,
+}
+
+impl ScopeColours {
+    /// The one fixed set (see the type doc): a near-black backdrop, a faint
+    /// grey graticule, a calm green luma trace, and channel colours saturated
+    /// enough to read where they overlap on black.
+    pub const STANDARD: Self = Self {
+        bg: Color32::from_rgb(0x0a, 0x0b, 0x0c),
+        graticule: Color32::from_rgb(0x39, 0x3d, 0x40),
+        trace: Color32::from_rgb(0x86, 0xdd, 0x9a),
+        red: Color32::from_rgb(0xe2, 0x55, 0x5f),
+        green: Color32::from_rgb(0x54, 0xcf, 0x6b),
+        blue: Color32::from_rgb(0x53, 0x87, 0xe0),
+    };
 }
 
 /// Light vs dark colour family (K-092). Orthogonal to [`ThemeShape`] and to
@@ -211,6 +248,7 @@ impl Theme {
                 text: Color32::from_rgb(0x8c, 0x84, 0x68),     // parchment
                 camera: Color32::from_rgb(0x80, 0x6f, 0x4a),   // dry gold
             },
+            scope: ScopeColours::STANDARD,
         }
     }
 
@@ -276,6 +314,7 @@ impl Theme {
                 text: Color32::from_rgb(0x66, 0x5e, 0x46),
                 camera: Color32::from_rgb(0x5e, 0x50, 0x30),
             },
+            scope: ScopeColours::STANDARD,
         }
     }
 

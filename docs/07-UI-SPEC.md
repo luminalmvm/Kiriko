@@ -452,13 +452,21 @@ Shows the **effect stack** of the selected layer (tab per recently viewed layer,
 - One Scopes panel type; each instance shows one scope, chosen in its header: **waveform**
   (luma or RGB), **vectorscope**, **histogram** (per-channel/luma). Open several instances
   for side-by-side scopes (the Colour workspace does).
-- Scopes are GPU-computed from the **Viewer's displayed frame** — after preview resolution
+- Scopes are computed from the **Viewer's displayed frame** — after preview resolution
   and channel view, before display transform (so scopes read scene values, not the monitor
   transform). When preview resolution is below Full, the panel MUST show a small "computed
   at Half" style note, because downsampling changes distributions.
 - Scopes MUST update live during playback; under load they degrade to a lower update rate
   before they degrade precision (they participate in adaptive degradation and light the
   Viewer's degradation indicator, §2.2).
+- **v1 (K-096)**: scopes are computed on the CPU from the composited frame Lumit already
+  banks in RAM — that banked frame *is* the Viewer's displayed frame. Because banking runs
+  only while paused or scrubbing (playback skips the readback to hold the frame budget,
+  §13), a v1 scope updates on every paused/scrubbed frame and holds the last shown frame
+  during playback, rather than tracing live; live-during-playback scopes wait on a GPU-side
+  scope pass. Banked frames are always specified-resolution, so the "computed at Half" note
+  does not fire in v1. Colours come from the theme's fixed scope set (a near-black graticule
+  and bright trace in both light and dark chrome, like the neutral Viewer surround, §2.1).
 
 ---
 

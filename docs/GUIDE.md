@@ -352,9 +352,12 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   cache knows a live effect changes pixels while a bypassed one doesn't. The registry (a
   growing built-in catalogue — blur, sharpen, RGB split, glow, shake, colour balance and
   more, grouped by category), the GPU passes, and adjustment-layer staging (K-091) all run
-  for real now; the one piece still catching up is the dedicated **Effect Controls** dock
-  panel — today the effect stack is edited inline on the layer's own row in the Timeline,
-  and Effect Controls just says so, rather than duplicating that editor in a second place.
+  for real now, and the dedicated **Effect Controls** dock panel shows the selected layer's
+  effect stack in a roomier home than the Timeline row — the same rows, the same undo, just
+  reusing the Timeline's stack editor rather than being a second, divergent one. You can
+  still edit the stack inline on the layer's own row in the Timeline; the panel is the same
+  editor given more room. Saving a stack as a **preset** and loading one back (a small
+  `.lumfx` JSON file, K-065) lives on that same add-effect row.
 - `crates/lumit-core/src/ops.rs` — **Every possible edit, as data.** An edit is an `Op`
   (AddLayer, SetLayerSpan…). Applying an op returns its exact inverse — that pair is what
   makes undo *provably* correct instead of hopefully correct.
@@ -829,6 +832,22 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   where it was. A workspace saved before this change tidies itself the first time it loads.
   Under the bonnet this uses a "tiling" layout engine that, unlike the docking library we
   tried first, is happy to leave any lone pane without a tab bar.
+- **The Scopes panel** (`shell/scopes.rs`, K-096) — the colourist's instruments. Instead of
+  showing the picture, a scope plots its numbers: the **waveform** shows how bright each
+  column of the image is (bright at the top, dark at the bottom), the **histogram** counts
+  how many pixels sit at each brightness, and the **vectorscope** plots colour on a circle
+  (hue as the direction, how vivid as the distance from the middle — a grey picture is a dot
+  in the centre). Each Scopes panel shows one of these, picked from the little row of buttons
+  at its top, so you can open a few side by side. It reads the frame you are looking at in
+  the Viewer — the last one Lumit kept in memory. There is one honest limit for now (K-096):
+  Lumit only keeps that frame in memory while you are paused or scrubbing, because during
+  playback it skips saving frames to stay fast, so during playback the scope shows the last
+  frame you stopped on and catches up the moment you pause. Reading the picture live while it
+  plays needs the graphics card to do the counting, which is a later addition. The scope's
+  own colours (the near-black background, the green trace, the red/green/blue channel
+  colours) are fixed and the same in light or dark mode, for the same reason the Viewer's
+  surround is a fixed neutral grey — you cannot judge an image against a background that
+  keeps changing brightness.
 - The **Project panel** — AE-shaped (K-068): the selected item's details up top, the
   folder tree below, and drag-and-drop everywhere. Drag footage onto the Timeline or
   Viewer to make a layer; with no comp open yet, the composition dialogue appears

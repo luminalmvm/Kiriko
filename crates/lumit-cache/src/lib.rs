@@ -100,6 +100,15 @@ impl<K: Eq + Hash + Clone, V: ByteSized> ByteLru<K, V> {
         self.map.contains_key(key)
     }
 
+    /// Fetch without touching recency, for read-only per-paint consumers.
+    /// The Scopes panel reads the current frame every paint to draw its
+    /// waveform/histogram; like `contains_key`, that poll must not bump the
+    /// frame's last-used tick and distort eviction. Use `get` where the read
+    /// should count as a use (playback, scrubbing that should retain frames).
+    pub fn peek(&self, key: &K) -> Option<&V> {
+        self.map.get(key).map(|e| &e.value)
+    }
+
     pub fn used_bytes(&self) -> usize {
         self.used
     }
@@ -167,5 +176,22 @@ mod tests {
         assert!(lru.insert(99, v(95)));
         assert!(lru.used_bytes() <= 100);
         assert!(lru.get(&99).is_some());
+    }
+
+    #[test]
+    fn peek_reads_without_rescuing_from_eviction() {
+        let mut lru: ByteLru<&str, Vec<u8>> = ByteLru::new(100);
+        assert!(lru.insert("a", v(40)));
+        assert!(lru.insert("b", v(40)));
+        // Peeking "a" many times must not bump its recency: "a" was inserted
+        // first, so it stays the least-recently-used and is the one evicted.
+        for _ in 0..5 {
+            assert!(lru.peek(&"a").is_some());
+        }
+        assert!(lru.insert("c", v(40)));
+        assert!(
+            lru.contains_key(&"b") && !lru.contains_key(&"a"),
+            "peek did not distort eviction: the oldest entry still went"
+        );
     }
 }

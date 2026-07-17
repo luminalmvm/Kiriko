@@ -17,7 +17,7 @@ pub fn default_layout() -> egui_tiles::Tree<Panel> {
     let fx = tiles.insert_pane(Panel::EffectControls);
     let fxp = tiles.insert_pane(Panel::EffectsAndPresets);
     let left = tiles.insert_tab_tile(vec![project, fx, fxp]);
-    let scopes = tiles.insert_pane(Panel::Scopes);
+    let scopes = tiles.insert_pane(Panel::Scopes(ScopeKind::default()));
 
     // Upper band: the tool columns either side of the Viewer.
     let upper = tiles.insert_horizontal_tile(vec![left, viewer, scopes]);
@@ -68,7 +68,7 @@ pub(crate) fn render_panel(
     theme: &Theme,
     app: &mut AppState,
     preview_display: Option<(egui::TextureId, egui::Vec2)>,
-    panel: Panel,
+    panel: &mut Panel,
 ) {
     match panel {
         Panel::Viewer => viewer_panel(ui, theme, app, preview_display),
@@ -76,12 +76,7 @@ pub(crate) fn render_panel(
         Panel::Timeline => timeline_panel(ui, theme, app),
         Panel::EffectControls => effect_controls_panel(ui, theme, app),
         Panel::EffectsAndPresets => effects_panel(ui, theme),
-        Panel::Scopes => empty_hint(
-            ui,
-            theme,
-            "Scopes",
-            "Waveform, vectorscope and histogram arrive with the render pipeline.",
-        ),
+        Panel::Scopes(kind) => scopes_panel(ui, theme, app, kind),
     }
 }
 
@@ -194,7 +189,7 @@ impl DockBehavior<'_> {
     fn bare_pane_ui(&mut self, ui: &mut egui::Ui, tile_id: egui_tiles::TileId, pane: &mut Panel) {
         let pane_rect = ui.max_rect();
         let bg = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
-            render_panel(ui, self.theme, self.app, self.preview_display, *pane);
+            render_panel(ui, self.theme, self.app, self.preview_display, pane);
             // Claim the full pane rect regardless of what content used,
             // so leftover empty space still answers to `bg` below.
             ui.expand_to_include_rect(pane_rect);
@@ -238,7 +233,7 @@ impl egui_tiles::Behavior<Panel> for DockBehavior<'_> {
                 if self.bare_tiles.contains(&tile_id) {
                     self.bare_pane_ui(ui, tile_id, pane);
                 } else {
-                    render_panel(ui, self.theme, self.app, self.preview_display, *pane);
+                    render_panel(ui, self.theme, self.app, self.preview_display, pane);
                 }
             }
             // Every pane — the Viewer included, per the owner's call — floats
@@ -270,7 +265,7 @@ impl egui_tiles::Behavior<Panel> for DockBehavior<'_> {
                         if self.bare_tiles.contains(&tile_id) {
                             self.bare_pane_ui(ui, tile_id, pane);
                         } else {
-                            render_panel(ui, self.theme, self.app, self.preview_display, *pane);
+                            render_panel(ui, self.theme, self.app, self.preview_display, pane);
                         }
                     });
                 self.panel_rects.push((*pane, tile_rect));

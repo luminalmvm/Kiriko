@@ -17,6 +17,7 @@ mod graph;
 mod inspector;
 mod overlays;
 mod panels;
+mod scopes;
 mod timeline;
 mod widgets;
 
@@ -27,6 +28,7 @@ pub(crate) use graph::*;
 pub(crate) use inspector::*;
 pub(crate) use overlays::*;
 pub(crate) use panels::*;
+pub(crate) use scopes::*;
 pub(crate) use timeline::*;
 pub(crate) use widgets::*;
 
@@ -43,7 +45,7 @@ pub enum Panel {
     Timeline,
     EffectControls,
     EffectsAndPresets,
-    Scopes,
+    Scopes(ScopeKind),
 }
 
 impl Panel {
@@ -54,7 +56,7 @@ impl Panel {
             Panel::Timeline => "Timeline",
             Panel::EffectControls => "Effect controls",
             Panel::EffectsAndPresets => "Effects & presets",
-            Panel::Scopes => "Scopes",
+            Panel::Scopes(_) => "Scopes",
         }
     }
 }
@@ -1851,7 +1853,7 @@ impl Shell {
         // viewport, so it can borrow the live app state). Closing the window
         // docks the panel back into the tree where it came from.
         let mut dock_back: Vec<Panel> = Vec::new();
-        for &panel in floating.iter() {
+        for panel in floating.iter_mut() {
             let vid = egui::ViewportId::from_hash_of(("lumit-float", panel.title()));
             let builder = egui::ViewportBuilder::default()
                 .with_title(format!("Lumit — {}", panel.title()))
@@ -1863,7 +1865,7 @@ impl Shell {
                         render_panel(ui, theme, app, preview_display, panel)
                     });
                 if ctx.input(|i| i.viewport().close_requested()) {
-                    dock_back.push(panel);
+                    dock_back.push(*panel);
                 }
             });
         }
@@ -2605,7 +2607,7 @@ mod dock_tests {
             Panel::Timeline,
             Panel::EffectControls,
             Panel::EffectsAndPresets,
-            Panel::Scopes,
+            Panel::Scopes(ScopeKind::default()),
         ] {
             let id = tile_id_of(&tree, panel).expect("panel present in default layout");
             assert!(tree.tiles.is_visible(id), "{panel:?} should start visible");
@@ -2689,7 +2691,7 @@ mod dock_tests {
         let fx = tiles.insert_pane(Panel::EffectControls);
         let fxp = tiles.insert_pane(Panel::EffectsAndPresets);
         let left = tiles.insert_tab_tile(vec![project, fx, fxp]);
-        let scopes = tiles.insert_pane(Panel::Scopes);
+        let scopes = tiles.insert_pane(Panel::Scopes(ScopeKind::default()));
         let right = tiles.insert_tab_tile(vec![scopes]);
         let upper = tiles.insert_horizontal_tile(vec![left, viewer, right]);
         let timeline = tiles.insert_pane(Panel::Timeline);
@@ -2710,7 +2712,7 @@ mod dock_tests {
             Panel::Timeline,
             Panel::EffectControls,
             Panel::EffectsAndPresets,
-            Panel::Scopes,
+            Panel::Scopes(ScopeKind::default()),
         ] {
             assert!(
                 tile_id_of(&stale, panel).is_some(),
@@ -2733,7 +2735,11 @@ mod dock_tests {
     fn bare_tile_ids_matches_tab_membership_on_the_default_layout() {
         let tree = default_layout();
         let bare = bare_tile_ids(&tree);
-        for panel in [Panel::Viewer, Panel::Timeline, Panel::Scopes] {
+        for panel in [
+            Panel::Viewer,
+            Panel::Timeline,
+            Panel::Scopes(ScopeKind::default()),
+        ] {
             let id = tile_id_of(&tree, panel).unwrap();
             assert!(bare.contains(&id), "{panel:?} should render bare");
         }
