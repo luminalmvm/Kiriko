@@ -461,6 +461,27 @@ impl Compositor {
         layers: &[CompositeLayer<'_>],
         camera: Option<Mat4>,
     ) -> wgpu::Texture {
+        self.composite_seeded(ctx, width, height, background, layers, camera, None)
+    }
+
+    /// As [`Self::composite_with_camera`], but when `seed` is given the
+    /// target starts as a copy of it instead of the cleared background —
+    /// the continuation half of adjustment-layer staging (docs/06 §1.5):
+    /// the layers above an adjustment composite onto the blended
+    /// intermediate exactly as they would have onto the live accumulation,
+    /// with no intervening resample. `seed` must be a comp-sized working
+    /// texture (the previous stage's output).
+    #[allow(clippy::too_many_arguments)]
+    pub fn composite_seeded(
+        &self,
+        ctx: &GpuContext,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        layers: &[CompositeLayer<'_>],
+        camera: Option<Mat4>,
+        seed: Option<&wgpu::Texture>,
+    ) -> wgpu::Texture {
         let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("comp-frame"),
             size: wgpu::Extent3d {
@@ -474,7 +495,8 @@ impl Compositor {
             format: WORKING_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let view = target.create_view(&Default::default());
@@ -595,7 +617,20 @@ impl Compositor {
             b: background[2],
             a: background[3],
         });
-        let mut first_pass = true;
+        // A seed replaces the clear: the target starts as the previous
+        // stage's pixels, and every pass loads instead of clearing.
+        if let Some(s) = seed {
+            encoder.copy_texture_to_texture(
+                s.as_image_copy(),
+                target.as_image_copy(),
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let mut first_pass = seed.is_none();
         let mut i = 0usize;
         while i < layers.len() {
             if layers[i].blend.uses_snapshot() {
@@ -1184,6 +1219,66 @@ mod tests {
             (i16::from(added) - expect).abs() <= 2,
             "add {added} vs {expect}"
         );
+    }
+
+    /// Seeding continues the accumulation exactly: compositing A then B in
+    /// one call equals compositing A alone, then B seeded on the result —
+    /// the invariant adjustment-layer staging rests on (docs/06 §1.5). B
+    /// uses a snapshot blend so the seeded path's snapshot branch is
+    /// exercised too.
+    #[test]
+    fn a_seeded_composite_continues_the_accumulation() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let colour = ColourEngine::new(&ctx);
+        let compositor = Compositor::new(&ctx);
+        let red = solid_linear(&ctx, &colour, [255, 0, 0, 255], 8, 8);
+        let grey = solid_linear(&ctx, &colour, [128, 128, 128, 255], 8, 8);
+        fn layer(tex: &wgpu::Texture, x: f32, blend: Blend) -> CompositeLayer<'_> {
+            CompositeLayer {
+                texture: tex,
+                size: (8.0, 8.0),
+                position: (x, 4.0),
+                anchor: (0.0, 0.0),
+                scale: (100.0, 100.0),
+                rotation_deg: 0.0,
+                opacity: 60.0,
+                matte: None,
+                blend,
+                z: 0.0,
+                rotation_x_deg: 0.0,
+                rotation_y_deg: 0.0,
+                three_d: false,
+                layer_mask: None,
+                pre: None,
+            }
+        }
+        let bg = [0.1, 0.2, 0.3, 1.0];
+        let both = compositor.composite(
+            &ctx,
+            16,
+            16,
+            bg,
+            &[
+                layer(&red, 2.0, Blend::Normal),
+                layer(&grey, 6.0, Blend::Screen),
+            ],
+        );
+        let first = compositor.composite(&ctx, 16, 16, bg, &[layer(&red, 2.0, Blend::Normal)]);
+        let seeded = compositor.composite_seeded(
+            &ctx,
+            16,
+            16,
+            [0.0; 4], // ignored: the seed replaces the clear
+            &[layer(&grey, 6.0, Blend::Screen)],
+            None,
+            Some(&first),
+        );
+        let a = crate::fx::readback_linear_f32(&ctx, &both, 16, 16).unwrap();
+        let b = crate::fx::readback_linear_f32(&ctx, &seeded, 16, 16).unwrap();
+        assert_eq!(a, b, "seeded continuation must be bit-identical");
     }
 
     /// A quarter-size quad placed at the centre covers exactly the centre

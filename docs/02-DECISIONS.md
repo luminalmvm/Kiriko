@@ -639,3 +639,17 @@ From the owner (2026-07-18), amending docs/08:
   properties as an effect — so an adjustment layer can transform everything below it.
 - Per-effect bypass next to the name in the effects UI is confirmed as required (§1.5 already
   specifies it; the implementation carries it).
+
+**K-091 · DECIDED · Adjustment layers stage the composite; collapse never bleeds them into
+the parent.** The docs/06 §1.5 model is now the running behaviour: everything below a live
+adjustment layer composites into an intermediate, the layer's effect stack runs on that, and
+the result mixes back over the unprocessed composite by coverage — the mask raster times the
+layer opacity, placed by the layer's transform (the coverage map moves; the picture never
+does). Two render-semantics points are pinned:
+- The mix is a straight per-channel lerp, alpha included, between the unprocessed and
+  processed composites. Routing it through the compositor's premultiplied-over would inflate
+  alpha wherever the composite is semi-transparent.
+- A live adjustment layer inside a *collapsed* Precomp forces the intermediate (§1.4 force
+  list). After Effects lets a collapsed precomp's adjustment layers process the parent's
+  stack below them; Lumit deliberately diverges — the stack applies within the adjustment
+  layer's own comp, always, so precomposing never changes what an adjustment layer sees.

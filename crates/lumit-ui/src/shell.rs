@@ -5481,6 +5481,63 @@ fn build_comp_draws(
                     (nested.width as f32, nested.height as f32),
                 )
             }
+            LayerKind::Adjustment => {
+                // A staging point, not a picture (docs/06 §1.5): realise
+                // composites everything below, runs this stack on it, and
+                // blends back by coverage — masks × opacity, placed by the
+                // transform. A dead stack contributes nothing at all.
+                let comp_diag = ((comp.width as f32).powi(2) + (comp.height as f32).powi(2)).sqrt();
+                let fx = if layer.switches.fx {
+                    lumit_core::fx::resolve_stack(&layer.effects, lt, comp_diag, 1.0)
+                } else {
+                    Vec::new()
+                };
+                if fx.is_empty() {
+                    continue;
+                }
+                draws.push(CompLayerDraw {
+                    source: DrawSource::Adjust,
+                    natural_size: (comp.width as f32, comp.height as f32),
+                    position: (
+                        tr.position_x.value_at(lt) as f32,
+                        tr.position_y.value_at(lt) as f32,
+                    ),
+                    anchor: (
+                        tr.anchor_x.value_at(lt) as f32,
+                        tr.anchor_y.value_at(lt) as f32,
+                    ),
+                    scale: (
+                        tr.scale_x.value_at(lt) as f32,
+                        tr.scale_y.value_at(lt) as f32,
+                    ),
+                    rotation_deg: tr.rotation.value_at(lt) as f32,
+                    opacity: tr.opacity.value_at(lt) as f32,
+                    z: tr.position_z.value_at(lt) as f32,
+                    rotation_x_deg: tr.rotation_x.value_at(lt) as f32,
+                    rotation_y_deg: tr.rotation_y.value_at(lt) as f32,
+                    three_d: layer.switches.three_d,
+                    matte: None,
+                    blend: lumit_gpu::Blend::Normal,
+                    mask_cov: (!layer.masks.is_empty()).then(|| {
+                        // Adjustment masks live in comp space (comp-sized
+                        // natural), same as the property panel treats them.
+                        (
+                            crate::export::mask_rgba(&lumit_core::mask::combined_coverage(
+                                &layer.masks,
+                                comp.width,
+                                comp.height,
+                                f64::from(comp.width),
+                                f64::from(comp.height),
+                            )),
+                            comp.width,
+                            comp.height,
+                        )
+                    }),
+                    pre: None,
+                    fx,
+                });
+                continue;
+            }
             _ => {
                 let Some((rgba, w, h, natural)) = pixels_for(layer) else {
                     continue;
@@ -5536,7 +5593,9 @@ fn build_comp_draws(
             let comp_diag = ((comp.width as f32).powi(2) + (comp.height as f32).powi(2)).sqrt();
             let scale = match &source {
                 DrawSource::Pixels { tex_w, .. } => *tex_w as f32 / natural.0.max(1.0),
-                DrawSource::Nested { .. } => 1.0,
+                // Adjust never reaches here (its arm pushes and continues);
+                // its stack runs on the comp-sized intermediate, factor 1.
+                DrawSource::Nested { .. } | DrawSource::Adjust => 1.0,
             };
             if layer.switches.fx {
                 // scale doubles as the §2.3 preview-resolution factor:
@@ -7786,6 +7845,11 @@ pub enum DrawSource {
         /// The nested comp's own active camera at this time.
         camera: Option<lumit_core::model::CameraPose>,
     },
+    /// An adjustment layer's staging point (docs/06 §1.5): no pixels of its
+    /// own — the draw's `fx` runs on the composite of every draw before it,
+    /// and its placement/opacity/`mask_cov` shape the coverage that
+    /// attenuates the result. Only emitted with a live, non-empty stack.
+    Adjust,
 }
 
 #[cfg(feature = "media")]
@@ -7897,9 +7961,11 @@ impl GpuViewer {
         lumit_gpu::GpuContext::from_parts(self.ctx.device.clone(), self.ctx.queue.clone())
     }
 
-    /// Composite a comp frame (evaluator v0) and register it for painting.
-    /// `layers` is bottom-up draw order.
-    /// Realise a draw list into a linear comp texture (recursive for Nested).
+    /// Realise a draw list into a linear comp texture (recursive for
+    /// Nested), staging at each Adjust draw (docs/06 §1.5): everything
+    /// before it composites into an intermediate, the adjustment's stack
+    /// runs on that, and the two blend by coverage; the draws after
+    /// composite straight onto the blended result (seeded, no resample).
     fn realise(
         &self,
         camera: Option<lumit_core::model::CameraPose>,
@@ -7908,9 +7974,91 @@ impl GpuViewer {
         background: [f64; 4],
         layers: &[CompLayerDraw],
     ) -> egui_wgpu::wgpu::Texture {
+        let mut acc: Option<egui_wgpu::wgpu::Texture> = None;
+        let mut start = 0usize;
+        for (i, l) in layers.iter().enumerate() {
+            if !matches!(l.source, DrawSource::Adjust) {
+                continue;
+            }
+            let below =
+                self.realise_segment(camera, width, height, background, &layers[start..i], &acc);
+            let processed =
+                crate::fxops::run_ops(&self.fx, &self.ctx, below.clone(), width, height, &l.fx);
+            let coverage = self.coverage_texture(camera, width, height, l);
+            acc = Some(self.fx.adjust_blend(
+                &self.ctx,
+                &below,
+                &processed,
+                &coverage,
+                width,
+                height,
+                (l.opacity / 100.0).clamp(0.0, 1.0),
+            ));
+            start = i + 1;
+        }
+        self.realise_segment(camera, width, height, background, &layers[start..], &acc)
+    }
+
+    /// The adjustment layer's comp-space coverage (docs/06 §1.5): its mask
+    /// raster — white where the effects apply — placed by its transform,
+    /// so the transform moves the coverage map, never the picture. No
+    /// masks means full coverage (a white quad over the whole comp).
+    fn coverage_texture(
+        &self,
+        camera: Option<lumit_core::model::CameraPose>,
+        width: u32,
+        height: u32,
+        l: &CompLayerDraw,
+    ) -> egui_wgpu::wgpu::Texture {
+        let white = [255u8, 255, 255, 255];
+        let (rgba, w, h): (&[u8], u32, u32) = match &l.mask_cov {
+            Some((rgba, w, h)) => (rgba, *w, *h),
+            None => (&white, 1, 1),
+        };
+        let src = self.engine.upload_srgb8(&self.ctx, rgba, w, h);
+        let linear = self.engine.linearise(&self.ctx, &src);
+        let cam_mat = camera.map(|pose| crate::export::camera_mat(width, height, pose));
+        self.compositor.composite_with_camera(
+            &self.ctx,
+            width,
+            height,
+            [0.0, 0.0, 0.0, 0.0],
+            &[lumit_gpu::CompositeLayer {
+                texture: &linear,
+                size: l.natural_size,
+                position: l.position,
+                anchor: l.anchor,
+                scale: l.scale,
+                rotation_deg: l.rotation_deg,
+                // Layer opacity is applied once, in the blend itself.
+                opacity: 100.0,
+                matte: None,
+                blend: lumit_gpu::Blend::Normal,
+                z: l.z,
+                rotation_x_deg: l.rotation_x_deg,
+                rotation_y_deg: l.rotation_y_deg,
+                three_d: l.three_d,
+                layer_mask: None,
+                pre: None,
+            }],
+            cam_mat,
+        )
+    }
+
+    /// Composite one adjustment-free run of draws; `seed` (a previous
+    /// stage's output) replaces the cleared background when present.
+    fn realise_segment(
+        &self,
+        camera: Option<lumit_core::model::CameraPose>,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        layers: &[CompLayerDraw],
+        seed: &Option<egui_wgpu::wgpu::Texture>,
+    ) -> egui_wgpu::wgpu::Texture {
         let mut linear_textures: Vec<egui_wgpu::wgpu::Texture> = Vec::with_capacity(layers.len());
         for l in layers {
-            let mut tex = match &l.source {
+            let tex = match &l.source {
                 DrawSource::Pixels { rgba, tex_w, tex_h } => {
                     let src = self.engine.upload_srgb8(&self.ctx, rgba, *tex_w, *tex_h);
                     self.engine.linearise(&self.ctx, &src)
@@ -7922,195 +8070,22 @@ impl GpuViewer {
                     draws,
                     camera,
                 } => self.realise(*camera, *width, *height, *background, draws),
+                DrawSource::Adjust => {
+                    // realise splits segments at every Adjust draw, so none
+                    // reaches here; a transparent texel keeps the no-panic
+                    // rule (and draws nothing) if that ever regresses.
+                    let src = self.engine.upload_srgb8(&self.ctx, &[0, 0, 0, 0], 1, 1);
+                    self.engine.linearise(&self.ctx, &src)
+                }
             };
             // The effect stack runs on the linear source, after masks and
             // before the transform (docs/08 §1.5; docs/06 render order).
-            if !l.fx.is_empty() {
+            let tex = if l.fx.is_empty() {
+                tex
+            } else {
                 let (w, h) = (tex.width(), tex.height());
-                for op in &l.fx {
-                    match op {
-                        lumit_core::fx::Resolved::Blur {
-                            radius_px,
-                            edge,
-                            mix,
-                        } => {
-                            tex = self.fx.blur(
-                                &self.ctx,
-                                &tex,
-                                w,
-                                h,
-                                &lumit_gpu::fx::BlurOp {
-                                    radius_px: *radius_px,
-                                    edge: *edge,
-                                    mix: *mix,
-                                },
-                            );
-                        }
-                        lumit_core::fx::Resolved::DirBlur {
-                            length_px,
-                            angle_deg,
-                            edge,
-                            mix,
-                        } => {
-                            let (dx, dy) = lumit_core::fx::rgb_split_offset(1.0, *angle_deg);
-                            tex = self.fx.dir_blur(
-                                &self.ctx,
-                                &tex,
-                                w,
-                                h,
-                                &lumit_gpu::fx::DirBlurOp {
-                                    dx,
-                                    dy,
-                                    length_px: *length_px,
-                                    taps: lumit_core::fx::cpu::dir_blur_taps(*length_px),
-                                    edge: *edge,
-                                    mix: *mix,
-                                },
-                            );
-                        }
-                        lumit_core::fx::Resolved::Sharpen {
-                            amount,
-                            radius_px,
-                            threshold,
-                            luma_only,
-                            mix,
-                        } => {
-                            tex = self.fx.sharpen(
-                                &self.ctx,
-                                &tex,
-                                w,
-                                h,
-                                &lumit_gpu::fx::SharpenOp {
-                                    amount: *amount,
-                                    radius_px: *radius_px,
-                                    threshold: *threshold,
-                                    luma_only: *luma_only,
-                                    mix: *mix,
-                                },
-                            );
-                        }
-                        lumit_core::fx::Resolved::RgbSplit {
-                            amount_px,
-                            angle_deg,
-                            radial,
-                            mix,
-                        } => {
-                            let (dx, dy) = lumit_core::fx::rgb_split_offset(*amount_px, *angle_deg);
-                            tex = self.fx.rgb_split(
-                                &self.ctx,
-                                &tex,
-                                w,
-                                h,
-                                &lumit_gpu::fx::RgbSplitOp {
-                                    dx,
-                                    dy,
-                                    amount_px: *amount_px,
-                                    radial: *radial,
-                                    mix: *mix,
-                                },
-                            );
-                        }
-                        lumit_core::fx::Resolved::SpectralSplit {
-                            amount_px,
-                            angle_deg,
-                            radial,
-                            mix,
-                        } => {
-                            let (dx, dy) = lumit_core::fx::rgb_split_offset(*amount_px, *angle_deg);
-                            tex = self.fx.spectral_split(
-                                &self.ctx,
-                                &tex,
-                                w,
-                                h,
-                                &lumit_gpu::fx::SpectralSplitOp {
-                                    dx,
-                                    dy,
-                                    amount_px: *amount_px,
-                                    radial: *radial,
-                                    basis: lumit_core::fx::spectral_basis_vec4(),
-                                    mix: *mix,
-                                },
-                            );
-                        }
-                        lumit_core::fx::Resolved::Flash {
-                            strength,
-                            colour,
-                            mix,
-                        } => {
-                            tex = self.fx.flash(
-                                &self.ctx,
-                                &tex,
-                                w,
-                                h,
-                                &lumit_gpu::fx::FlashOp {
-                                    strength: *strength,
-                                    colour: *colour,
-                                    mix: *mix,
-                                },
-                            );
-                        }
-                        lumit_core::fx::Resolved::ColourBalance {
-                            lift,
-                            gamma,
-                            gain,
-                            mix,
-                        } => {
-                            tex = self.fx.colour_balance(
-                                &self.ctx,
-                                &tex,
-                                w,
-                                h,
-                                &lumit_gpu::fx::ColourBalanceOp {
-                                    lift: *lift,
-                                    gamma: *gamma,
-                                    gain: *gain,
-                                    mix: *mix,
-                                },
-                            );
-                        }
-                        lumit_core::fx::Resolved::Saturation { saturation, mix } => {
-                            tex = self.fx.saturation(
-                                &self.ctx,
-                                &tex,
-                                w,
-                                h,
-                                &lumit_gpu::fx::SaturationOp {
-                                    saturation: *saturation,
-                                    mix: *mix,
-                                },
-                            );
-                        }
-                        lumit_core::fx::Resolved::Transform {
-                            anchor,
-                            position,
-                            scale,
-                            rotation_deg,
-                            opacity,
-                            mix,
-                        } => {
-                            let (m, off, opacity) = lumit_core::fx::transform_op(
-                                *anchor,
-                                *position,
-                                *scale,
-                                *rotation_deg,
-                                *opacity,
-                            );
-                            tex = self.fx.transform(
-                                &self.ctx,
-                                &tex,
-                                w,
-                                h,
-                                &lumit_gpu::fx::TransformOp {
-                                    m,
-                                    off,
-                                    opacity,
-                                    mix: *mix,
-                                },
-                            );
-                        }
-                    }
-                }
-            }
+                crate::fxops::run_ops(&self.fx, &self.ctx, tex, w, h, &l.fx)
+            };
             linear_textures.push(tex);
         }
         let cam_mat = camera.map(|pose| crate::export::camera_mat(width, height, pose));
@@ -8189,13 +8164,14 @@ impl GpuViewer {
                 },
             )
             .collect();
-        self.compositor.composite_with_camera(
+        self.compositor.composite_seeded(
             &self.ctx,
             width,
             height,
             background,
             &comp_layers,
             cam_mat,
+            seed.as_ref(),
         )
     }
 
@@ -10244,6 +10220,92 @@ mod geometry_tests {
         let draws = build_comp_draws(&doc, &patched, 0.0, &map, &mut visited);
         assert_eq!(draws.len(), 1);
         assert_eq!(draws[0].position.0, 500.0);
+    }
+
+    /// An adjustment layer with a live stack emits an Adjust staging draw
+    /// above the content beneath it (docs/06 §1.5), carrying its resolved
+    /// effects, comp-sized geometry, and a comp-sized mask coverage; a dead
+    /// stack (fx switch off, everything disabled, or no effects) emits
+    /// nothing at all.
+    #[test]
+    fn a_live_adjustment_layer_emits_a_staging_draw() {
+        let solid_def = Uuid::now_v7();
+        let base = Layer {
+            id: Uuid::now_v7(),
+            name: "under".into(),
+            kind: LayerKind::Solid { def: solid_def },
+            in_point: CompTime(Rational::ZERO),
+            out_point: CompTime(Rational::new(10, 1).unwrap()),
+            start_offset: CompTime(Rational::ZERO),
+            transform: TransformGroup::default(),
+            matte: None,
+            blend: Default::default(),
+            masks: Vec::new(),
+            effects: Vec::new(),
+            switches: Switches::default(),
+            extra: serde_json::Map::new(),
+        };
+        let mut adj = base.clone();
+        adj.id = Uuid::now_v7();
+        adj.name = "adjust".into();
+        adj.kind = LayerKind::Adjustment;
+        adj.effects
+            .push(lumit_core::fx::instantiate("saturation").unwrap());
+        adj.masks
+            .push(lumit_core::mask::Mask::rectangle(0.0, 0.0, 960.0, 1080.0));
+        let mut doc = Document::new();
+        doc.items.push(lumit_core::model::ProjectItem::Solid(
+            lumit_core::model::SolidDef {
+                id: solid_def,
+                name: "red".into(),
+                colour: LinearColour([1.0, 0.0, 0.0, 1.0]),
+                width: 1920,
+                height: 1080,
+                extra: serde_json::Map::new(),
+            },
+        ));
+        let comp = Composition {
+            id: Uuid::now_v7(),
+            name: "Comp".into(),
+            width: 1920,
+            height: 1080,
+            frame_rate: FrameRate::new(60, 1).unwrap(),
+            duration: Duration(Rational::new(10, 1).unwrap()),
+            background: LinearColour::BLACK,
+            work_area: None,
+            // Index 0 = top: the adjustment sits above the solid.
+            layers: vec![adj.clone(), base.clone()],
+            markers: Vec::new(),
+            extra: serde_json::Map::new(),
+        };
+        let map: HashMap<Uuid, &CompLayerPixels> = HashMap::new();
+        let mut visited = vec![comp.id];
+        let draws = build_comp_draws(&doc, &comp, 0.0, &map, &mut visited);
+        // Bottom-up: the solid first, then the staging point above it.
+        assert_eq!(draws.len(), 2);
+        assert!(matches!(draws[0].source, DrawSource::Pixels { .. }));
+        assert!(matches!(draws[1].source, DrawSource::Adjust));
+        assert_eq!(draws[1].natural_size, (1920.0, 1080.0));
+        assert_eq!(draws[1].fx.len(), 1);
+        let (_, cov_w, cov_h) = draws[1].mask_cov.as_ref().unwrap();
+        assert_eq!((*cov_w, *cov_h), (1920, 1080));
+
+        // Dead stacks emit nothing: fx switch off, all effects disabled,
+        // or an empty stack.
+        for edit in [
+            &(|l: &mut Layer| l.switches.fx = false) as &dyn Fn(&mut Layer),
+            &|l: &mut Layer| l.effects[0].enabled = false,
+            &|l: &mut Layer| l.effects.clear(),
+        ] {
+            let mut dead = adj.clone();
+            edit(&mut dead);
+            let mut comp = comp.clone();
+            comp.layers[0] = dead;
+            let mut visited = vec![comp.id];
+            let draws = build_comp_draws(&doc, &comp, 0.0, &map, &mut visited);
+            assert_eq!(draws.len(), 1, "a dead adjustment stack must not stage");
+            assert!(matches!(draws[0].source, DrawSource::Pixels { .. }));
+        }
     }
 }
 

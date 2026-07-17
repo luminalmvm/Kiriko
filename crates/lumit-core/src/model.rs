@@ -352,10 +352,13 @@ pub enum CollapseState {
 }
 
 /// Evaluate the §1.4 collapse rules for `layer` inside `comp` at local time
-/// `lt`. Effects join the force list when the effect stack lands. An inner
-/// layer using a matte also forces the intermediate for now: a matte renders
-/// "alone into comp space", and splicing that across comps is a later
-/// refinement — forcing keeps preview and export pixel-identical.
+/// `lt`. Beyond the layer's own mask/blend/opacity/effects and being matte
+/// consumed, two inner conditions force: an inner layer using a matte (a
+/// matte renders "alone into comp space", and splicing that across comps is
+/// a later refinement — forcing keeps preview and export pixel-identical),
+/// and an inner adjustment layer with a live stack (K-091: its effects
+/// apply to the composite beneath it *within its own comp*, and splicing
+/// would hand it the whole parent stack instead).
 pub fn collapse_state(doc: &Document, comp: &Composition, layer: &Layer, lt: f64) -> CollapseState {
     let LayerKind::Precomp { comp: nested_id } = &layer.kind else {
         return CollapseState::Off;
@@ -363,16 +366,22 @@ pub fn collapse_state(doc: &Document, comp: &Composition, layer: &Layer, lt: f64
     if !layer.switches.collapse {
         return CollapseState::Off;
     }
-    let inner_matte = doc.comp(*nested_id).is_some_and(|nested| {
-        nested
-            .layers
-            .iter()
-            .any(|l| l.switches.visible && l.matte.is_some())
+    let inner_forces = doc.comp(*nested_id).is_some_and(|nested| {
+        nested.layers.iter().any(|l| {
+            l.switches.visible
+                && (l.matte.is_some()
+                    || (matches!(l.kind, LayerKind::Adjustment)
+                        && l.switches.fx
+                        && l.effects.iter().any(|e| e.enabled)))
+        })
     });
     let forced = !layer.masks.is_empty()
+        // §1.4: any live effect on the Precomp layer itself — its stack runs
+        // on the nested comp's raster, which splicing never produces.
+        || (layer.switches.fx && layer.effects.iter().any(|e| e.enabled))
         || layer.blend != BlendMode::Normal
         || layer.transform.opacity.value_at(lt) < 99.999
-        || inner_matte
+        || inner_forces
         || comp
             .layers
             .iter()
@@ -751,6 +760,28 @@ mod tests {
             collapse_state(&doc, &comp, &masked, 1.0),
             CollapseState::Forced
         );
+        // §1.4: a live effect stack on the Precomp layer itself forces —
+        // splicing has no nested-comp raster for the stack to run on. The
+        // fx switch or disabling every effect lifts it.
+        let mut effected = pre.clone();
+        effected
+            .effects
+            .push(crate::fx::instantiate("blur").unwrap());
+        assert_eq!(
+            collapse_state(&doc, &comp, &effected, 1.0),
+            CollapseState::Forced
+        );
+        effected.switches.fx = false;
+        assert_eq!(
+            collapse_state(&doc, &comp, &effected, 1.0),
+            CollapseState::Active
+        );
+        effected.switches.fx = true;
+        effected.effects[0].enabled = false;
+        assert_eq!(
+            collapse_state(&doc, &comp, &effected, 1.0),
+            CollapseState::Active
+        );
         let mut blended = pre.clone();
         blended.blend = BlendMode::Add;
         assert_eq!(
@@ -805,6 +836,74 @@ mod tests {
         assert_eq!(
             collapse_state(&doc2, &comp, &pre2, 1.0),
             CollapseState::Forced
+        );
+    }
+
+    /// K-091: an inner adjustment layer with a live effect stack forces the
+    /// intermediate — its effects apply to the composite beneath it within
+    /// its own comp, and splicing would hand it the parent stack instead.
+    /// A bypassed stack (fx switch off, or every effect disabled) collapses
+    /// normally.
+    #[test]
+    fn an_inner_live_adjustment_layer_forces_the_intermediate() {
+        let mut inner_comp = comp_with_cameras();
+        let mut adj = inner_comp.layers[0].clone();
+        adj.id = Uuid::now_v7();
+        adj.kind = LayerKind::Adjustment;
+        adj.switches.visible = true;
+        adj.effects
+            .push(crate::fx::instantiate("saturation").unwrap());
+        inner_comp.layers.push(adj);
+        let nested_id = inner_comp.id;
+        let mut doc = Document::new();
+        doc.items.push(ProjectItem::Composition(inner_comp));
+
+        let comp = comp_with_cameras();
+        let mut pre = comp.layers[0].clone();
+        pre.id = Uuid::now_v7();
+        pre.kind = LayerKind::Precomp { comp: nested_id };
+        pre.switches.visible = true;
+        pre.switches.collapse = true;
+        pre.blend = BlendMode::Normal;
+        pre.masks.clear();
+        pre.transform = TransformGroup::default();
+        assert_eq!(
+            collapse_state(&doc, &comp, &pre, 1.0),
+            CollapseState::Forced
+        );
+
+        // Bypass the stack both ways: each restores Active.
+        let with = |edit: &dyn Fn(&mut Layer)| {
+            let mut doc = Document::new();
+            let mut inner_comp = comp_with_cameras();
+            let mut adj = inner_comp.layers[0].clone();
+            adj.id = Uuid::now_v7();
+            adj.kind = LayerKind::Adjustment;
+            adj.switches.visible = true;
+            adj.effects
+                .push(crate::fx::instantiate("saturation").unwrap());
+            edit(&mut adj);
+            let nested_id = inner_comp.id;
+            inner_comp.layers.push(adj);
+            doc.items.push(ProjectItem::Composition(inner_comp));
+            let mut pre = pre.clone();
+            pre.kind = LayerKind::Precomp { comp: nested_id };
+            collapse_state(&doc, &comp, &pre, 1.0)
+        };
+        assert_eq!(
+            with(&|l| l.switches.fx = false),
+            CollapseState::Active,
+            "fx switch off must not force"
+        );
+        assert_eq!(
+            with(&|l| l.effects[0].enabled = false),
+            CollapseState::Active,
+            "a fully disabled stack must not force"
+        );
+        assert_eq!(
+            with(&|l| l.switches.visible = false),
+            CollapseState::Active,
+            "a hidden adjustment layer must not force"
         );
     }
 

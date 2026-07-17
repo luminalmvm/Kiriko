@@ -395,9 +395,9 @@ fn feed_source(
             }
         }
         LayerKind::Adjustment => {
-            // No source of its own; its effect stack (none yet) is hashed here,
-            // and its masks/transform are hashed at the layer level like any
-            // other layer's.
+            // No source of its own; its live effect stack, masks, transform
+            // and opacity — the staging inputs (docs/06 §1.5) — are all
+            // hashed at the layer level like any other layer's.
             h.update(b"adjust");
         }
     }

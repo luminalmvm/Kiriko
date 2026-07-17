@@ -594,195 +594,75 @@ impl Renderer<'_> {
         // raster pixels (§2.3 factor 1).
         let resolved = lumit_core::fx::resolve_stack(&layer.effects, lt, comp_diag, 1.0);
         let (w, h) = (tex.width(), tex.height());
-        let mut tex = tex;
-        for op in &resolved {
-            match op {
-                lumit_core::fx::Resolved::Blur {
-                    radius_px,
-                    edge,
-                    mix,
-                } => {
-                    tex = self.fx.blur(
-                        self.gpu,
-                        &tex,
-                        w,
-                        h,
-                        &lumit_gpu::fx::BlurOp {
-                            radius_px: *radius_px,
-                            edge: *edge,
-                            mix: *mix,
-                        },
-                    );
-                }
-                lumit_core::fx::Resolved::DirBlur {
-                    length_px,
-                    angle_deg,
-                    edge,
-                    mix,
-                } => {
-                    let (dx, dy) = lumit_core::fx::rgb_split_offset(1.0, *angle_deg);
-                    tex = self.fx.dir_blur(
-                        self.gpu,
-                        &tex,
-                        w,
-                        h,
-                        &lumit_gpu::fx::DirBlurOp {
-                            dx,
-                            dy,
-                            length_px: *length_px,
-                            taps: lumit_core::fx::cpu::dir_blur_taps(*length_px),
-                            edge: *edge,
-                            mix: *mix,
-                        },
-                    );
-                }
-                lumit_core::fx::Resolved::Sharpen {
-                    amount,
-                    radius_px,
-                    threshold,
-                    luma_only,
-                    mix,
-                } => {
-                    tex = self.fx.sharpen(
-                        self.gpu,
-                        &tex,
-                        w,
-                        h,
-                        &lumit_gpu::fx::SharpenOp {
-                            amount: *amount,
-                            radius_px: *radius_px,
-                            threshold: *threshold,
-                            luma_only: *luma_only,
-                            mix: *mix,
-                        },
-                    );
-                }
-                lumit_core::fx::Resolved::RgbSplit {
-                    amount_px,
-                    angle_deg,
-                    radial,
-                    mix,
-                } => {
-                    let (dx, dy) = lumit_core::fx::rgb_split_offset(*amount_px, *angle_deg);
-                    tex = self.fx.rgb_split(
-                        self.gpu,
-                        &tex,
-                        w,
-                        h,
-                        &lumit_gpu::fx::RgbSplitOp {
-                            dx,
-                            dy,
-                            amount_px: *amount_px,
-                            radial: *radial,
-                            mix: *mix,
-                        },
-                    );
-                }
-                lumit_core::fx::Resolved::SpectralSplit {
-                    amount_px,
-                    angle_deg,
-                    radial,
-                    mix,
-                } => {
-                    let (dx, dy) = lumit_core::fx::rgb_split_offset(*amount_px, *angle_deg);
-                    tex = self.fx.spectral_split(
-                        self.gpu,
-                        &tex,
-                        w,
-                        h,
-                        &lumit_gpu::fx::SpectralSplitOp {
-                            dx,
-                            dy,
-                            amount_px: *amount_px,
-                            radial: *radial,
-                            basis: lumit_core::fx::spectral_basis_vec4(),
-                            mix: *mix,
-                        },
-                    );
-                }
-                lumit_core::fx::Resolved::Flash {
-                    strength,
-                    colour,
-                    mix,
-                } => {
-                    tex = self.fx.flash(
-                        self.gpu,
-                        &tex,
-                        w,
-                        h,
-                        &lumit_gpu::fx::FlashOp {
-                            strength: *strength,
-                            colour: *colour,
-                            mix: *mix,
-                        },
-                    );
-                }
-                lumit_core::fx::Resolved::ColourBalance {
-                    lift,
-                    gamma,
-                    gain,
-                    mix,
-                } => {
-                    tex = self.fx.colour_balance(
-                        self.gpu,
-                        &tex,
-                        w,
-                        h,
-                        &lumit_gpu::fx::ColourBalanceOp {
-                            lift: *lift,
-                            gamma: *gamma,
-                            gain: *gain,
-                            mix: *mix,
-                        },
-                    );
-                }
-                lumit_core::fx::Resolved::Saturation { saturation, mix } => {
-                    tex = self.fx.saturation(
-                        self.gpu,
-                        &tex,
-                        w,
-                        h,
-                        &lumit_gpu::fx::SaturationOp {
-                            saturation: *saturation,
-                            mix: *mix,
-                        },
-                    );
-                }
-                lumit_core::fx::Resolved::Transform {
-                    anchor,
-                    position,
-                    scale,
-                    rotation_deg,
-                    opacity,
-                    mix,
-                } => {
-                    let (m, off, opacity) = lumit_core::fx::transform_op(
-                        *anchor,
-                        *position,
-                        *scale,
-                        *rotation_deg,
-                        *opacity,
-                    );
-                    tex = self.fx.transform(
-                        self.gpu,
-                        &tex,
-                        w,
-                        h,
-                        &lumit_gpu::fx::TransformOp {
-                            m,
-                            off,
-                            opacity,
-                            mix: *mix,
-                        },
-                    );
-                }
-            }
-        }
-        tex
+        crate::fxops::run_ops(&self.fx, self.gpu, tex, w, h, &resolved)
     }
 
     /// Render a whole comp at time `t` into a linear fp16 texture (recursive
     /// through Precomp layers).
+    /// The adjustment layer's comp-space coverage (docs/06 §1.5): its mask
+    /// raster — white where the effects apply — placed by its transform, so
+    /// the transform moves the coverage map, never the picture. No masks
+    /// means full coverage (a white quad over the whole comp).
+    fn adjust_coverage(
+        &self,
+        comp: &Composition,
+        l: &lumit_core::model::Layer,
+        lt: f64,
+        camera: Option<lumit_gpu::Mat4>,
+    ) -> Tex {
+        let white = [255u8, 255, 255, 255];
+        let comp_cov;
+        let (rgba, w, h): (&[u8], u32, u32) = if l.masks.is_empty() {
+            (&white, 1, 1)
+        } else {
+            comp_cov = mask_rgba(&lumit_core::mask::combined_coverage(
+                &l.masks,
+                comp.width,
+                comp.height,
+                f64::from(comp.width),
+                f64::from(comp.height),
+            ));
+            (&comp_cov, comp.width, comp.height)
+        };
+        let src = self.colour.upload_srgb8(self.gpu, rgba, w, h);
+        let linear = self.colour.linearise(self.gpu, &src);
+        let tr = &l.transform;
+        self.compositor.composite_with_camera(
+            self.gpu,
+            comp.width,
+            comp.height,
+            [0.0, 0.0, 0.0, 0.0],
+            &[lumit_gpu::CompositeLayer {
+                texture: &linear,
+                size: (comp.width as f32, comp.height as f32),
+                position: (
+                    tr.position_x.value_at(lt) as f32,
+                    tr.position_y.value_at(lt) as f32,
+                ),
+                anchor: (
+                    tr.anchor_x.value_at(lt) as f32,
+                    tr.anchor_y.value_at(lt) as f32,
+                ),
+                scale: (
+                    tr.scale_x.value_at(lt) as f32,
+                    tr.scale_y.value_at(lt) as f32,
+                ),
+                rotation_deg: tr.rotation.value_at(lt) as f32,
+                // Layer opacity is applied once, in the blend itself.
+                opacity: 100.0,
+                matte: None,
+                blend: lumit_gpu::Blend::Normal,
+                z: tr.position_z.value_at(lt) as f32,
+                rotation_x_deg: tr.rotation_x.value_at(lt) as f32,
+                rotation_y_deg: tr.rotation_y.value_at(lt) as f32,
+                three_d: l.switches.three_d,
+                layer_mask: None,
+                pre: None,
+            }],
+            camera,
+        )
+    }
+
     fn render_comp_linear(
         &mut self,
         comp: &Composition,
@@ -904,9 +784,68 @@ impl Renderer<'_> {
             }
         }
 
+        let bg = comp.background.0;
+        let bg = [
+            f64::from(bg[0]),
+            f64::from(bg[1]),
+            f64::from(bg[2]),
+            f64::from(bg[3]),
+        ];
+        let comp_diag = ((comp.width as f32).powi(2) + (comp.height as f32).powi(2)).sqrt();
+        // Adjustment staging (docs/06 §1.5): at each live adjustment layer,
+        // everything gathered so far composites into an intermediate (the
+        // first stage over the comp background, later ones seeded on the
+        // previous blend), the stack runs on it, and the coverage blend
+        // becomes the seed the layers above composite onto. Mirrors the
+        // preview's realise split exactly (K-031).
+        let mut acc: Option<Tex> = None;
         let mut draws: Vec<lumit_gpu::CompositeLayer> = Vec::new();
         for l in comp.layers.iter().rev() {
             if !l.switches.visible {
+                continue;
+            }
+            if matches!(l.kind, LayerKind::Adjustment) {
+                if t < l.in_point.0.to_f64() || t >= l.out_point.0.to_f64() {
+                    continue;
+                }
+                let lt = t - l.start_offset.0.to_f64();
+                let fx = if l.switches.fx {
+                    lumit_core::fx::resolve_stack(&l.effects, lt, comp_diag, 1.0)
+                } else {
+                    Vec::new()
+                };
+                if fx.is_empty() {
+                    continue;
+                }
+                let below = self.compositor.composite_seeded(
+                    self.gpu,
+                    comp.width,
+                    comp.height,
+                    bg,
+                    &draws,
+                    camera,
+                    acc.as_ref(),
+                );
+                draws.clear();
+                let processed = crate::fxops::run_ops(
+                    &self.fx,
+                    self.gpu,
+                    below.clone(),
+                    comp.width,
+                    comp.height,
+                    &fx,
+                );
+                let coverage = self.adjust_coverage(comp, l, lt, camera);
+                let opacity = (l.transform.opacity.value_at(lt) as f32 / 100.0).clamp(0.0, 1.0);
+                acc = Some(self.fx.adjust_blend(
+                    self.gpu,
+                    &below,
+                    &processed,
+                    &coverage,
+                    comp.width,
+                    comp.height,
+                    opacity,
+                ));
                 continue;
             }
             if let Some(specs) = spliced.get(&l.id) {
@@ -970,19 +909,14 @@ impl Renderer<'_> {
             });
         }
 
-        let bg = comp.background.0;
-        Ok(self.compositor.composite_with_camera(
+        Ok(self.compositor.composite_seeded(
             self.gpu,
             comp.width,
             comp.height,
-            [
-                f64::from(bg[0]),
-                f64::from(bg[1]),
-                f64::from(bg[2]),
-                f64::from(bg[3]),
-            ],
+            bg,
             &draws,
             camera,
+            acc.as_ref(),
         ))
     }
 }

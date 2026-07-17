@@ -231,6 +231,13 @@ struct TransformParams {
     mix_amt: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AdjustParams {
+    opacity: f32,
+    _pad: [f32; 3],
+}
+
 /// The effect-pass engine: compiled kernels plus their layouts, one per
 /// device (owned alongside the Compositor by whoever renders).
 pub struct FxEngine {
@@ -244,7 +251,11 @@ pub struct FxEngine {
     colour_balance: wgpu::ComputePipeline,
     saturation: wgpu::ComputePipeline,
     transform: wgpu::ComputePipeline,
+    adjust: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    /// The adjustment blend's own layout: three sampled inputs (below,
+    /// processed, coverage) where every effect kernel takes two.
+    adjust_layout: wgpu::BindGroupLayout,
 }
 
 impl FxEngine {
@@ -285,6 +296,43 @@ impl FxEngine {
                 bind_group_layouts: &[&layout],
                 push_constant_ranges: &[],
             });
+        let adjust_layout = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("fx-adjust-layout"),
+                entries: &[
+                    texture_entry(0),
+                    texture_entry(1),
+                    texture_entry(2),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: WORKING_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let adjust_pl = ctx
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("fx-adjust-pl"),
+                bind_group_layouts: &[&adjust_layout],
+                push_constant_ranges: &[],
+            });
         let module = |wgsl: &str, name: &str| {
             ctx.device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -312,6 +360,7 @@ impl FxEngine {
         let balance_mod = module(include_str!("fx_colourbalance.wgsl"), "fx-colour-balance");
         let saturation_mod = module(include_str!("fx_saturation.wgsl"), "fx-saturation");
         let transform_mod = module(include_str!("fx_transform.wgsl"), "fx-transform");
+        let adjust_mod = module(include_str!("fx_adjust.wgsl"), "fx-adjust");
         let blur = pipeline(&blur_mod, "fx-blur", "blur_pass");
         let dir_blur = pipeline(&dir_blur_mod, "fx-dir-blur", "dir_blur");
         let sharpen_unpremultiply = pipeline(&sharpen_mod, "fx-sharpen-un", "unpremultiply");
@@ -322,6 +371,16 @@ impl FxEngine {
         let colour_balance = pipeline(&balance_mod, "fx-colour-balance", "colour_balance");
         let saturation = pipeline(&saturation_mod, "fx-saturation", "saturate_fx");
         let transform = pipeline(&transform_mod, "fx-transform", "transform");
+        let adjust = ctx
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("fx-adjust"),
+                layout: Some(&adjust_pl),
+                module: &adjust_mod,
+                entry_point: Some("adjust_blend"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         Self {
             blur,
             dir_blur,
@@ -333,8 +392,90 @@ impl FxEngine {
             colour_balance,
             saturation,
             transform,
+            adjust,
             layout,
+            adjust_layout,
         }
+    }
+
+    /// The adjustment-layer blend (docs/06 §1.5): per-channel lerp between
+    /// the accumulated composite `below` and its effected copy `processed`,
+    /// by `coverage`'s alpha (the layer's comp-space mask raster) times
+    /// `opacity` (the layer opacity, 0..1). All three textures are comp
+    /// sized; returns a new comp-sized working texture.
+    #[allow(clippy::too_many_arguments)]
+    pub fn adjust_blend(
+        &self,
+        ctx: &GpuContext,
+        below: &wgpu::Texture,
+        processed: &wgpu::Texture,
+        coverage: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        opacity: f32,
+    ) -> wgpu::Texture {
+        use wgpu::util::DeviceExt;
+        let out = work_texture(ctx, w, h, "fx-adjust-out");
+        let ubuf = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx-adjust-params"),
+                contents: bytemuck::bytes_of(&AdjustParams {
+                    opacity,
+                    _pad: [0.0; 3],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx-adjust-bind"),
+            layout: &self.adjust_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(
+                        &below.create_view(&Default::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(
+                        &processed.create_view(&Default::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(
+                        &coverage.create_view(&Default::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(
+                        &out.create_view(&Default::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: ubuf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fx-adjust-enc"),
+            });
+        {
+            let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fx-adjust-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.adjust);
+            cpass.set_bind_group(0, &bind, &[]);
+            cpass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+        }
+        ctx.queue.submit([enc.finish()]);
+        out
     }
 
     /// Apply one gaussian blur to a linear working texture, returning a new
@@ -1422,5 +1563,87 @@ mod tests {
                 assert_eq!(gpu, gpu2, "GPU directional blur must be bit-stable");
             }
         }
+    }
+
+    /// The adjustment blend (docs/06 §1.5): out = mix(below, processed,
+    /// coverage·opacity) per channel, alpha included — pinned against a CPU
+    /// lerp on the corpus, with the end stops bit-exact: zero coverage
+    /// returns `below` untouched, full coverage at opacity 1 returns
+    /// `processed` untouched.
+    #[test]
+    fn adjust_blend_lerps_by_coverage_times_opacity() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (48u32, 32u32);
+        let below = corpus(w, h);
+        // A visibly different "effected" copy (any distinct image works).
+        let processed: Vec<f32> = below
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if i % 4 == 3 {
+                    *v
+                } else {
+                    f16_to_f32(f16_bits(1.0 - v * 0.5))
+                }
+            })
+            .collect();
+        // Coverage ramps left to right in the alpha channel — the mask
+        // raster's shape; colour channels are ignored by the kernel.
+        let mut cov = vec![0.0f32; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                cov[i + 3] = f16_to_f32(f16_bits(x as f32 / (w - 1) as f32));
+            }
+        }
+        let tb = upload_linear_f32(&ctx, &below, w, h);
+        let tp = upload_linear_f32(&ctx, &processed, w, h);
+        let tc = upload_linear_f32(&ctx, &cov, w, h);
+        for opacity in [1.0f32, 0.35] {
+            let out = fx.adjust_blend(&ctx, &tb, &tp, &tc, w, h, opacity);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+            let want: Vec<f32> = below
+                .iter()
+                .zip(&processed)
+                .enumerate()
+                .map(|(i, (b, p))| {
+                    let c = (cov[(i / 4) * 4 + 3] * opacity).clamp(0.0, 1.0);
+                    f16_to_f32(f16_bits(b * (1.0 - c) + p * c))
+                })
+                .collect();
+            let worst = worst_f16_ulp(&gpu, &want);
+            eprintln!("adjust blend opacity={opacity}: worst {worst} ulp");
+            assert!(worst <= 1, "opacity {opacity}: worst {worst} fp16 ULP");
+
+            let out2 = fx.adjust_blend(&ctx, &tb, &tp, &tc, w, h, opacity);
+            let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
+            assert_eq!(gpu, gpu2, "GPU adjust blend must be bit-stable");
+        }
+        // End stops: no coverage passes `below` through bit-exactly; full
+        // coverage at opacity 1 is `processed` bit-exactly.
+        let clear = vec![0.0f32; (w * h * 4) as usize];
+        let t0 = upload_linear_f32(&ctx, &clear, w, h);
+        let out = fx.adjust_blend(&ctx, &tb, &tp, &t0, w, h, 1.0);
+        assert_eq!(
+            readback_linear_f32(&ctx, &out, w, h).unwrap(),
+            below,
+            "zero coverage must be a bit-exact passthrough"
+        );
+        let full: Vec<f32> = clear
+            .iter()
+            .enumerate()
+            .map(|(i, _)| if i % 4 == 3 { 1.0 } else { 0.0 })
+            .collect();
+        let t1 = upload_linear_f32(&ctx, &full, w, h);
+        let out = fx.adjust_blend(&ctx, &tb, &tp, &t1, w, h, 1.0);
+        assert_eq!(
+            readback_linear_f32(&ctx, &out, w, h).unwrap(),
+            processed,
+            "full coverage at opacity 1 must be the processed image bit-exactly"
+        );
     }
 }

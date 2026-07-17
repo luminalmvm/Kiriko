@@ -102,8 +102,11 @@ frame times; its own frame rate governs only its internal keyframe display.
 to a buffer at that point, at concatenated-transform resolution where possible): any effect on
 the Precomp layer; any mask on it; a blend mode other than Normal or opacity below 100% on the
 Precomp layer itself; the Precomp layer being consumed as a matte; preserve-underlying-
-transparency. The Viewer MUST indicate when a collapsed layer has been forced to an
-intermediate (a dimmed collapse switch). Text and shape layers behave as permanently collapsed
+transparency; an inner layer consuming a matte (splicing a comp-space matte across comps is a
+later refinement); a live adjustment layer inside the nested comp (K-091 — its stack applies
+within its own comp, which splicing cannot honour; After Effects instead lets it bleed into
+the parent's stack, and Lumit deliberately does not). The Viewer MUST indicate when a
+collapsed layer has been forced to an intermediate (a dimmed collapse switch). Text and shape layers behave as permanently collapsed
 vector sources: rasterisation happens after the full transform chain every frame.
 
 ### 1.5 Adjustment layers

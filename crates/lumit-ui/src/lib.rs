@@ -3,6 +3,7 @@
 
 pub mod app_state;
 pub mod export;
+pub mod fxops;
 pub mod icons;
 pub mod native_menu;
 pub mod pixels;

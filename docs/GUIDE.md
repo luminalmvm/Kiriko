@@ -660,12 +660,22 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   can't look different in the exported file. A regression test proves both promises:
   z = 0 maps 1:1, and depth scales exactly as the formula says.
 - **Adjustment layers** (Composition → Add adjustment layer) — a comp-sized layer with no
-  picture of its own: its effects (and masks, to limit the region) apply to *everything
-  beneath it* on the stack, so one grade or glow can treat a whole composite at once. The
-  layer type and its place in the render graph are wired now — the compiler gives it an
-  "adjust" node that wraps the composite below — but since the effect suite arrives in a
-  later phase, today an adjustment layer simply passes the picture through unchanged. It also
-  reuses the solid's glyph for the moment; a distinct icon is a small later touch.
+  picture of its own: its effects apply to *everything beneath it* on the stack, so one
+  colour balance or blur can treat a whole composite at once (K-091). How it works, in
+  kitchen terms: when the render reaches an adjustment layer, it takes a snapshot of
+  everything cooked so far, runs the layer's effect stack on that snapshot, and then blends
+  the treated and untreated versions back together. What controls the blend is *coverage* —
+  draw masks on the adjustment layer and only the masked region gets the effects; lower the
+  layer's opacity and the effects fade partway; move or scale the layer and the affected
+  *region* moves, never the picture itself. Add the Transform effect to one and you can pan,
+  rotate or zoom the whole composite below — the punch-in trick the effect was built for.
+  Both the preview and the export walk the exact same staging code (and every effect runs
+  through one shared "run the stack" routine, `fxops`, so a new effect wired up once works
+  in the preview, in exports, and on adjustment layers with no extra plumbing). One honest
+  limit: a live adjustment layer inside a collapsed precomp quietly turns the collapse off
+  for that precomp (the switch dims) — its effects must see only its own comp's contents,
+  which splicing into the parent cannot honour. It still reuses the solid's glyph for the
+  moment; a distinct icon is a small later touch.
 - **The window layout** (K-074, refined by K-086) — the picture (the Viewer) fills the middle
   with nothing above it: no tab, no strip, just the image. Around it sit the other panels:
   Project and the effect panels stacked as tabs on the left, scopes on the right, the
