@@ -796,12 +796,20 @@ pub(crate) fn comp_tab_strip(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
     }
 }
 
+/// A drag payload carrying a built-in effect's stable `match_name` (K-101):
+/// dragging an entry out of the Effects & Presets browser and releasing it
+/// over a Timeline layer row applies that effect there. A distinct type from
+/// the Project panel's `uuid::Uuid` item payload, so a drop target can tell
+/// "an effect" and "a project item" apart from the payload's type alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct EffectDragPayload(pub &'static str);
+
 /// The effects browser (docs/07-UI-SPEC §7): the built-in catalogue
 /// (docs/08-EFFECTS.md), grouped by category and filtered by the search
 /// field, mirroring the Add-effect menu's grouping (`effects_rows`).
-/// Read-only for now: applying an effect lives on the layer's own Effects
-/// group in the Timeline; drag/double-click apply from here, presets, and
-/// favourites are later steps of the same spec section.
+/// Each entry is a drag source (K-101): drag it onto a footage or
+/// adjustment layer row in the Timeline to apply it there. Double-click
+/// apply, presets and favourites are later steps of the same spec section.
 pub(crate) fn effects_panel(ui: &mut egui::Ui, theme: &Theme) {
     use lumit_core::fx;
     ui.add_space(6.0);
@@ -843,7 +851,17 @@ pub(crate) fn effects_panel(ui: &mut egui::Ui, theme: &Theme) {
                 .default_open(true)
                 .show(ui, |ui| {
                     for schema in members {
-                        ui.label(
+                        // A drag source carrying the effect's match_name
+                        // (K-101); `draggable_row` is the same click-and-drag
+                        // row used for footage/comp items above, so a plain
+                        // click still does nothing here rather than looking
+                        // dead under a drag-only overlay.
+                        let id = ui.id().with(("fx-browser-drag", schema.match_name));
+                        draggable_row(
+                            ui,
+                            id,
+                            EffectDragPayload(schema.match_name),
+                            false,
                             egui::RichText::new(schema.label)
                                 .small()
                                 .color(theme.text_primary),
@@ -862,7 +880,7 @@ pub(crate) fn effects_panel(ui: &mut egui::Ui, theme: &Theme) {
     ui.add_space(6.0);
     ui.label(
         egui::RichText::new(
-            "Apply an effect from a layer's Effects group in the Timeline for now.",
+            "Drag an effect onto a layer in the Timeline, or add one from a layer's own Effects group there.",
         )
         .small()
         .color(theme.text_muted),
