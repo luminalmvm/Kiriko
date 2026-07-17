@@ -8572,13 +8572,25 @@ pub struct Shell {
     #[serde(skip, default)]
     theme: Theme,
     /// The user's background-ramp pick (Window menu); the seed of the full
-    /// theme picker to come. Persisted with the workspace.
+    /// theme picker to come. Meaningful only under `ThemeMode::Dark` (there
+    /// is one light ramp). Persisted with the workspace.
     #[serde(default)]
     theme_variant: crate::theme::ThemeVariant,
     /// A custom accent colour, when picked (Window menu). None = the clay
     /// default. Persisted with the workspace.
     #[serde(default)]
     accent_override: Option<[u8; 3]>,
+    /// Light or dark (Window menu, K-092). Persisted with the workspace.
+    #[serde(default)]
+    theme_mode: crate::theme::ThemeMode,
+    /// Sharp (edge-to-edge) or Round (floating card) panel geometry (Window
+    /// menu, K-092). Persisted with the workspace.
+    #[serde(default)]
+    theme_shape: crate::theme::ThemeShape,
+    /// How much UI-chrome motion to show (Window menu, K-092). Persisted
+    /// with the workspace.
+    #[serde(default)]
+    animation_level: crate::theme::AnimationLevel,
     /// The panel that last took a click — it wears the accent boundary so the
     /// keyboard's home is always visible (AE's focused-panel edge).
     #[serde(skip, default)]
@@ -8711,6 +8723,9 @@ impl Default for Shell {
             theme: Theme::dark(),
             theme_variant: crate::theme::ThemeVariant::default(),
             accent_override: None,
+            theme_mode: crate::theme::ThemeMode::default(),
+            theme_shape: crate::theme::ThemeShape::default(),
+            animation_level: crate::theme::AnimationLevel::default(),
             active_panel: None,
             app: AppState::default(),
             splash: None,
@@ -8749,16 +8764,28 @@ impl Shell {
         let workspace_restored = restored.is_some();
         let mut shell = restored.unwrap_or_default();
         Theme::install_fonts(ctx);
-        shell.theme = Theme::of(shell.theme_variant); // honour the saved pick
+        // Honour the saved picks (K-092: mode × variant × shape).
+        shell.theme = Theme::for_settings(shell.theme_mode, shell.theme_variant, shell.theme_shape);
         if let Some(rgb) = shell.accent_override {
             shell.theme = shell.theme.with_accent(rgb);
         }
         shell.theme.apply(ctx);
+        crate::theme::apply_animation_level(ctx, shell.animation_level);
         ctx.style_mut(|s| s.visuals.panel_fill = shell.theme.surface_0);
 
         // The boot log (K-008): every line reflects real initialisation state.
         let mut lines = vec![
-            BootLine::ok("Theme: aizome-dark"),
+            BootLine::ok(format!(
+                "Theme: aizome-{} ({})",
+                match shell.theme_mode {
+                    crate::theme::ThemeMode::Dark => "dark",
+                    crate::theme::ThemeMode::Light => "light",
+                },
+                match shell.theme_shape {
+                    crate::theme::ThemeShape::Sharp => "sharp",
+                    crate::theme::ThemeShape::Round => "round",
+                }
+            )),
             BootLine::ok(if workspace_restored {
                 "Workspace: restored"
             } else {
@@ -9956,29 +9983,56 @@ impl Shell {
                         ui.close_menu();
                     }
                     ui.separator();
-                    // Background ramp pick — the seed of the full theme picker.
+                    // Recompose the full theme (K-092: mode × variant ×
+                    // shape) plus any accent override, then re-apply —
+                    // every radio group below funnels through this.
+                    let recompose = |shell: &mut Self, ctx: &egui::Context| {
+                        shell.theme = Theme::for_settings(
+                            shell.theme_mode,
+                            shell.theme_variant,
+                            shell.theme_shape,
+                        );
+                        if let Some(rgb) = shell.accent_override {
+                            shell.theme = shell.theme.with_accent(rgb);
+                        }
+                        shell.theme.apply(ctx);
+                        let s0 = shell.theme.surface_0;
+                        ctx.style_mut(|s| s.visuals.panel_fill = s0);
+                    };
+                    // Mode: light or dark (K-092).
                     ui.label(
-                        egui::RichText::new("Background")
+                        egui::RichText::new("Mode")
                             .small()
                             .color(self.theme.text_muted),
                     );
-                    let mut pick = self.theme_variant;
-                    ui.radio_value(&mut pick, crate::theme::ThemeVariant::Dark, "Dark");
-                    ui.radio_value(
-                        &mut pick,
-                        crate::theme::ThemeVariant::DarkBlue,
-                        "Dark blue (previous)",
-                    );
-                    if pick != self.theme_variant {
-                        self.theme_variant = pick;
-                        self.theme = Theme::of(pick);
-                        if let Some(rgb) = self.accent_override {
-                            self.theme = self.theme.with_accent(rgb);
+                    let mut mode = self.theme_mode;
+                    ui.radio_value(&mut mode, crate::theme::ThemeMode::Dark, "Dark");
+                    ui.radio_value(&mut mode, crate::theme::ThemeMode::Light, "Light");
+                    if mode != self.theme_mode {
+                        self.theme_mode = mode;
+                        recompose(self, ui.ctx());
+                    }
+                    // Background ramp pick — meaningless under Light (there
+                    // is one light ramp), so hidden rather than shown dead.
+                    if self.theme_mode == crate::theme::ThemeMode::Dark {
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new("Background")
+                                .small()
+                                .color(self.theme.text_muted),
+                        );
+                        let mut pick = self.theme_variant;
+                        ui.radio_value(&mut pick, crate::theme::ThemeVariant::Dark, "Dark");
+                        ui.radio_value(
+                            &mut pick,
+                            crate::theme::ThemeVariant::DarkBlue,
+                            "Dark blue (previous)",
+                        );
+                        if pick != self.theme_variant {
+                            self.theme_variant = pick;
+                            recompose(self, ui.ctx());
+                            ui.close_menu();
                         }
-                        self.theme.apply(ui.ctx());
-                        let s0 = self.theme.surface_0;
-                        ui.ctx().style_mut(|s| s.visuals.panel_fill = s0);
-                        ui.close_menu();
                     }
                     // Accent pick — the second seed of the theme customiser.
                     ui.separator();
@@ -9999,15 +10053,39 @@ impl Shell {
                                 .clicked();
                         if changed || reset {
                             self.accent_override = if reset { None } else { Some(rgb) };
-                            self.theme = Theme::of(self.theme_variant);
-                            if let Some(rgb) = self.accent_override {
-                                self.theme = self.theme.with_accent(rgb);
-                            }
-                            self.theme.apply(ui.ctx());
-                            let s0 = self.theme.surface_0;
-                            ui.ctx().style_mut(|s| s.visuals.panel_fill = s0);
+                            recompose(self, ui.ctx());
                         }
                     });
+                    // Shape: sharp (edge-to-edge) or round (floating card),
+                    // K-092 — independent of Mode.
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("Shape")
+                            .small()
+                            .color(self.theme.text_muted),
+                    );
+                    let mut shape = self.theme_shape;
+                    ui.radio_value(&mut shape, crate::theme::ThemeShape::Sharp, "Sharp");
+                    ui.radio_value(&mut shape, crate::theme::ThemeShape::Round, "Round");
+                    if shape != self.theme_shape {
+                        self.theme_shape = shape;
+                        recompose(self, ui.ctx());
+                    }
+                    // Animation: how much UI-chrome motion to show, K-092.
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("Animation")
+                            .small()
+                            .color(self.theme.text_muted),
+                    );
+                    let mut anim = self.animation_level;
+                    ui.radio_value(&mut anim, crate::theme::AnimationLevel::All, "All");
+                    ui.radio_value(&mut anim, crate::theme::AnimationLevel::Minimal, "Minimal");
+                    ui.radio_value(&mut anim, crate::theme::AnimationLevel::None, "None");
+                    if anim != self.animation_level {
+                        self.animation_level = anim;
+                        crate::theme::apply_animation_level(ui.ctx(), anim);
+                    }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
@@ -10995,6 +11073,19 @@ mod dock_tests {
         assert!(!tree.tiles.is_visible(project));
         tree.tiles.set_visible(project, true); // dock back
         assert!(tree.tiles.is_visible(project));
+    }
+
+    /// K-092's three new persisted fields (`theme_mode`, `theme_shape`,
+    /// `animation_level`) must not break loading a workspace saved before
+    /// they existed — an empty JSON object stands in for the oldest
+    /// possible save (every persisted `Shell` field already carries
+    /// `#[serde(default)]`), and every new field must land on its default.
+    #[test]
+    fn shell_deserializes_a_pre_k092_save_onto_the_new_fields_defaults() {
+        let shell: Shell = serde_json::from_str("{}").expect("an empty save must still load");
+        assert_eq!(shell.theme_mode, crate::theme::ThemeMode::Dark);
+        assert_eq!(shell.theme_shape, crate::theme::ThemeShape::Sharp);
+        assert_eq!(shell.animation_level, crate::theme::AnimationLevel::All);
     }
 
     // The Timeline starts as a full-width strip along the bottom: its pane is
