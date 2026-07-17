@@ -745,3 +745,27 @@ trace whatever the light/dark chrome, the same grading-accuracy reasoning that k
 (alongside `contains_key`) so a scope reading the current frame every paint does not distort
 LRU eviction. The §8 tap-point open question (pre- vs post-display-transform) is untouched —
 v1 has no display transform, so the banked sRGB frame is both.
+
+**K-097 · DECIDED · Four community colour schemes join the theme as named, first-class
+options.** From the owner: alongside Dark, Dark blue and Light, `Theme` gains `gruvbox_dark`,
+`gruvbox_light`, `catppuccin_mocha` and `catppuccin_latte` — full constructors populating
+every token, built the same way as the existing three (`dark()`/`light()`/`dark_blue()`).
+A new `ColorScheme` enum (`Dark`/`DarkBlue`/`Light`/`GruvboxDark`/`GruvboxLight`/
+`CatppuccinMocha`/`CatppuccinLatte`) supersedes the old `ThemeMode` × `ThemeVariant` split as
+the thing a full theme picker selects from, with `ColorScheme::mode()` still reporting the
+light/dark half for callers (e.g. `with_accent`'s hover-shift direction) that only need that.
+`Theme::for_scheme(scheme, shape)` is the shape-inclusive composition entry point, sitting
+alongside the pre-existing `Theme::for_settings(mode, variant, shape)` rather than replacing
+it — both remain callable; wiring the Window menu / a coming Settings window onto
+`ColorScheme` instead of the old two-axis picker is a follow-up change, not part of this
+entry. Each new scheme maps its source palette onto Lumit's existing roles rather than
+introducing new ones: surfaces follow that palette's own background ramp (monotonic
+light→dark for the dark schemes; mirroring `light()`'s "elevation reads as a darker wash"
+structure, `surface_4` below `surface_0`, for the two light schemes), text takes that
+palette's foreground/muted ramp, `accent` is the scheme's usual signature hue (Gruvbox
+orange, Catppuccin mauve), and `viewer_surround` and `scope` stay exactly as every other
+theme's — strictly neutral and the one fixed `ScopeColours::STANDARD` respectively, never
+palette-tinted, per the grading-accuracy rule in docs/15 §2.1/§11. Gruvbox's error role takes
+the palette's *neutral* red rather than its bolder "bright red", a curation choice keeping it
+a notch short of alarming in the spirit of docs/15 §3.1's no-punishment-red rule while
+remaining an authentic Gruvbox hue. Spec: [15-DESIGN.md](15-DESIGN.md) §2, §11.
