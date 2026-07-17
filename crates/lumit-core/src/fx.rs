@@ -1062,6 +1062,44 @@ pub fn schema(match_name: &str) -> Option<&'static EffectSchema> {
     BUILTINS.iter().find(|s| s.match_name == match_name)
 }
 
+/// The union of source-relative frame offsets a layer's live effect stack
+/// needs (docs/08 §1.3 `temporal`), always sorted and always containing 0
+/// (the current frame). `&[0]` when the stack is bypassed, empty, or every
+/// effect is a plain single-frame one — so a layer with no temporal effect
+/// pays nothing. The render pipeline decodes the layer's source at each of
+/// these offsets so a temporal effect (echo, flow motion blur, datamosh)
+/// can read its neighbours.
+pub fn stack_temporal_window(effects: &[EffectInstance], fx_on: bool) -> Vec<i32> {
+    let mut offsets = vec![0i32];
+    if fx_on {
+        for e in effects.iter().filter(|e| e.enabled) {
+            if e.effect.namespace != EffectNamespace::Builtin {
+                continue;
+            }
+            if let Some(s) = schema(&e.effect.match_name) {
+                offsets.extend_from_slice(s.traits.temporal);
+            }
+        }
+    }
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
+}
+
+/// True when any live effect in the stack reads frames other than the
+/// current one — the cheap gate the render/cache paths check before doing
+/// any neighbour-frame work.
+pub fn stack_is_temporal(effects: &[EffectInstance], fx_on: bool) -> bool {
+    fx_on
+        && effects
+            .iter()
+            .filter(|e| e.enabled && e.effect.namespace == EffectNamespace::Builtin)
+            .any(|e| {
+                schema(&e.effect.match_name)
+                    .is_some_and(|s| s.traits.temporal.iter().any(|&o| o != 0))
+            })
+}
+
 /// A fresh random seed value — the per-instance Seed default (docs/08
 /// §3.4) and the Effect Controls "reseed" button (§2.4) both draw from
 /// here. Taken from a new UUID's random tail, so it needs no extra
@@ -2998,6 +3036,29 @@ mod tests {
             resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE).is_empty(),
             "placeholders render as identity"
         );
+    }
+
+    #[test]
+    fn temporal_window_is_zero_until_a_temporal_effect_joins() {
+        // Every current built-in is single-frame (temporal &[0]), so any
+        // stack of them needs only the current frame.
+        let blur = instantiate("blur").unwrap();
+        let glow = instantiate("glow").unwrap();
+        assert_eq!(
+            stack_temporal_window(&[blur.clone(), glow.clone()], true),
+            vec![0]
+        );
+        assert!(!stack_is_temporal(&[blur.clone(), glow.clone()], true));
+        // Bypassed stack, empty stack, and a disabled effect all reduce to
+        // the current frame only.
+        assert_eq!(stack_temporal_window(&[blur.clone(), glow], false), vec![0]);
+        assert_eq!(stack_temporal_window(&[], true), vec![0]);
+        let mut off = blur.clone();
+        off.enabled = false;
+        assert_eq!(stack_temporal_window(&[off], true), vec![0]);
+        // The window always contains 0 and is sorted/deduped — pinned so a
+        // temporal effect's offsets union cleanly with the current frame.
+        assert!(stack_temporal_window(&[blur], true).contains(&0));
     }
 
     #[test]
