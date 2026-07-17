@@ -112,6 +112,17 @@ Two mechanisms make this safe, and you'll see them by name in the code:
 - `crates/lumit-core/src/model.rs` — **What a project is.** Structs for the document,
   comps, layers, footage items. Each has an `extra` field that preserves anything a future
   Lumit version adds — so old and new versions can share project files.
+- **Beat markers reach the effects engine** (the docs/08 §1.4 plumbing). When a layer's
+  effect stack is resolved for a frame, it now receives a small *marker context*: the
+  comp's beat-marker times, each translated into the layer's own clock (a layer that
+  starts three seconds into the comp sees a beat at comp second five as “two seconds
+  in”), plus the comp's frame rate so parameters authored in frames can become seconds.
+  Nothing draws differently yet — this is the wiring the beat-driven effect modes
+  (Flash first) plug into. Two details matter: the context is built by one shared
+  constructor that preview and export both call, so the two can never disagree about
+  where a beat falls (the K-031 promise); and a caller with no markers passes an
+  obvious empty context, because a marker-driven effect must always degrade to doing
+  nothing rather than misbehaving — a project with no music still renders.
 - **Shake.** The beatshake workhorse: a virtual camera wobble. The layer is resampled
   once through the same kernel the Transform effect uses — never pixel noise — so the
   whole frame sways as one. The wobble comes from *seeded value noise*: a deterministic

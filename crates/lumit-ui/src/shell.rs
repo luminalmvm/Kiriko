@@ -5488,7 +5488,10 @@ fn build_comp_draws(
                 // transform. A dead stack contributes nothing at all.
                 let comp_diag = ((comp.width as f32).powi(2) + (comp.height as f32).powi(2)).sqrt();
                 let fx = if layer.switches.fx {
-                    lumit_core::fx::resolve_stack(&layer.effects, lt, comp_diag, 1.0)
+                    // The §1.4 marker context, built by the same shared
+                    // constructor export uses (K-031).
+                    let markers = lumit_core::fx::MarkerContext::for_layer(comp, layer);
+                    lumit_core::fx::resolve_stack(&layer.effects, lt, comp_diag, 1.0, &markers)
                 } else {
                     Vec::new()
                 };
@@ -5599,8 +5602,17 @@ fn build_comp_draws(
             };
             if layer.switches.fx {
                 // scale doubles as the §2.3 preview-resolution factor:
-                // raster pixels per comp pixel for px@comp parameters.
-                lumit_core::fx::resolve_stack(&layer.effects, lt, comp_diag * scale, scale)
+                // raster pixels per comp pixel for px@comp parameters. The
+                // §1.4 marker context comes from the same shared
+                // constructor export uses (K-031).
+                let markers = lumit_core::fx::MarkerContext::for_layer(comp, layer);
+                lumit_core::fx::resolve_stack(
+                    &layer.effects,
+                    lt,
+                    comp_diag * scale,
+                    scale,
+                    &markers,
+                )
             } else {
                 Vec::new()
             }

@@ -15,7 +15,9 @@
 //! agree with the CPU" a testable promise.
 
 use crate::anim::{Animation, Property};
-use crate::model::{EffectInstance, EffectKey, EffectNamespace, EffectParam, EffectValue};
+use crate::model::{
+    Composition, EffectInstance, EffectKey, EffectNamespace, EffectParam, EffectValue, Layer,
+};
 
 /// Cost class (docs/08 §1.3) — consumed by degradation ordering and budgets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1200,17 +1202,88 @@ pub fn spectral_basis_vec4() -> [[f32; 4]; 9] {
     out
 }
 
+/// The §1.4 marker resolve context: what marker-driven effects see at
+/// resolution time. It carries the comp's beat-marker times **translated
+/// into the layer's local time** — comp marker time minus the layer's start
+/// offset, the same one f64 subtraction that produces the `lt` handed to
+/// [`resolve_stack`], so a beat and a frame at the same comp moment compare
+/// exactly equal and the envelope maths lives in a single time base — plus
+/// the comp frame rate, because duration-class parameters are authored in
+/// comp frames (§2.3). Built by [`MarkerContext::for_layer`], the one
+/// constructor preview and export both call (K-031), so the two can never
+/// drift. A caller with no comp to hand passes [`MarkerContext::NONE`];
+/// marker-driven effects MUST fall back gracefully on it (§1.4).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MarkerContext {
+    /// Beat-marker times in the layer's local time base, seconds, sorted
+    /// ascending.
+    pub beats: Vec<f64>,
+    /// Comp frames per second; 0 in the no-comp default (guarded wherever
+    /// frames convert to seconds).
+    pub fps: f64,
+}
+
+impl MarkerContext {
+    /// The obvious empty context — no beats, no frame rate — for callers
+    /// without markers. Every marker-driven effect resolves to its
+    /// graceful fallback on it (§1.4).
+    pub const NONE: MarkerContext = MarkerContext {
+        beats: Vec::new(),
+        fps: 0.0,
+    };
+
+    /// The context for one layer of `comp`: the comp's beat markers only
+    /// (the v1 §1.4 scope — named-layer binding and label filters follow),
+    /// each translated into the layer's local time, sorted ascending.
+    pub fn for_layer(comp: &Composition, layer: &Layer) -> Self {
+        let off = layer.start_offset.0.to_f64();
+        let mut beats: Vec<f64> = comp
+            .markers
+            .iter()
+            .filter(|m| m.is_beat())
+            .map(|m| m.time.0.to_f64() - off)
+            .collect();
+        beats.sort_by(f64::total_cmp);
+        Self {
+            beats,
+            fps: comp.frame_rate.fps(),
+        }
+    }
+
+    /// The ordered beat times within `[from_s, to_s]` local seconds — the
+    /// §1.4 "inside the effect's temporal window" view.
+    pub fn window(&self, from_s: f64, to_s: f64) -> &[f64] {
+        let a = self.beats.partition_point(|b| *b < from_s);
+        let z = self.beats.partition_point(|b| *b <= to_s).max(a);
+        &self.beats[a..z]
+    }
+
+    /// The nearest beat at/before `lt` and the nearest strictly after —
+    /// the §1.4 "either side of the current frame" pair.
+    pub fn nearest(&self, lt: f64) -> (Option<f64>, Option<f64>) {
+        let i = self.beats.partition_point(|b| *b <= lt);
+        (
+            i.checked_sub(1).map(|j| self.beats[j]),
+            self.beats.get(i).copied(),
+        )
+    }
+}
+
 /// Resolve a layer's live stack at layer time `lt` for a raster whose
 /// diagonal is `diag_px` pixels; `px_scale` is raster pixels per comp pixel
 /// (the §2.3 preview-resolution factor — 1.0 at full resolution), which
 /// converts px@comp parameters exactly as `diag_px` converts % diag ones.
-/// Placeholders, unknown names and bypassed effects resolve to nothing
-/// (they render as identity, docs/03 §8).
+/// `_markers` is the layer's §1.4 marker context ([`MarkerContext::for_layer`],
+/// or [`MarkerContext::NONE`] where no comp is in play); the first
+/// marker-driven mode (Flash, §3.7) consumes it next. Placeholders, unknown
+/// names and bypassed effects resolve to nothing (they render as identity,
+/// docs/03 §8).
 pub fn resolve_stack(
     effects: &[EffectInstance],
     lt: f64,
     diag_px: f32,
     px_scale: f32,
+    _markers: &MarkerContext,
 ) -> Vec<Resolved> {
     effects
         .iter()
@@ -2044,7 +2117,7 @@ mod tests {
     fn resolve_stack_evaluates_converts_and_skips_dead_effects() {
         let mut e = instantiate("blur").unwrap();
         // 1.5% of a 1000px diagonal = 15px.
-        let r = resolve_stack(&[e.clone()], 0.0, 1000.0, 1.0);
+        let r = resolve_stack(&[e.clone()], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
         assert_eq!(
             r,
             vec![Resolved::Blur {
@@ -2054,11 +2127,11 @@ mod tests {
             }]
         );
         e.enabled = false;
-        assert!(resolve_stack(&[e.clone()], 0.0, 1000.0, 1.0).is_empty());
+        assert!(resolve_stack(&[e.clone()], 0.0, 1000.0, 1.0, &MarkerContext::NONE).is_empty());
         e.enabled = true;
         e.effect.namespace = EffectNamespace::Placeholder;
         assert!(
-            resolve_stack(&[e], 0.0, 1000.0, 1.0).is_empty(),
+            resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE).is_empty(),
             "placeholders render as identity"
         );
     }
@@ -2110,7 +2183,7 @@ mod tests {
             Some(EffectValue::Bool(true))
         ));
         // 0.4% of a 1000px diagonal = 4px; amount 60% = 0.6.
-        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0);
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
         assert_eq!(
             r,
             vec![Resolved::Sharpen {
@@ -2219,7 +2292,7 @@ mod tests {
         assert_eq!(e.float_at("angle", 0.0), Some(0.0));
         assert!(matches!(e.param("radial"), Some(EffectValue::Bool(false))));
         // 0.4% of a 1000px diagonal = 4px.
-        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0);
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
         assert_eq!(
             r,
             vec![Resolved::RgbSplit {
@@ -2288,7 +2361,13 @@ mod tests {
             radial: false,
             mix: 1.0,
         };
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(r, vec![classic]);
 
         // Wavelength on: the same numbers arrive as SpectralSplit.
@@ -2297,7 +2376,13 @@ mod tests {
                 p.value = EffectValue::Bool(true);
             }
         }
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::SpectralSplit {
@@ -2311,7 +2396,13 @@ mod tests {
         // A legacy instance (saved before the Bool existed) has no
         // wavelength parameter and still resolves as the classic split.
         e.params.retain(|p| p.id != "wavelength");
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(r, vec![classic]);
     }
 
@@ -2424,7 +2515,13 @@ mod tests {
         assert_eq!(e.colour_at("colour", 0.0), Some([1.0, 1.0, 1.0, 1.0]));
         // Trigger 0: resolves to a zero-strength (identity) flash — the
         // §1.2 trigger-driven exemption.
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::Flash {
@@ -2465,7 +2562,13 @@ mod tests {
         assert_eq!(e.colour_at("lift", 0.0), Some([0.0, 0.0, 0.0, 1.0]));
         assert_eq!(e.colour_at("gamma", 0.0), Some([1.0; 4]));
         assert_eq!(e.colour_at("gain", 0.0), Some([1.0; 4]));
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::ColourBalance {
@@ -2481,7 +2584,13 @@ mod tests {
     fn saturation_instantiates_and_resolves_neutral() {
         let e = instantiate("saturation").unwrap();
         assert_eq!(e.float_at("saturation", 0.0), Some(100.0));
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::Saturation {
@@ -2593,7 +2702,13 @@ mod tests {
         let mut e = instantiate("blur").unwrap();
         assert!(matches!(e.param("mode"), Some(EffectValue::Choice(0))));
         assert_eq!(e.float_at("length", 0.0), Some(10.0));
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::Blur {
@@ -2609,7 +2724,13 @@ mod tests {
                 p.value = EffectValue::Choice(1);
             }
         }
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::DirBlur {
@@ -2624,7 +2745,13 @@ mod tests {
         // parameter and still resolves as Gaussian.
         e.params
             .retain(|p| !matches!(p.id.as_str(), "mode" | "length" | "angle"));
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert!(matches!(r[..], [Resolved::Blur { .. }]));
     }
 
@@ -2679,7 +2806,13 @@ mod tests {
         assert_eq!(e.float_at("rotation", 0.0), Some(0.0));
         assert_eq!(e.float_at("opacity", 0.0), Some(100.0));
         // Defaults resolve to the exact identity op.
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::Transform {
@@ -2704,7 +2837,13 @@ mod tests {
                 _ => {}
             }
         }
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 500.0, 0.5);
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            500.0,
+            0.5,
+            &MarkerContext::NONE,
+        );
         assert_eq!(
             r,
             vec![Resolved::Transform {
@@ -2739,7 +2878,7 @@ mod tests {
         assert_eq!(e.float_at("intensity", 0.0), Some(1.0));
         assert_eq!(e.colour_at("tint", 0.0), Some([1.0; 4]));
         // 8% of a 1000px diagonal = 80px.
-        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0);
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
         assert_eq!(
             r,
             vec![Resolved::Glow {
@@ -2932,8 +3071,20 @@ mod tests {
 
         // Resolving is deterministic: the same instance at the same time
         // yields the identical wobble, twice.
-        let a = resolve_stack(std::slice::from_ref(&e), 0.4, 1000.0, 1.0);
-        let b = resolve_stack(std::slice::from_ref(&e), 0.4, 1000.0, 1.0);
+        let a = resolve_stack(
+            std::slice::from_ref(&e),
+            0.4,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
+        let b = resolve_stack(
+            std::slice::from_ref(&e),
+            0.4,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_eq!(a, b);
         let Resolved::Shake {
             offset_px,
@@ -2957,7 +3108,13 @@ mod tests {
         assert_eq!(mix, 1.0);
 
         // Different frames wobble differently; different seeds too.
-        let later = resolve_stack(std::slice::from_ref(&e), 0.9, 1000.0, 1.0);
+        let later = resolve_stack(
+            std::slice::from_ref(&e),
+            0.9,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_ne!(a, later, "the wobble moves between frames");
         let mut reseeded = e.clone();
         for p in &mut reseeded.params {
@@ -2969,7 +3126,13 @@ mod tests {
                 p.value = EffectValue::Seed(old.wrapping_add(1));
             }
         }
-        let other = resolve_stack(std::slice::from_ref(&reseeded), 0.4, 1000.0, 1.0);
+        let other = resolve_stack(
+            std::slice::from_ref(&reseeded),
+            0.4,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
         assert_ne!(a, other, "a different seed wobbles differently");
     }
 
@@ -3145,5 +3308,100 @@ mod tests {
         for c in 0..4 {
             assert_eq!(o[mid + c], 0.5, "channel {c} at half");
         }
+    }
+
+    /// A minimal comp + layer pair for marker-context tests: a comp at the
+    /// given frame rate carrying `markers`, and an adjustment layer whose
+    /// start offset is `offset_s` seconds.
+    fn marker_rig(
+        fps: (u32, u32),
+        markers: Vec<crate::markers::Marker>,
+        offset_s: (i64, i64),
+    ) -> (Composition, Layer) {
+        use crate::model::{LayerKind, LinearColour, Switches, TransformGroup};
+        use crate::time::{CompTime, Duration, FrameRate, Rational};
+        let secs = |n, d| CompTime(Rational::new(n, d).unwrap());
+        let comp = Composition {
+            id: uuid::Uuid::now_v7(),
+            name: "c".into(),
+            width: 1920,
+            height: 1080,
+            frame_rate: FrameRate::new(fps.0, fps.1).unwrap(),
+            duration: Duration(Rational::new(10, 1).unwrap()),
+            background: LinearColour([0.0, 0.0, 0.0, 1.0]),
+            work_area: None,
+            layers: Vec::new(),
+            markers,
+            extra: serde_json::Map::new(),
+        };
+        let layer = Layer {
+            id: uuid::Uuid::now_v7(),
+            name: "l".into(),
+            kind: LayerKind::Adjustment,
+            in_point: secs(0, 1),
+            out_point: secs(10, 1),
+            start_offset: secs(offset_s.0, offset_s.1),
+            transform: TransformGroup::default(),
+            matte: None,
+            blend: Default::default(),
+            masks: Vec::new(),
+            effects: Vec::new(),
+            switches: Switches::default(),
+            extra: serde_json::Map::new(),
+        };
+        (comp, layer)
+    }
+
+    #[test]
+    fn marker_context_builds_layer_local_ordered_beats() {
+        use crate::markers::{Marker, MarkerKind};
+        use crate::time::{CompTime, Rational};
+        let rat = |n, d| Rational::new(n, d).unwrap();
+        // Beats out of order, plus a user and a chapter marker to ignore.
+        let user = Marker::user(uuid::Uuid::now_v7(), rat(1, 2));
+        let chapter = Marker {
+            kind: MarkerKind::Chapter,
+            time: CompTime(rat(3, 1)),
+            ..Marker::user(uuid::Uuid::now_v7(), rat(3, 1))
+        };
+        let late = Marker::beat(uuid::Uuid::now_v7(), rat(2, 1), 0.9);
+        let early = Marker::beat(uuid::Uuid::now_v7(), rat(1, 1), 0.5);
+        let (comp, layer) = marker_rig((30, 1), vec![user, late, chapter, early], (1, 4));
+        let ctx = MarkerContext::for_layer(&comp, &layer);
+        // Beat kind only, layer-local (comp time − start offset), sorted.
+        assert_eq!(ctx.beats, vec![0.75, 1.75]);
+        assert_eq!(ctx.fps, 30.0);
+        // The local translation matches the resolver's own lt subtraction
+        // exactly: a beat at comp second 1 and a frame evaluated there land
+        // on the identical f64.
+        let lt = 1.0 - layer.start_offset.0.to_f64();
+        assert_eq!(ctx.beats[0], lt);
+        // The obvious no-marker default (§1.4 graceful fallback).
+        assert_eq!(MarkerContext::NONE.beats, Vec::<f64>::new());
+        assert_eq!(MarkerContext::NONE.fps, 0.0);
+        assert_eq!(MarkerContext::default(), MarkerContext::NONE);
+    }
+
+    #[test]
+    fn marker_context_window_and_nearest() {
+        let ctx = MarkerContext {
+            beats: vec![1.0, 2.0, 4.0],
+            fps: 30.0,
+        };
+        // The §1.4 temporal-window view: inclusive both ends.
+        assert_eq!(ctx.window(1.0, 2.0), &[1.0, 2.0]);
+        assert_eq!(ctx.window(1.5, 3.9), &[2.0]);
+        assert_eq!(ctx.window(2.5, 3.5), &[] as &[f64]);
+        assert_eq!(
+            ctx.window(3.0, 1.0),
+            &[] as &[f64],
+            "inverted span is empty"
+        );
+        // The nearest-either-side pair: "before" is at/before the frame.
+        assert_eq!(ctx.nearest(2.0), (Some(2.0), Some(4.0)));
+        assert_eq!(ctx.nearest(2.5), (Some(2.0), Some(4.0)));
+        assert_eq!(ctx.nearest(0.5), (None, Some(1.0)));
+        assert_eq!(ctx.nearest(9.0), (Some(4.0), None));
+        assert_eq!(MarkerContext::NONE.nearest(1.0), (None, None));
     }
 }

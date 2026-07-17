@@ -69,6 +69,17 @@ project and time — determinism is preserved. Effects with `marker input: beat`
 work with no markers present (falling back to their continuous behaviour or to manual
 keyframed triggers).
 
+**Status (v1 plumbing, shipped):** resolution receives a marker context — the comp's
+beat-marker times translated into the layer's local time (one subtraction with the
+layer's start offset, the same subtraction that produces the layer time itself, so the
+envelope maths lives in a single time base) plus the comp frame rate, since
+duration-class parameters are authored in comp frames. It is built by one shared
+constructor that preview and export both call (K-031), and a caller without markers
+passes an obvious empty context on which every marker-driven effect falls back
+gracefully. v1 binds to **comp beat markers only**: binding to a named layer's markers,
+and label filtering beyond the beat kind, follow later with no change to the context's
+shape.
+
 ### 1.5 The effect stack and adjustment layers
 
 - Each layer owns one ordered **effect stack**, applied top-to-bottom after masks, before
