@@ -181,6 +181,10 @@ fn feed_layer(
     // it renders nothing.
     if layer.switches.fx && layer.effects.iter().any(|e| e.enabled) {
         h.update(b"effects/");
+        // The layer's §1.4 marker context, built lazily (only marker-driven
+        // effects read it) by the same shared constructor resolution uses
+        // (K-031), so the key hashes exactly the beat times resolution sees.
+        let mut mctx: Option<lumit_core::fx::MarkerContext> = None;
         for e in layer.effects.iter().filter(|e| e.enabled) {
             h.update(&[match e.effect.namespace {
                 lumit_core::model::EffectNamespace::Builtin => 0,
@@ -225,6 +229,37 @@ fn feed_layer(
                     if s.traits.seeded {
                         h.update(b"fx-time");
                         feed_f64(h, lt);
+                    }
+                    // A marker-driven effect (docs/08 §1.3 Marker input,
+                    // §1.4) reads beat markers the parameter hash cannot
+                    // see, so its key gains the layer's local time plus
+                    // the §1.4 window it consumes — the same trigger
+                    // times, through the same shared context constructor,
+                    // that resolution reads (K-031). The window, not the
+                    // whole marker list: a marker edit that cannot change
+                    // this frame's envelope leaves its key alone. A
+                    // Manual-mode Flash reports no window at all and keeps
+                    // its time-free keys — no over-invalidation.
+                    if s.traits.beat_input {
+                        let ctx = mctx.get_or_insert_with(|| {
+                            lumit_core::fx::MarkerContext::for_layer(comp, layer)
+                        });
+                        if let Some(w) = lumit_core::fx::marker_window(e, lt, ctx) {
+                            h.update(b"fx-markers");
+                            feed_f64(h, lt);
+                            feed_f64(h, w.fps);
+                            for side in [w.before, w.after] {
+                                match side {
+                                    Some(t) => {
+                                        h.update(&[1]);
+                                        feed_f64(h, t);
+                                    }
+                                    None => {
+                                        h.update(&[0]);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -789,6 +824,110 @@ mod tests {
             }
         }
         assert_ne!(key(&doc, &shaken, 1.0), key(&doc, &reseeded, 1.0));
+    }
+
+    /// A marker-driven Flash (docs/08 §1.3 Marker input, §1.4) keys the
+    /// layer's local time plus the window of triggers its envelope reads —
+    /// and nothing more. On-beat and off-beat frames key apart; the same
+    /// frame keys identically twice; a marker outside the frame's §1.4
+    /// window moves no key, while one inside it does; and a Manual-mode
+    /// Flash keeps fully time-free keys even with beat markers present —
+    /// no over-invalidation.
+    #[test]
+    fn marker_driven_flash_keys_the_window_it_reads() {
+        use lumit_core::markers::Marker;
+        use lumit_core::model::{EffectValue, ProjectItem, SolidDef};
+        let mut doc = Document::new();
+        let def_id = Uuid::now_v7();
+        doc.items.push(ProjectItem::Solid(SolidDef {
+            id: def_id,
+            name: "s".into(),
+            colour: LinearColour([1.0, 1.0, 1.0, 1.0]),
+            width: 64,
+            height: 64,
+            extra: serde_json::Map::new(),
+        }));
+        let beat = |s: i64| Marker::beat(Uuid::now_v7(), Rational::new(s, 1).unwrap(), 0.9);
+        let flashed = |mode: u32| {
+            let mut l = text_layer("x", 0.0, 10.0, 0.0);
+            l.kind = LayerKind::Solid { def: def_id };
+            let mut fx = lumit_core::fx::instantiate("flash").unwrap();
+            for p in &mut fx.params {
+                if p.id == "mode" {
+                    p.value = EffectValue::Choice(mode);
+                }
+            }
+            l.effects.push(fx);
+            let mut c = comp_with(vec![l]);
+            c.markers = vec![beat(1), beat(2)];
+            c
+        };
+
+        // Trigger mode: on-beat and off-beat frames key apart, the same
+        // frame twice keys identically.
+        let comp = flashed(1);
+        assert_ne!(key(&doc, &comp, 1.0), key(&doc, &comp, 1.5));
+        assert_eq!(key(&doc, &comp, 1.5), key(&doc, &comp, 1.5));
+
+        // A far-away beat outside the frame's window (before 1.0 and 2.0,
+        // both nearer) leaves the key alone; a beat inside it retires the
+        // frame.
+        let mut far = comp.clone();
+        far.markers.push(beat(9));
+        assert_eq!(key(&doc, &comp, 1.2), key(&doc, &far, 1.2));
+        let mut near = comp.clone();
+        near.markers.push(Marker::beat(
+            Uuid::now_v7(),
+            Rational::new(11, 10).unwrap(),
+            0.9,
+        ));
+        assert_ne!(key(&doc, &comp, 1.2), key(&doc, &near, 1.2));
+
+        // Manual mode: time-free keys, beat markers or none.
+        let manual = flashed(0);
+        assert_eq!(key(&doc, &manual, 1.0), key(&doc, &manual, 2.0));
+    }
+
+    /// Strobe's Nth-beat indexing counts from the comp's first beat, so a
+    /// beat added far in the past can change which beat fires *now*. The
+    /// key hashes the filtered triggers the envelope actually consumes, so
+    /// that edit retires the frame — hashing raw neighbours would miss it.
+    #[test]
+    fn strobe_reindexing_retires_the_frame() {
+        use lumit_core::markers::Marker;
+        use lumit_core::model::{EffectValue, ProjectItem, SolidDef};
+        let mut doc = Document::new();
+        let def_id = Uuid::now_v7();
+        doc.items.push(ProjectItem::Solid(SolidDef {
+            id: def_id,
+            name: "s".into(),
+            colour: LinearColour([1.0, 1.0, 1.0, 1.0]),
+            width: 64,
+            height: 64,
+            extra: serde_json::Map::new(),
+        }));
+        let beat = |s: i64| Marker::beat(Uuid::now_v7(), Rational::new(s, 1).unwrap(), 0.9);
+        let mut l = text_layer("x", 0.0, 10.0, 0.0);
+        l.kind = LayerKind::Solid { def: def_id };
+        let mut fx = lumit_core::fx::instantiate("flash").unwrap();
+        for p in &mut fx.params {
+            match p.id.as_str() {
+                "mode" => p.value = EffectValue::Choice(2),
+                "every_nth" => p.value = EffectValue::Float(lumit_core::anim::Property::fixed(2.0)),
+                _ => {}
+            }
+        }
+        l.effects.push(fx);
+        let mut comp = comp_with(vec![l]);
+        // Beats at 4 s and 6 s; every 2nd fires index 0 only (4 s), so just
+        // after 6 s the flash is long spent.
+        comp.markers = vec![beat(4), beat(6)];
+        let before = key(&doc, &comp, 6.02);
+        // A beat at 0 s re-indexes: now 0 s and 6 s fire, so the same frame
+        // sits one frame into a live flash — its key must move.
+        let mut reindexed = comp.clone();
+        reindexed.markers.insert(0, beat(0));
+        assert_ne!(before, key(&doc, &reindexed, 6.02));
     }
 
     /// Precomps recurse: an edit inside the nested comp changes the parent's

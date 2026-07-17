@@ -56,7 +56,7 @@ Every effect declares, statically:
 | **Alpha mode** | `premultiplied` (default) or `unpremultiplied` (§2.2) | Host unpremultiply/re-premultiply wrapping |
 | **Cancellation points** | `per-pass` and/or `per-tile` | Epoch-based cancellation on scrub (K-017): every pass boundary and tile boundary MUST check the epoch and abandon work |
 | **Randomness** | `none` or `seeded` | Determinism audit (§2.4); frame keys — a seeded effect's pixels are a function of time under constant parameters, so the layer's local time joins its cache key |
-| **Marker input** | `none` or `beat` | Marker-trigger plumbing (§1.4) |
+| **Marker input** | `none` or `beat` | Marker-trigger plumbing (§1.4); frame keys — a marker-driven instance's pixels follow the beat times, so its local time and §1.4 window join its cache key |
 
 ### 1.4 Marker-trigger parameters
 
@@ -379,6 +379,22 @@ integer), Phase offset (frames).
 grid, then composites the flash colour over/into the input by the envelope. `trivial`
 cost, `exact` ROI. Ships with the "white flash on every kick" preset that is half the
 genre.
+
+**Status (v1, shipped):** Mode (Manual / Trigger / Strobe) — Manual is the pre-marker
+manual form (keyframed hits on Trigger decaying exponentially over Decay) and the
+default, so existing instances and old projects render byte-identically — plus Duration
+(frames, default 2; hard floor 0, unbounded above per K-090), Attack/decay shape
+(Hard / Fade), Every Nth beat (Strobe; the spec's integer ≥ 1, carried as a rounded
+float row for now) and Phase offset (frames). The envelope is pinned host-side in one
+shared function: from the nearest trigger at/before the frame — every Nth beat of the
+§1.4 context, phase-shifted — Hard holds full strength while elapsed < Duration and
+Fade ramps `1 − elapsed/Duration` over the same span; with no markers it is zero, the
+§1.4 graceful fallback. It reaches the unchanged kernel as the resolved strength.
+Trigger source is implicitly the comp's beat markers (the §1.4 v1 scope); the
+marker-trigger parameter type surfaces when named-layer binding lands. The Blend
+sub-param (Add / Screen / Solid) is deferred — the kernel keeps its current
+blend-toward-colour compositing — and Intensity stays the shipped percentage scale on
+the envelope. Shipped parameters are stable when these follow.
 
 ### 3.8 Blur — gaussian, directional, radial
 
