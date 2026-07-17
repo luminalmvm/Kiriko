@@ -82,6 +82,27 @@ struct RgbSplitParams {
     _pad: [f32; 3],
 }
 
+/// One resolved flash (docs/08 §3.7, manual form): the trigger envelope is
+/// already evaluated host-side into a plain strength.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlashOp {
+    /// 0..1 — envelope × intensity, clamped.
+    pub strength: f32,
+    /// Scene-linear RGBA flash colour (alpha unused).
+    pub colour: [f32; 4],
+    /// 0..1, blended against the unprocessed input.
+    pub mix: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct FlashParams {
+    colour: [f32; 4],
+    strength: f32,
+    mix_amt: f32,
+    _pad: [f32; 2],
+}
+
 /// The effect-pass engine: compiled kernels plus their layouts, one per
 /// device (owned alongside the Compositor by whoever renders).
 pub struct FxEngine {
@@ -89,6 +110,7 @@ pub struct FxEngine {
     sharpen_unpremultiply: wgpu::ComputePipeline,
     sharpen_combine: wgpu::ComputePipeline,
     rgb_split: wgpu::ComputePipeline,
+    flash: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -151,15 +173,18 @@ impl FxEngine {
         let blur_mod = module(include_str!("fx_blur.wgsl"), "fx-blur");
         let sharpen_mod = module(include_str!("fx_sharpen.wgsl"), "fx-sharpen");
         let rgb_split_mod = module(include_str!("fx_rgbsplit.wgsl"), "fx-rgb-split");
+        let flash_mod = module(include_str!("fx_flash.wgsl"), "fx-flash");
         let blur = pipeline(&blur_mod, "fx-blur", "blur_pass");
         let sharpen_unpremultiply = pipeline(&sharpen_mod, "fx-sharpen-un", "unpremultiply");
         let sharpen_combine = pipeline(&sharpen_mod, "fx-sharpen", "sharpen_combine");
         let rgb_split = pipeline(&rgb_split_mod, "fx-rgb-split", "rgb_split");
+        let flash = pipeline(&flash_mod, "fx-flash", "flash");
         Self {
             blur,
             sharpen_unpremultiply,
             sharpen_combine,
             rgb_split,
+            flash,
             layout,
         }
     }
@@ -311,6 +336,36 @@ impl FxEngine {
                 radial: u32::from(op.radial),
                 mix_amt: op.mix,
                 _pad: [0.0; 3],
+            }),
+        );
+        out
+    }
+
+    /// Apply one flash (docs/08 §3.7, manual form) to a linear working
+    /// texture, returning a new texture of the same size. One pointwise
+    /// pass; the trigger envelope arrives pre-evaluated in the op.
+    pub fn flash(
+        &self,
+        ctx: &GpuContext,
+        src: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        op: &FlashOp,
+    ) -> wgpu::Texture {
+        let out = work_texture(ctx, w, h, "fx-flash-out");
+        self.dispatch(
+            ctx,
+            &self.flash,
+            src,
+            src,
+            &out,
+            w,
+            h,
+            bytemuck::bytes_of(&FlashParams {
+                colour: op.colour,
+                strength: op.strength,
+                mix_amt: op.mix,
+                _pad: [0.0; 2],
             }),
         );
         out
@@ -738,6 +793,48 @@ mod tests {
             let out2 = fx.rgb_split(&ctx, &tex, w, h, &op);
             let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
             assert_eq!(gpu, gpu2, "GPU rgb split must be bit-stable");
+        }
+    }
+
+    /// The §1.6 oracle for flash: a trivial pointwise effect, so the CPU
+    /// and GPU must agree to ≤ 2 fp16 ULP, and the GPU is bit-stable (§2.4).
+    #[test]
+    fn wgsl_flash_matches_the_cpu_oracle() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        let img = corpus(w, h);
+        for (strength, colour, mix) in [
+            (1.0f32, [1.0f32, 1.0, 1.0, 1.0], 1.0f32),
+            (0.35, [4.0, 2.0, 1.0, 1.0], 1.0), // HDR flash colour
+            (0.8, [1.0, 0.9, 0.7, 1.0], 0.6),
+            (0.0, [1.0, 1.0, 1.0, 1.0], 1.0),
+        ] {
+            let mut cpu = img.clone();
+            lumit_core::fx::cpu::flash(&mut cpu, strength, colour, mix);
+
+            let tex = upload_linear_f32(&ctx, &img, w, h);
+            let op = FlashOp {
+                strength,
+                colour,
+                mix,
+            };
+            let out = fx.flash(&ctx, &tex, w, h, &op);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+
+            let worst = worst_f16_ulp(&cpu, &gpu);
+            eprintln!("flash s={strength} mix={mix}: worst {worst} ulp");
+            assert!(
+                worst <= 2,
+                "strength {strength} mix {mix}: worst {worst} fp16 ULP"
+            );
+
+            let out2 = fx.flash(&ctx, &tex, w, h, &op);
+            let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
+            assert_eq!(gpu, gpu2, "GPU flash must be bit-stable");
         }
     }
 }

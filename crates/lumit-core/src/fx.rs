@@ -14,7 +14,7 @@
 //! and these CPU functions both consume, which is what makes "the GPU must
 //! agree with the CPU" a testable promise.
 
-use crate::anim::Property;
+use crate::anim::{Animation, Property};
 use crate::model::{EffectInstance, EffectKey, EffectNamespace, EffectParam, EffectValue};
 
 /// Cost class (docs/08 §1.3) — consumed by degradation ordering and budgets.
@@ -75,6 +75,14 @@ pub enum ParamKind {
     },
     Bool {
         default: bool,
+    },
+    Colour {
+        /// Scene-linear RGBA (docs/08 §1.1's colour type); channels animate
+        /// independently in the model.
+        default: [f64; 4],
+        /// Per-channel edit range — linear values may exceed 1 (HDR tints)
+        /// or dip below 0 (a lift), so each colour declares its own.
+        range: (f64, f64),
     },
 }
 
@@ -248,6 +256,66 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
+    // Beat-aware strobe (docs/08 §3.7), in its manual form for now: each
+    // keyframe on Trigger is a hit (its value = how hard, 0..1) that decays
+    // exponentially over Decay; a static Trigger holds a constant flash.
+    // The §1.4 marker-trigger binding (trigger source, strobe mode, every
+    // Nth beat) follows once marker plumbing exists — these parameters stay
+    // stable when it does. Default is a no-op by design: §1.2 exempts
+    // inherently trigger-driven effects.
+    EffectSchema {
+        match_name: "flash",
+        label: "Flash",
+        version: 1,
+        traits: EffectTraits {
+            cost: CostClass::Trivial,
+            roi: Roi::Exact,
+            temporal: &[0],
+            premultiplied: true,
+            seeded: false,
+            beat_input: true, // binds to beat markers per §1.4, later
+        },
+        params: &[
+            ParamSchema {
+                id: "trigger",
+                label: "Trigger",
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (0.0, 1.0),
+                    hard: (0.0, 1.0),
+                },
+            },
+            ParamSchema {
+                id: "intensity",
+                label: "Intensity",
+                // Per cent scale on the trigger envelope.
+                kind: ParamKind::Float {
+                    default: 100.0,
+                    slider: (0.0, 100.0),
+                    hard: (0.0, 400.0),
+                },
+            },
+            ParamSchema {
+                id: "colour",
+                label: "Colour",
+                kind: ParamKind::Colour {
+                    default: [1.0, 1.0, 1.0, 1.0],
+                    range: (0.0, 4.0), // linear light: HDR flashes are legal
+                },
+            },
+            ParamSchema {
+                id: "decay",
+                label: "Decay",
+                // Milliseconds for a hit to fall to 1/e.
+                kind: ParamKind::Float {
+                    default: 120.0,
+                    slider: (10.0, 1000.0),
+                    hard: (0.0, 10000.0),
+                },
+            },
+            MIX_PARAM,
+        ],
+    },
 ];
 
 /// Look a schema up by its match name.
@@ -278,6 +346,9 @@ pub fn instantiate(match_name: &str) -> Option<EffectInstance> {
                     }
                     ParamKind::Choice { default, .. } => EffectValue::Choice(default),
                     ParamKind::Bool { default } => EffectValue::Bool(default),
+                    ParamKind::Colour { default, .. } => {
+                        EffectValue::Colour(default.map(Property::fixed))
+                    }
                 },
                 extra: serde_json::Map::new(),
             })
@@ -321,6 +392,46 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
+    Flash {
+        /// The evaluated envelope × intensity, 0..1 (0 = no flash).
+        strength: f32,
+        /// Scene-linear RGBA flash colour (alpha unused: the flash respects
+        /// the layer's own footprint).
+        colour: [f32; 4],
+        /// 0..1.
+        mix: f32,
+    },
+}
+
+/// The Flash trigger envelope (docs/08 §3.7, manual form). A static Trigger
+/// is a constant flash. A keyframed Trigger reads each keyframe as a hit:
+/// the key's value (0..1) is the hit strength, decaying exponentially to 1/e
+/// over `decay_s`; overlapping hits take the loudest. The curve between keys
+/// is deliberately not interpolated — one keyframe per beat is the authoring
+/// unit, exactly what the §1.4 marker binding will automate. Pure function
+/// of the property and time, so determinism (§2.4) holds.
+pub fn flash_envelope(trigger: &Property, t: f64, decay_s: f64) -> f64 {
+    match &trigger.animation {
+        Animation::Static(v) => v.clamp(0.0, 1.0),
+        Animation::Keyframed(keys) => {
+            let mut env: f64 = 0.0;
+            for k in keys {
+                let kt = k.time.to_f64();
+                if kt > t {
+                    break; // keys are sorted; later hits cannot contribute
+                }
+                let fall = if decay_s > 0.0 {
+                    (-(t - kt) / decay_s).exp()
+                } else if t == kt {
+                    1.0
+                } else {
+                    0.0
+                };
+                env = env.max(k.value.clamp(0.0, 1.0) * fall);
+            }
+            env
+        }
+    }
 }
 
 /// The linear-mode channel offset vector for an RGB split: `amount_px`
@@ -387,6 +498,21 @@ pub fn resolve_stack(effects: &[EffectInstance], lt: f64, diag_px: f32) -> Vec<R
                     mix,
                 })
             }
+            "flash" => {
+                let decay_s = (e.float_at("decay", lt).unwrap_or(120.0) / 1000.0).max(0.0);
+                let envelope = match e.param("trigger") {
+                    Some(EffectValue::Float(p)) => flash_envelope(p, lt, decay_s),
+                    _ => 0.0,
+                };
+                let intensity = e.float_at("intensity", lt).unwrap_or(100.0).max(0.0) / 100.0;
+                let colour = e.colour_at("colour", lt).unwrap_or([1.0; 4]);
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::Flash {
+                    strength: (envelope * intensity).clamp(0.0, 1.0) as f32,
+                    colour: colour.map(|c| c as f32),
+                    mix,
+                })
+            }
             _ => None,
         })
         .collect()
@@ -421,6 +547,25 @@ pub mod cpu {
                 radial,
                 mix,
             } => rgb_split(rgba, w, h, *amount_px, *angle_deg, *radial, *mix),
+            Resolved::Flash {
+                strength,
+                colour,
+                mix,
+            } => flash(rgba, *strength, *colour, *mix),
+        }
+    }
+
+    /// Flash (docs/08 §3.7, manual form): blend each pixel toward the flash
+    /// colour by the evaluated strength. The colour is scaled by the pixel's
+    /// own alpha so the flash respects the layer's footprint (a transparent
+    /// region never lights up); alpha itself is untouched.
+    pub fn flash(rgba: &mut [f32], strength: f32, colour: [f32; 4], mix: f32) {
+        for px in rgba.chunks_exact_mut(4) {
+            let a = px[3];
+            for c in 0..3 {
+                let lit = px[c] * (1.0 - strength) + colour[c] * a * strength;
+                px[c] = px[c] * (1.0 - mix) + lit * mix;
+            }
         }
     }
 
@@ -903,5 +1048,94 @@ mod tests {
         cpu::rgb_split(&mut c, w, h, 20.0, 0.0, true, 1.0);
         assert_eq!(c[mid], 1.0, "frame-centre red is unmoved");
         assert_eq!(c[mid + 2], 1.0, "frame-centre blue is unmoved");
+    }
+
+    #[test]
+    fn flash_envelope_decays_hits_and_holds_statics() {
+        use crate::anim::{Keyframe, SideInterp};
+        use crate::time::Rational;
+        // A static trigger is a constant flash.
+        assert_eq!(flash_envelope(&Property::fixed(0.5), 7.0, 0.12), 0.5);
+        assert_eq!(flash_envelope(&Property::fixed(2.0), 0.0, 0.12), 1.0);
+
+        // Keyframed: hits at t=1 (full) and t=2 (0.6), decay 0.5s.
+        let key = |t: i64, v: f64| Keyframe {
+            time: Rational::new(t, 1).unwrap(),
+            value: v,
+            interp_in: SideInterp::Linear,
+            interp_out: SideInterp::Linear,
+        };
+        let trig = Property {
+            animation: Animation::Keyframed(vec![key(1, 1.0), key(2, 0.6)]),
+            extra: serde_json::Map::new(),
+        };
+        assert_eq!(flash_envelope(&trig, 0.5, 0.5), 0.0, "before the first hit");
+        assert_eq!(
+            flash_envelope(&trig, 1.0, 0.5),
+            1.0,
+            "full on the hit frame"
+        );
+        let half_later = flash_envelope(&trig, 1.5, 0.5);
+        assert!(
+            (half_later - (-1.0f64).exp()).abs() < 1e-12,
+            "1/e after one decay constant"
+        );
+        assert_eq!(
+            flash_envelope(&trig, 2.0, 0.5),
+            0.6,
+            "second hit wins over the tail"
+        );
+        // Overlap takes the loudest: right after t=2 the first hit's tail
+        // (1.0·e^-2) is quieter than the fresh 0.6 hit.
+        let after = flash_envelope(&trig, 2.1, 0.5);
+        assert!((after - 0.6 * (-0.2f64).exp()).abs() < 1e-12);
+
+        // Decay 0 flashes only on the exact hit time.
+        assert_eq!(flash_envelope(&trig, 1.0, 0.0), 1.0);
+        assert_eq!(flash_envelope(&trig, 1.01, 0.0), 0.0);
+    }
+
+    #[test]
+    fn flash_instantiates_resolves_and_lights_within_the_footprint() {
+        let e = instantiate("flash").unwrap();
+        assert_eq!(e.float_at("trigger", 0.0), Some(0.0));
+        assert_eq!(e.float_at("intensity", 0.0), Some(100.0));
+        assert_eq!(e.float_at("decay", 0.0), Some(120.0));
+        assert_eq!(e.colour_at("colour", 0.0), Some([1.0, 1.0, 1.0, 1.0]));
+        // Trigger 0: resolves to a zero-strength (identity) flash — the
+        // §1.2 trigger-driven exemption.
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0);
+        assert_eq!(
+            r,
+            vec![Resolved::Flash {
+                strength: 0.0,
+                colour: [1.0; 4],
+                mix: 1.0
+            }]
+        );
+
+        // CPU semantics: strength 1 paints the footprint the flash colour.
+        let mut img = vec![
+            0.5, 0.25, 0.1, 1.0, // opaque pixel
+            0.2, 0.1, 0.05, 0.5, // half-transparent pixel
+            0.0, 0.0, 0.0, 0.0, // empty pixel
+        ];
+        let before = img.clone();
+        cpu::flash(&mut img, 1.0, [2.0, 1.0, 0.5, 1.0], 1.0);
+        assert_eq!(&img[0..4], &[2.0, 1.0, 0.5, 1.0], "opaque: flash colour");
+        assert_eq!(
+            &img[4..8],
+            &[1.0, 0.5, 0.25, 0.5],
+            "half alpha: premultiplied flash"
+        );
+        assert_eq!(&img[8..12], &[0.0; 4], "empty pixels never light up");
+
+        // Strength 0 and mix 0 are both the exact identity.
+        let mut s0 = before.clone();
+        cpu::flash(&mut s0, 0.0, [1.0; 4], 1.0);
+        assert_eq!(s0, before);
+        let mut m0 = before.clone();
+        cpu::flash(&mut m0, 1.0, [1.0; 4], 0.0);
+        assert_eq!(m0, before);
     }
 }

@@ -112,6 +112,19 @@ Two mechanisms make this safe, and you'll see them by name in the code:
 - `crates/lumit-core/src/model.rs` — **What a project is.** Structs for the document,
   comps, layers, footage items. Each has an `extra` field that preserves anything a future
   Lumit version adds — so old and new versions can share project files.
+- **Flash.** The beat-strobe, in its manual form until beat markers exist. Its Trigger
+  parameter reads unusually on purpose: *each keyframe is a hit*. Drop a keyframe with
+  value 1 on a kick drum and the frame flashes to the flash colour, then fades out
+  exponentially over Decay milliseconds — you author one keyframe per beat, not a
+  spike-and-fall pair. (When the audio engine starts producing beat markers, they'll
+  drive the same envelope automatically — that's why the effect declares "marker input:
+  beat" in its traits already.) The flash respects the layer's own transparency: pixels
+  outside the footprint never light up, so flashing a masked layer flashes the masked
+  shape, not the whole rectangle. Flash also introduced the **colour parameter**: an
+  effect can now declare a scene-linear RGBA colour (the Flash tint defaults to white),
+  which the Effects group shows as R/G/B number fields plus a live swatch. Linear values
+  above 1 are legal — a "4.0 white" flash carries real HDR energy into any glow that
+  follows it in the stack.
 - **RGB split.** The impact-frame staple: the red and blue channels slide apart while
   green stays put, like a lens fringing under stress. Keyframe a spike on Amount at a
   hit and you have the genre's signature punch. Two modes: *linear* shifts everything

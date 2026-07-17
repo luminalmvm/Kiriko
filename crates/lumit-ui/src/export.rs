@@ -654,6 +654,23 @@ impl Renderer<'_> {
                         },
                     );
                 }
+                lumit_core::fx::Resolved::Flash {
+                    strength,
+                    colour,
+                    mix,
+                } => {
+                    tex = self.fx.flash(
+                        self.gpu,
+                        &tex,
+                        w,
+                        h,
+                        &lumit_gpu::fx::FlashOp {
+                            strength: *strength,
+                            colour: *colour,
+                            mix: *mix,
+                        },
+                    );
+                }
             }
         }
         tex
