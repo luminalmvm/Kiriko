@@ -112,6 +112,20 @@ Two mechanisms make this safe, and you'll see them by name in the code:
 - `crates/lumit-core/src/model.rs` — **What a project is.** Structs for the document,
   comps, layers, footage items. Each has an `extra` field that preserves anything a future
   Lumit version adds — so old and new versions can share project files.
+- **Grade (first stage).** The colour-correction engine begins: lift / gamma / gain per
+  channel plus saturation — the trackball grammar every colourist tool shares. *Gain*
+  multiplies (brightens everything proportionally), *lift* adds (raises the blacks —
+  or crushes them, negative values are allowed), *gamma* bends the mid-tones without
+  moving black or white. Each is a colour parameter, so warming the shadows while
+  cooling the highlights is just different numbers per channel. Two rules from the
+  design doc shape the code: it grades *unpremultiplied* colour (same reason as
+  Sharpen — grading premultiplied pixels shifts matte edges), and it never clips
+  highlights — a gain of 2 on an HDR value of 4 gives 8, and whatever glow comes later
+  gets all of it. Saturation pivots around proper Rec. 709 luma, so desaturating gives
+  true greyscale, not the grey-green mush of naive averaging. Neutral settings
+  short-circuit: a Grade at defaults passes pixels through untouched rather than
+  rounding them through power curves. The rest of §3.10 — exposure, white balance,
+  curves, vignette, and the Looks-style preset browser — builds on this stage.
 - **Flash.** The beat-strobe, in its manual form until beat markers exist. Its Trigger
   parameter reads unusually on purpose: *each keyframe is a hit*. Drop a keyframe with
   value 1 on a kick drum and the frame flashes to the flash colour, then fades out

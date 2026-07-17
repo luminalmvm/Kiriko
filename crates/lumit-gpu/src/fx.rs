@@ -103,6 +103,31 @@ struct FlashParams {
     _pad: [f32; 2],
 }
 
+/// One resolved grade (docs/08 §3.10, minimal v1): gain → lift → gamma per
+/// channel, then saturation, all in linear on unpremultiplied colour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradeOp {
+    pub lift: [f32; 3],
+    /// Per-channel, > 0 (the resolver clamps).
+    pub gamma: [f32; 3],
+    pub gain: [f32; 3],
+    /// 0 = greyscale, 1 = neutral, 2 = doubled.
+    pub saturation: f32,
+    /// 0..1, blended against the unprocessed input.
+    pub mix: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GradeParams {
+    lift: [f32; 4],
+    gamma: [f32; 4],
+    gain: [f32; 4],
+    saturation: f32,
+    mix_amt: f32,
+    _pad: [f32; 2],
+}
+
 /// The effect-pass engine: compiled kernels plus their layouts, one per
 /// device (owned alongside the Compositor by whoever renders).
 pub struct FxEngine {
@@ -111,6 +136,7 @@ pub struct FxEngine {
     sharpen_combine: wgpu::ComputePipeline,
     rgb_split: wgpu::ComputePipeline,
     flash: wgpu::ComputePipeline,
+    grade: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -174,17 +200,20 @@ impl FxEngine {
         let sharpen_mod = module(include_str!("fx_sharpen.wgsl"), "fx-sharpen");
         let rgb_split_mod = module(include_str!("fx_rgbsplit.wgsl"), "fx-rgb-split");
         let flash_mod = module(include_str!("fx_flash.wgsl"), "fx-flash");
+        let grade_mod = module(include_str!("fx_grade.wgsl"), "fx-grade");
         let blur = pipeline(&blur_mod, "fx-blur", "blur_pass");
         let sharpen_unpremultiply = pipeline(&sharpen_mod, "fx-sharpen-un", "unpremultiply");
         let sharpen_combine = pipeline(&sharpen_mod, "fx-sharpen", "sharpen_combine");
         let rgb_split = pipeline(&rgb_split_mod, "fx-rgb-split", "rgb_split");
         let flash = pipeline(&flash_mod, "fx-flash", "flash");
+        let grade = pipeline(&grade_mod, "fx-grade", "grade");
         Self {
             blur,
             sharpen_unpremultiply,
             sharpen_combine,
             rgb_split,
             flash,
+            grade,
             layout,
         }
     }
@@ -364,6 +393,39 @@ impl FxEngine {
             bytemuck::bytes_of(&FlashParams {
                 colour: op.colour,
                 strength: op.strength,
+                mix_amt: op.mix,
+                _pad: [0.0; 2],
+            }),
+        );
+        out
+    }
+
+    /// Apply one grade (docs/08 §3.10, minimal v1) to a linear working
+    /// texture, returning a new texture of the same size. One pointwise
+    /// pass; the §2.2 unpremultiply wrap is fused into the kernel.
+    pub fn grade(
+        &self,
+        ctx: &GpuContext,
+        src: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        op: &GradeOp,
+    ) -> wgpu::Texture {
+        let out = work_texture(ctx, w, h, "fx-grade-out");
+        let v4 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
+        self.dispatch(
+            ctx,
+            &self.grade,
+            src,
+            src,
+            &out,
+            w,
+            h,
+            bytemuck::bytes_of(&GradeParams {
+                lift: v4(op.lift),
+                gamma: v4(op.gamma),
+                gain: v4(op.gain),
+                saturation: op.saturation,
                 mix_amt: op.mix,
                 _pad: [0.0; 2],
             }),
@@ -835,6 +897,60 @@ mod tests {
             let out2 = fx.flash(&ctx, &tex, w, h, &op);
             let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
             assert_eq!(gpu, gpu2, "GPU flash must be bit-stable");
+        }
+    }
+
+    /// The §1.6 oracle for grade: a cheap pointwise effect, so the CPU and
+    /// GPU must agree to ≤ 2 fp16 ULP, and the GPU is bit-stable (§2.4).
+    #[test]
+    fn wgsl_grade_matches_the_cpu_oracle() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        let img = corpus(w, h);
+        let neutral = GradeOp {
+            lift: [0.0; 3],
+            gamma: [1.0; 3],
+            gain: [1.0; 3],
+            saturation: 1.0,
+            mix: 1.0,
+        };
+        let teal_orange = GradeOp {
+            lift: [-0.02, 0.0, 0.02],
+            gamma: [1.1, 1.0, 0.9],
+            gain: [1.2, 1.0, 0.8],
+            saturation: 1.3,
+            mix: 1.0,
+        };
+        let extreme = GradeOp {
+            lift: [0.1; 3],
+            gamma: [2.2, 0.6, 1.7],
+            gain: [2.0, 0.5, 1.5],
+            saturation: 0.0,
+            mix: 0.7,
+        };
+        for (name, op) in [
+            ("neutral", neutral),
+            ("teal-orange", teal_orange),
+            ("extreme", extreme),
+        ] {
+            let mut cpu = img.clone();
+            lumit_core::fx::cpu::grade(&mut cpu, op.lift, op.gamma, op.gain, op.saturation, op.mix);
+
+            let tex = upload_linear_f32(&ctx, &img, w, h);
+            let out = fx.grade(&ctx, &tex, w, h, &op);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+
+            let worst = worst_f16_ulp(&cpu, &gpu);
+            eprintln!("grade {name}: worst {worst} ulp");
+            assert!(worst <= 2, "{name}: worst {worst} fp16 ULP");
+
+            let out2 = fx.grade(&ctx, &tex, w, h, &op);
+            let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
+            assert_eq!(gpu, gpu2, "GPU grade must be bit-stable");
         }
     }
 }

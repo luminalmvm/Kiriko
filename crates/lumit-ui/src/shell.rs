@@ -7840,6 +7840,27 @@ impl GpuViewer {
                                 },
                             );
                         }
+                        lumit_core::fx::Resolved::Grade {
+                            lift,
+                            gamma,
+                            gain,
+                            saturation,
+                            mix,
+                        } => {
+                            tex = self.fx.grade(
+                                &self.ctx,
+                                &tex,
+                                w,
+                                h,
+                                &lumit_gpu::fx::GradeOp {
+                                    lift: *lift,
+                                    gamma: *gamma,
+                                    gain: *gain,
+                                    saturation: *saturation,
+                                    mix: *mix,
+                                },
+                            );
+                        }
                     }
                 }
             }
