@@ -1992,6 +1992,14 @@ impl Shell {
         // active-panel focus edge further down).
         let modal_open = self.any_modal_open();
 
+        // While a DoF Focus (depth) eyedropper is armed, stash the referenced
+        // depth layer's decoded pixels for the eyedropper to sample — this is the
+        // one place holding both the egui context and the per-layer decode cache
+        // (`last_comp`), so a depth pick reads the real depth pass instead of the
+        // composite. Guarded internally: a no-op unless a depth pick is armed.
+        #[cfg(feature = "media")]
+        eyedropper::stash_depth_source(ctx, &self.app, &self.last_comp);
+
         // The tiling dock fills the window: a solo pane renders bare with no
         // tab bar — the Viewer's look (K-074) on every lone panel (K-086) —
         // while stacked panels carry tabs and can be dragged to re-arrange

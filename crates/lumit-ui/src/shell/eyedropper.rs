@@ -47,6 +47,70 @@ pub(crate) fn take_arm_request(ctx: &egui::Context) -> Option<EyedropperTarget> 
     })
 }
 
+/// The decoded pixels of the depth layer a DoF Focus pick reads: `(width,
+/// height, rgba)`. Stashed here by the shell (which alone holds the per-layer
+/// decode cache) so the app-only [`viewer_overlay`] can sample true depth
+/// instead of the composite. An `Arc` so the per-frame stash is a pointer bump,
+/// not a pixel copy.
+#[cfg(feature = "media")]
+type DepthSource = std::sync::Arc<(u32, u32, Vec<u8>)>;
+
+fn depth_pixels_id() -> egui::Id {
+    egui::Id::new("lumit::eyedropper::depth-pixels")
+}
+
+fn depth_stamp_id() -> egui::Id {
+    egui::Id::new("lumit::eyedropper::depth-stamp")
+}
+
+/// While a DoF Focus (depth) pick is armed, stash the referenced depth layer's
+/// own decoded pixels so the pick samples the real depth pass, not the composite
+/// (which never shows a hidden depth layer). Called by the shell, the only place
+/// that holds both the egui context and the per-layer decode cache
+/// (`last_comp`). The clone happens once per (frame, depth-layer) — a stamp
+/// guards it — so hovering the magnifier is a pointer read, not a re-copy. A
+/// no-op unless a depth pick is armed and its depth layer has decoded.
+#[cfg(feature = "media")]
+pub(crate) fn stash_depth_source(
+    ctx: &egui::Context,
+    app: &AppState,
+    last_comp: &Option<crate::app_state::preview::CompFrame>,
+) {
+    let Some(target) = app.eyedropper else {
+        return;
+    };
+    if !matches!(target.mode, crate::app_state::EyedropperMode::Depth) {
+        return;
+    }
+    let Some(cf) = last_comp else {
+        return;
+    };
+    // Resolve the depth layer referenced by the DoF effect this pick edits.
+    let doc = app.store.snapshot();
+    let depth_id = app
+        .preview_comp
+        .and_then(|c| doc.comp(c))
+        .and_then(|comp| comp.layers.iter().find(|l| l.id == target.layer))
+        .filter(|l| target.effect < l.effects.len())
+        .and_then(|l| l.effects[target.effect].layer_ref("depth"));
+    let Some(depth_id) = depth_id else {
+        return;
+    };
+    let Some(lp) = cf.layers.iter().find(|l| l.layer == depth_id) else {
+        return;
+    };
+    // Only re-clone when the frame or the depth layer changes.
+    let stamp = (cf.frame, depth_id);
+    let cur = ctx.data(|d| d.get_temp::<(usize, uuid::Uuid)>(depth_stamp_id()));
+    if cur != Some(stamp) {
+        let pixels: DepthSource = std::sync::Arc::new((lp.width, lp.height, lp.rgba.clone()));
+        ctx.data_mut(|d| {
+            d.insert_temp(depth_stamp_id(), stamp);
+            d.insert_temp(depth_pixels_id(), pixels);
+        });
+    }
+}
+
 /// Paint the eyedropper glyph in `rect`, in `color` — Iconoir's `color-picker`
 /// (an eyedropper/pipette), via the shared icon painter. The colour comes from
 /// the theme.
@@ -119,6 +183,12 @@ pub(crate) fn viewer_overlay(
         .preview_comp
         .and_then(|comp| app.frame_key_for(comp, app.preview_frame));
     let clicked = over_image && view.clicked();
+    // The referenced depth layer's own decoded pixels, stashed by the shell for
+    // a depth pick (see `stash_depth_source`). When present, a depth pick reads
+    // TRUE depth from this pass at the cursor rather than the composite's luma
+    // (a hidden depth layer never shows in the composite). None → the old
+    // composite-luma fallback, so a not-yet-decoded reference still gives a value.
+    let depth_src: Option<DepthSource> = ui.ctx().data(|d| d.get_temp(depth_pixels_id()));
 
     let mut sample: Option<Sample> = None;
     if over_image {
@@ -133,6 +203,14 @@ pub(crate) fn viewer_overlay(
                         let v = ((cursor.y - draw.top()) / draw.height()).clamp(0.0, 1.0);
                         let cx = ((u * w as f32) as i32).clamp(0, w - 1);
                         let cy = ((v * h as f32) as i32).clamp(0, h - 1);
+                        // The depth pass at the cursor: `u,v` index the depth
+                        // layer directly (a framing-matched depth pass, K-124).
+                        let depth_at = depth_src.as_ref().map(|p| {
+                            let (dw, dh) = (p.0 as i32, p.1 as i32);
+                            let dcx = ((u * dw as f32) as i32).clamp(0, dw - 1);
+                            let dcy = ((v * dh as f32) as i32).clamp(0, dh - 1);
+                            average_depth(&p.2, dw, dh, dcx, dcy, region)
+                        });
                         draw_magnifier(
                             ui.painter(),
                             theme,
@@ -145,6 +223,7 @@ pub(crate) fn viewer_overlay(
                             cursor,
                             image_area,
                             target.mode,
+                            depth_at,
                         );
                         if clicked {
                             sample = Some(match target.mode {
@@ -152,7 +231,9 @@ pub(crate) fn viewer_overlay(
                                     average_colour(&frame.rgba, w, h, cx, cy, region),
                                 ),
                                 crate::app_state::EyedropperMode::Depth => {
-                                    Sample::Depth(average_depth(&frame.rgba, w, h, cx, cy, region))
+                                    Sample::Depth(depth_at.unwrap_or_else(|| {
+                                        average_depth(&frame.rgba, w, h, cx, cy, region)
+                                    }))
                                 }
                             });
                         }
@@ -266,10 +347,11 @@ fn average_colour(rgba: &[u8], w: i32, h: i32, cx: i32, cy: i32, region: u32) ->
     }
 }
 
-/// A 0..1 depth proxy: the Rec.709 luma of the sampled region (linear light),
-/// averaged. Used for the DoF Focus pick when the depth layer's own pixels are
-/// not separately readable from the UI (they are not — the cache holds the
-/// composite, not per-layer passes).
+/// A 0..1 depth value: the Rec.709 luma of the sampled region (linear light),
+/// averaged. For the DoF Focus pick this runs on the referenced depth layer's
+/// own decoded pixels (stashed by the shell — a grey depth pass has luma equal
+/// to its red channel, the value the effect reads), falling back to the
+/// composite when that pass has not decoded.
 #[cfg(feature = "media")]
 fn average_depth(rgba: &[u8], w: i32, h: i32, cx: i32, cy: i32, region: u32) -> f64 {
     let half = (region as i32 - 1) / 2;
@@ -312,6 +394,10 @@ fn draw_magnifier(
     cursor: egui::Pos2,
     bounds: egui::Rect,
     mode: crate::app_state::EyedropperMode,
+    // For a depth pick, the depth sampled from the referenced depth layer at the
+    // cursor (see `stash_depth_source`); the caption previews this instead of the
+    // composite's luma. None falls back to the composite (undecoded reference).
+    depth_override: Option<f64>,
 ) {
     const N: i32 = 9;
     const HALF: i32 = N / 2;
@@ -407,7 +493,7 @@ fn draw_magnifier(
             ])
         }
         crate::app_state::EyedropperMode::Depth => {
-            let d = average_depth(rgba, w, h, cx, cy, region);
+            let d = depth_override.unwrap_or_else(|| average_depth(rgba, w, h, cx, cy, region));
             let g = crate::pixels::srgb_encode(d as f32);
             crate::theme::document_colour([g, g, g, 255])
         }
