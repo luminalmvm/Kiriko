@@ -1012,15 +1012,21 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   toward the cursor so the frame under the pointer stays put — and scroll it with **Shift +
   wheel** (or a trackpad's horizontal wheel); a plain wheel scrolls the rows up and down. Along
   the bottom of the lanes sits a small contained bar: `−`, `+` and **Fit** with the current
-  zoom per cent on the left, the Layers/Graph view toggle on the right, and a draggable
-  horizontal scrollbar just above it (the vertical scrollbar stops above the bar so the two
-  never fight). Layers/Graph is only a change of what the lanes *draw* — the outline stays
+  zoom per cent on the left, a **Grid** picker and a **magnet** toggle (on by default) that
+  governs whether a dragged keyframe snaps its time to the nearest whole frame — the magnet
+  shows in both the Layers and Graph views — the Layers/Graph view toggle on the right, and a
+  draggable horizontal scrollbar just above it (the vertical scrollbar stops above the bar so
+  the two never fight). Layers/Graph is only a change of what the lanes *draw* — the outline stays
   identical between the two, so twirling a layer open shows the same rows either way.
 - **Working the layer outline** — a few habits from other editors now work the way you
   would expect. A row of tiny icons sits over the outline columns, level with the time
-  ruler, naming each one at a glance: an eye over visibility, "Layer" over the names, the
-  flow glyph, a "3D" tag and a speaker over their switches. The thin line between the
-  outline and the lanes is a handle — drag it to widen or narrow the outline. **Double-click
+  ruler, naming each one at a glance: an eye over visibility with the speaker (volume)
+  now sitting right beside it, "Layer" over the names, "Matte" and "Blend" over those two
+  dropdowns, the flow glyph, and a cube over the 3D switch. The thin line between the
+  outline and the lanes is a handle — drag it to widen or narrow the outline; if you drag
+  it hard against a limit and keep pushing, it now waits for the cursor to travel back to
+  where the handle actually is before it starts moving again, rather than lurching the
+  instant you reverse. **Double-click
   a layer's name** to rename it in place (Enter or clicking away keeps the change, Escape
   throws it away); **drag a name up or down** to reorder the stack (top = renders last, one
   undo per move, with an accent line showing where it will land); and **right-click a name**

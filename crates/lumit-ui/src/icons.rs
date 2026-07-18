@@ -89,11 +89,15 @@ pub enum Icon {
     Collapse,
     /// The Flow option on footage layers (K-088): optical-flow interpolation.
     Flow,
+    /// The 3D column: a cube (the header glyph over the per-layer 3D switch).
+    Cube3d,
+    /// Snapping toggle in the timeline's bottom bar: a magnet.
+    Magnet,
 }
 
 impl Icon {
     /// Every variant, for exhaustive iteration (tests, palettes).
-    pub const ALL: [Icon; 35] = [
+    pub const ALL: [Icon; 37] = [
         Icon::Pointer,
         Icon::Move,
         Icon::Rectangle,
@@ -129,6 +133,8 @@ impl Icon {
         Icon::TwirlOpen,
         Icon::Collapse,
         Icon::Flow,
+        Icon::Cube3d,
+        Icon::Magnet,
     ];
 
     /// The Iconoir icon this variant renders.
@@ -169,6 +175,8 @@ impl Icon {
             Icon::TwirlOpen => "nav-arrow-down",
             Icon::Collapse => "flare",
             Icon::Flow => "wind",
+            Icon::Cube3d => "cube",
+            Icon::Magnet => "magnet",
         }
     }
 

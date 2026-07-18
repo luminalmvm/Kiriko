@@ -218,13 +218,17 @@ fn column_header_icons(
             theme.text_muted,
         );
     };
-    // Slots mirror the row loop: eye at left+27, names from left+58, then the
-    // right-anchored switch cluster measured back from `edge`.
+    // Slots mirror the row loop: eye at left+27, the volume switch beside it at
+    // left+47, names from left+58, then the right-anchored switch cluster
+    // measured back from `edge`. Matte and blend sit over their dropdowns; the
+    // 3D column wears a cube glyph.
     icon(panel_left + 27.0, Icon::Eye);
+    icon(panel_left + 47.0, Icon::Audio);
     label(panel_left + 58.0, "Layer", egui::Align2::LEFT_CENTER);
+    label(edge - 179.0, "Matte", egui::Align2::CENTER_CENTER);
+    label(edge - 120.0, "Blend", egui::Align2::CENTER_CENTER);
     icon(edge - 75.0, Icon::Flow);
-    label(edge - 49.0, "3D", egui::Align2::CENTER_CENTER);
-    icon(edge - 17.0, Icon::Audio);
+    icon(edge - 49.0, Icon::Cube3d);
 }
 
 pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
@@ -693,6 +697,9 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                 };
                 let is_footage = matches!(layer.kind, lumit_core::model::LayerKind::Footage { .. });
                 let eye_r = slot(row_rect.left() + 18.0, row_rect.left() + 36.0);
+                // Volume sits right beside the eye (Mack); the far-right slot it
+                // vacated still carries a Precomp's collapse switch.
+                let vol_r = slot(row_rect.left() + 38.0, row_rect.left() + 56.0);
                 let mute_r = slot(edge - 34.0, edge);
                 let td_r = slot(edge - 60.0, edge - 38.0);
                 // Flow option toggle (K-088), footage layers only.
@@ -827,7 +834,7 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                     three_d_control(ui, comp_id, layer, &mut pending)
                 });
                 if is_footage {
-                    place(ui, mute_r, &mut |ui| {
+                    place(ui, vol_r, &mut |ui| {
                         mute_control(ui, theme, comp_id, layer, &mut pending)
                     });
                     place(ui, flow_r, &mut |ui| {
@@ -1714,11 +1721,24 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
         if hresp.hovered() || hresp.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
+        if hresp.drag_started() {
+            app.timeline_divider_raw = Some(app.timeline_name_w);
+        }
         if hresp.dragged() {
             // Clamp to the same bounds the layout applies, so the divider never
-            // drags past where the outline can actually go.
+            // drags past where the outline can actually go. Overshoot tracking
+            // (drag-catch-up note 1): accumulate the *raw* pointer travel and
+            // clamp only the shown width, so once the drag is pinned at a limit
+            // the divider doesn't start moving back until the cursor returns to
+            // the divider's actual position — not the instant the mouse reverses.
             let max_w = (panel_right - panel_left - 120.0).clamp(96.0, 900.0);
-            app.timeline_name_w = (app.timeline_name_w + hresp.drag_delta().x).clamp(96.0, max_w);
+            let raw =
+                app.timeline_divider_raw.unwrap_or(app.timeline_name_w) + hresp.drag_delta().x;
+            app.timeline_divider_raw = Some(raw);
+            app.timeline_name_w = raw.clamp(96.0, max_w);
+        }
+        if hresp.drag_stopped() {
+            app.timeline_divider_raw = None;
         }
         // Full-height division between the outline and the lanes: a strong
         // hairline from the ruler down to the bottom of the rows, accent while
@@ -1945,6 +1965,18 @@ pub(crate) fn timeline_bottom_bar(
                 }
             }
         });
+    }
+
+    // Magnet (K-007 snapping toggle): on by default, shared by both the lane and
+    // graph views (this cluster draws in both). When on, a dragged keyframe
+    // snaps its time to the nearest whole frame. Lives here beside the grid pick
+    // since both are about reading and landing on time.
+    if zc
+        .selectable_label(app.magnet_snap, crate::icons::text(Icon::Magnet, 13.0))
+        .on_hover_text("Magnet: snap dragged keyframes to whole frames")
+        .clicked()
+    {
+        app.magnet_snap = !app.magnet_snap;
     }
 
     // The value/speed lens toggle (graph mode only): one lens shared by every

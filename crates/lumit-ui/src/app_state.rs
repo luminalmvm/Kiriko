@@ -1054,6 +1054,16 @@ pub struct AppState {
     pub last_display_scale: f32,
     /// Draggable width of the timeline's left (layer-controls) column, px.
     pub timeline_name_w: f32,
+    /// Accumulated raw pointer width while the layer/lane divider is being
+    /// dragged (drag-catch-up note 1): the shown `timeline_name_w` is this
+    /// value clamped, so once the drag pins at a limit the divider only starts
+    /// moving back when the cursor returns to its actual position. `None` when
+    /// no divider drag is in flight.
+    pub timeline_divider_raw: Option<f32>,
+    /// Snapping toggle for the timeline (magnet, on by default): when on, a
+    /// dragged keyframe snaps its time to the nearest whole frame. Shared by the
+    /// lane and graph views. Session state, like the other timeline preferences.
+    pub magnet_snap: bool,
     /// Lane-area horizontal view (07-UI-SPEC §4): zoom (1.0 = the whole comp fits
     /// the track width; larger zooms in) and the comp time at the left edge.
     /// Alt-wheel zooms, Shift-wheel scrolls; vertical scroll is the ScrollArea's.
@@ -1191,6 +1201,8 @@ impl Default for AppState {
             view_pan: egui::Vec2::ZERO,
             last_display_scale: 1.0,
             timeline_name_w: 300.0,
+            timeline_divider_raw: None,
+            magnet_snap: true,
             timeline_zoom: 1.0,
             timeline_view_start: 0.0,
             timeline_graph_mode: false,
