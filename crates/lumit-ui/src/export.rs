@@ -645,11 +645,12 @@ impl Renderer<'_> {
         Ok(out)
     }
 
-    /// Compute a footage layer's dense forward flow field for Flow motion blur
-    /// (docs/08 §3.2) — the export twin of the preview's decode-worker flow
-    /// (K-031: the same `to_gray` → forward-flow call on the same source
-    /// frames, so preview and export match). None unless the stack wants one.
-    /// The current frame and the +1 neighbour are picked exactly as
+    /// Compute a footage layer's dense forward flow field for Flow motion
+    /// blur (docs/08 §3.2, offset +1) or Datamosh (§3.12, K-104, offset -1)
+    /// — the export twin of the preview's decode-worker flow (K-031: the
+    /// same `to_gray` → forward-flow call on the same source frames, so
+    /// preview and export match). None unless the stack wants one. The
+    /// current frame and the requested neighbour are picked exactly as
     /// [`Self::footage_neighbours`] picks its frames (same retime mapping,
     /// same comp step, unmasked), and flow runs on the shared [`Self::flow`]
     /// engine; the field uploads as an `rg32float` texture the same size as
@@ -661,9 +662,11 @@ impl Renderer<'_> {
         comp: &Composition,
     ) -> Result<Option<Tex>, String> {
         use lumit_core::model::LayerKind;
-        if !lumit_core::fx::stack_wants_flow_field(&layer.effects, layer.switches.fx) {
+        let Some(neighbour) =
+            lumit_core::fx::stack_flow_neighbour(&layer.effects, layer.switches.fx)
+        else {
             return Ok(None);
-        }
+        };
         let LayerKind::Footage { item, retime } = &layer.kind else {
             return Ok(None);
         };
@@ -684,7 +687,7 @@ impl Renderer<'_> {
             let nst = retime.as_ref().map(|r| r.evaluate(nlt)).unwrap_or(nlt);
             crate::pixels::frame_pick(nst, fps, frames, false, None).0
         };
-        let (f0, f1) = (pick(0), pick(1));
+        let (f0, f1) = (pick(0), pick(neighbour));
         let dec = self.decoders.get_mut(item).ok_or("decoder missing")?;
         let cur = dec.frame_rgba(f0, None).map_err(|e| e.to_string())?;
         let next = dec.frame_rgba(f1, None).map_err(|e| e.to_string())?;
@@ -706,7 +709,8 @@ impl Renderer<'_> {
     /// `markers` is the layer's §1.4 marker context, built by the same
     /// shared constructor preview uses (K-031); `neighbours` are the temporal
     /// effect's neighbour frames (empty for a plain stack); `flow_field` is
-    /// the layer's dense motion field for Flow motion blur (None otherwise).
+    /// the layer's dense motion field for Flow motion blur or Datamosh
+    /// (None otherwise).
     #[allow(clippy::too_many_arguments)]
     fn apply_fx(
         &self,

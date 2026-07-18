@@ -447,6 +447,24 @@ struct MotionBlurParams {
     _pad0: f32,
 }
 
+/// One resolved Datamosh pass (docs/08 §3.12, the Glitch effect's third
+/// section, K-104). The raw -1 source neighbour and the dense current→
+/// previous flow field arrive as their own textures (see
+/// [`FxEngine::datamosh`]); this op carries only the scalar the kernel
+/// blends by.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DatamoshOp {
+    /// 0..1, blended against the current (already block/scanline'd) frame.
+    pub intensity: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DatamoshParams {
+    intensity: f32,
+    _pad: [f32; 3],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct AdjustParams {
@@ -476,13 +494,20 @@ pub struct FxEngine {
     echo_accumulate: wgpu::ComputePipeline,
     echo_mix: wgpu::ComputePipeline,
     motion_blur: wgpu::ComputePipeline,
+    /// Datamosh (docs/08 §3.12, K-104): shares [`Self::mb_layout`]/`mb_pl`
+    /// with Motion blur — both need exactly three sampled inputs (the
+    /// current frame, one extra neighbour-derived texture, and a flow
+    /// field) plus a storage output and a uniform.
+    datamosh: wgpu::ComputePipeline,
     adjust: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     /// The adjustment blend's own layout: three sampled inputs (below,
     /// processed, coverage) where every effect kernel takes two.
     adjust_layout: wgpu::BindGroupLayout,
     /// Flow motion blur's own layout: the shared two inputs (src, orig) plus
-    /// the flow-field texture — the one extra sampled input this kernel needs.
+    /// the flow-field texture — the one extra sampled input this kernel
+    /// needs. Also Datamosh's layout (see [`Self::datamosh`]): its three
+    /// sampled inputs (current, previous, flow) fit the same shape.
     mb_layout: wgpu::BindGroupLayout,
 }
 
@@ -635,6 +660,7 @@ impl FxEngine {
         let glitch_mod = module(include_str!("fx_glitch.wgsl"), "fx-glitch");
         let echo_mod = module(include_str!("fx_echo.wgsl"), "fx-echo");
         let motion_blur_mod = module(include_str!("fx_motionblur.wgsl"), "fx-motion-blur");
+        let datamosh_mod = module(include_str!("fx_datamosh.wgsl"), "fx-datamosh");
         let adjust_mod = module(include_str!("fx_adjust.wgsl"), "fx-adjust");
         let blur = pipeline(&blur_mod, "fx-blur", "blur_pass");
         let dir_blur = pipeline(&dir_blur_mod, "fx-dir-blur", "dir_blur");
@@ -668,6 +694,16 @@ impl FxEngine {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        let datamosh = ctx
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("fx-datamosh"),
+                layout: Some(&mb_pl),
+                module: &datamosh_mod,
+                entry_point: Some("datamosh"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let adjust = ctx
             .device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -698,6 +734,7 @@ impl FxEngine {
             echo_accumulate,
             echo_mix,
             motion_blur,
+            datamosh,
             adjust,
             layout,
             adjust_layout,
@@ -844,6 +881,82 @@ impl FxEngine {
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.motion_blur);
+            cpass.set_bind_group(0, &bind, &[]);
+            cpass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+        }
+        ctx.queue.submit([enc.finish()]);
+        out
+    }
+
+    /// Apply Datamosh (docs/08 §3.12, the Glitch effect's third section,
+    /// K-104) to a linear working texture, returning a new texture of the
+    /// same size. One pass: per output pixel, read its current→previous
+    /// motion vector from `flow` and take a single bilinear tap of `prev`
+    /// at the displaced position — a motion-compensated prediction, not a
+    /// streak integral — then blend against `cur` by Intensity. Shares
+    /// [`Self::mb_layout`]/its pipeline layout with Motion blur (same
+    /// three-sampled-input shape); its own pipeline and shader.
+    #[allow(clippy::too_many_arguments)]
+    pub fn datamosh(
+        &self,
+        ctx: &GpuContext,
+        cur: &wgpu::Texture,
+        prev: &wgpu::Texture,
+        flow: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        op: &DatamoshOp,
+    ) -> wgpu::Texture {
+        use wgpu::util::DeviceExt;
+        let out = work_texture(ctx, w, h, "fx-dm-out");
+        let ubuf = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx-dm-params"),
+                contents: bytemuck::bytes_of(&DatamoshParams {
+                    intensity: op.intensity,
+                    _pad: [0.0; 3],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let view = |t: &wgpu::Texture| t.create_view(&Default::default());
+        let bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx-dm-bind"),
+            layout: &self.mb_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view(cur)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view(prev)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&view(flow)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&view(&out)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: ubuf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fx-dm-enc"),
+            });
+        {
+            let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fx-dm-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.datamosh);
             cpass.set_bind_group(0, &bind, &[]);
             cpass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
         }
@@ -3087,6 +3200,92 @@ mod tests {
             readback_linear_f32(&ctx, &out, w, h).unwrap(),
             img,
             "a closed shutter must be a bit-exact passthrough"
+        );
+    }
+
+    /// The §1.6 oracle for Datamosh (docs/08 §3.12, the Glitch effect's
+    /// third section, K-104): the GPU single-tap warp matches
+    /// `lumit_core::fx::cpu::datamosh` given the same -1 neighbour and flow
+    /// field, on a constant field and a varying one — the same two shapes
+    /// [`wgsl_motion_blur_matches_the_cpu_oracle`] exercises, since both
+    /// kernels read flow the same way. One bilinear tap, no multi-tap sum,
+    /// so it holds to the same ≤ 2 fp16 ULP cheap-class bound. The GPU is
+    /// bit-stable (§2.4); Intensity 0 is a bit-exact passthrough.
+    #[test]
+    fn wgsl_datamosh_matches_the_cpu_oracle() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        let current = corpus(w, h);
+        // A distinct -1 neighbour: the alpha channel carried through (as Echo's
+        // oracle does), colour channels scaled and requantised to fp16.
+        let prev: Vec<f32> = current
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if i % 4 == 3 {
+                    *v
+                } else {
+                    f16_to_f32(f16_bits((v * 0.6 + 0.05).min(6.0)))
+                }
+            })
+            .collect();
+        let cur_t = upload_linear_f32(&ctx, &current, w, h);
+        let prev_t = upload_linear_f32(&ctx, &prev, w, h);
+        let n = (w * h) as usize;
+
+        let constant: (Vec<f32>, Vec<f32>) = (vec![-4.0; n], vec![2.0; n]);
+        let mut vary_u = vec![0f32; n];
+        let mut vary_v = vec![0f32; n];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) as usize;
+                vary_u[i] = (x as f32 - w as f32 / 2.0) * 0.3;
+                vary_v[i] = (y as f32 - h as f32 / 2.0) * 0.25;
+            }
+        }
+        let varying = (vary_u, vary_v);
+
+        for (field, intensity, name) in [
+            (&constant, 1.0f32, "constant"),
+            (&varying, 0.6, "varying"),
+            (&constant, 0.35, "partial mix"),
+        ] {
+            let (u, v) = field;
+            let cpu = lumit_core::fx::cpu::datamosh(&current, &prev, w, h, u, v, intensity);
+            let flow_t = upload_flow_field(&ctx, u, v, w, h);
+            let op = DatamoshOp { intensity };
+            let out = fx.datamosh(&ctx, &cur_t, &prev_t, &flow_t, w, h, &op);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+            let worst = worst_f16_ulp(&cpu, &gpu);
+            eprintln!("datamosh {name}: worst {worst} ulp");
+            assert!(worst <= 2, "{name}: worst {worst} fp16 ULP");
+            let out2 = fx.datamosh(&ctx, &cur_t, &prev_t, &flow_t, w, h, &op);
+            assert_eq!(
+                gpu,
+                readback_linear_f32(&ctx, &out2, w, h).unwrap(),
+                "GPU datamosh must be bit-stable"
+            );
+        }
+
+        // Intensity 0 must be a bit-exact passthrough regardless of motion.
+        let moving = upload_flow_field(&ctx, &constant.0, &constant.1, w, h);
+        let out = fx.datamosh(
+            &ctx,
+            &cur_t,
+            &prev_t,
+            &moving,
+            w,
+            h,
+            &DatamoshOp { intensity: 0.0 },
+        );
+        assert_eq!(
+            readback_linear_f32(&ctx, &out, w, h).unwrap(),
+            current,
+            "intensity 0 must be a bit-exact passthrough"
         );
     }
 }

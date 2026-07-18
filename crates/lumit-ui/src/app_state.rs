@@ -68,11 +68,13 @@ pub mod preview {
         /// offset in the stack's temporal window. Empty for a plain layer, so
         /// a single-frame stack decodes exactly one frame.
         pub temporal: Vec<(i32, usize)>,
-        /// True when the stack has a flow-consuming effect (Flow motion blur,
-        /// docs/08 §3.2): the decode worker measures the dense motion between
-        /// this frame and the +1 neighbour (already fetched via `temporal`)
-        /// and stamps it onto [`CompLayerPixels::flow_field`].
-        pub wants_flow: bool,
+        /// Set when the stack has a flow-consuming effect (Flow motion blur,
+        /// docs/08 §3.2, wants `1`; Datamosh, §3.12, K-104, wants `-1`): the
+        /// decode worker measures the dense motion from this frame to the
+        /// neighbour at that offset (already fetched via `temporal`) and
+        /// stamps it onto [`CompLayerPixels::flow_field`]. See
+        /// [`lumit_core::fx::stack_flow_neighbour`].
+        pub flow_neighbour: Option<i32>,
     }
 
     pub struct CompLayerPixels {
@@ -87,9 +89,11 @@ pub mod preview {
         /// [`CompJob::temporal`]): `(offset, rgba)`, same size as `rgba`.
         pub temporal: Vec<(i32, Vec<u8>)>,
         /// Dense forward flow (per-pixel `(u, v)` motion in pixels, row-major,
-        /// same `width × height` as `rgba`) between this frame and the next,
-        /// present only when [`CompJob::wants_flow`] and the +1 neighbour
-        /// decoded. Flow motion blur (docs/08 §3.2) smears along it.
+        /// same `width × height` as `rgba`) from this frame to the neighbour
+        /// at [`CompJob::flow_neighbour`]'s offset, present only when that
+        /// neighbour decoded. Flow motion blur (docs/08 §3.2, offset `1`)
+        /// smears along it; Datamosh (§3.12, K-104, offset `-1`) warps the
+        /// previous frame along it.
         pub flow_field: Option<(Vec<f32>, Vec<f32>)>,
     }
 
@@ -305,26 +309,29 @@ pub mod preview {
                         .map(|p| (offset, p.rgba))
                 })
                 .collect();
-            // Flow motion blur (docs/08 §3.2) needs a dense motion field: the
-            // forward flow from this frame to the next (offset +1, decoded
-            // above). Computed from the raw current frame before it is consumed
-            // into `rgba` below, where both frames live as RGBA — exactly as
-            // the Flow retiming policy computes its flow, on the shared engine
-            // that reuses the GPU when one is present. A dropped +1 neighbour
-            // just leaves it None, and motion blur degrades to a passthrough.
-            let flow_field = if job.wants_flow {
-                temporal.iter().find(|(o, _)| *o == 1).map(|(_, next)| {
-                    let (w, h) = (px.width as usize, px.height as usize);
-                    let ga = lumit_flow::to_gray(&px.rgba, w, h);
-                    let gb = lumit_flow::to_gray(next, w, h);
-                    let (fwd, _bwd) = flow_engine
-                        .get_or_insert_with(lumit_flow::FlowEngine::new_auto)
-                        .flow_pair(&ga, &gb);
-                    (fwd.u, fwd.v)
-                })
-            } else {
-                None
-            };
+            // Flow motion blur (docs/08 §3.2, offset +1) and Datamosh (§3.12,
+            // K-104, offset -1) both need a dense motion field: the forward
+            // flow from this frame to the requested neighbour (already
+            // decoded above). Computed from the raw current frame before it
+            // is consumed into `rgba` below, where both frames live as RGBA —
+            // exactly as the Flow retiming policy computes its flow, on the
+            // shared engine that reuses the GPU when one is present. A
+            // dropped neighbour just leaves it None, degrading the
+            // flow-consuming effect to a passthrough.
+            let flow_field = job.flow_neighbour.and_then(|offset| {
+                temporal
+                    .iter()
+                    .find(|(o, _)| *o == offset)
+                    .map(|(_, other)| {
+                        let (w, h) = (px.width as usize, px.height as usize);
+                        let ga = lumit_flow::to_gray(&px.rgba, w, h);
+                        let gb = lumit_flow::to_gray(other, w, h);
+                        let (fwd, _bwd) = flow_engine
+                            .get_or_insert_with(lumit_flow::FlowEngine::new_auto)
+                            .flow_pair(&ga, &gb);
+                        (fwd.u, fwd.v)
+                    })
+            });
             // Blend / Flow policy: combine with the next source frame.
             let rgba = if let Some((ceil, w)) = job.blend {
                 let req2 = Request {
@@ -2935,7 +2942,7 @@ impl AppState {
                                     // later refinement (clip-relative neighbour
                                     // resolution); footage layers first.
                                     temporal: Vec::new(),
-                                    wants_flow: false,
+                                    flow_neighbour: None,
                                 });
                             }
                         }
@@ -3028,9 +3035,10 @@ impl AppState {
                         flow,
                         flow_full,
                         temporal,
-                        // Flow motion blur measures motion between this frame
-                        // and the +1 neighbour (already in `temporal`).
-                        wants_flow: lumit_core::fx::stack_wants_flow_field(
+                        // Flow motion blur / Datamosh measure motion between
+                        // this frame and their requested neighbour (already
+                        // in `temporal`).
+                        flow_neighbour: lumit_core::fx::stack_flow_neighbour(
                             &layer.effects,
                             layer.switches.fx,
                         ),

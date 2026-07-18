@@ -528,16 +528,30 @@ Three sub-effects shipped as one "Glitch" effect with enableable sections, all s
   beats via keyframes or trigger mode (§1.4).
 - **Scanlines:** line period (px@comp), darkness, roll speed (lines/s, deterministic from
   time), interlace-offset option.
-- **Datamosh look:** simulates I-frame removal by re-warping the previous output frame
-  with the current frame's flow field (§3.1) instead of showing the current frame, blended
-  by Intensity; temporal window `{-1, 0}`. It is a *look*, not real bitstream corruption —
-  deterministic and safe.
+- **Datamosh look:** simulates I-frame removal by re-warping the previous source frame
+  with the flow field measured from the current frame to it instead of showing the current
+  frame, blended by Intensity; temporal window `{-1, 0}` when its own toggle is on. It is a
+  *look*, not real bitstream corruption — deterministic and safe.
 
-**Status (Block displacement + Scanlines, shipped; Datamosh deferred):** Datamosh needs the
-`{-1, 0}` temporal window and the §3.1 flow field — machinery no effect has yet (the flow
-engine is currently reached only through Retime and the Motion blur effect, §3.1/§3.2) — so
-it is deferred rather than half-built; the two window entries above (`{0}` shipped, `{-1, 0}`
-deferred) are unchanged. Category is **Distortion**, matching Shake and RGB split — its
+**Status (all three sections shipped, K-104):** Datamosh reuses the §3.2 flow machinery
+Motion blur introduced (`flow_pair` on the shared `FlowEngine`) rather than needing new
+plumbing: a `Datamosh look` toggle (`datamosh_enabled`, off by default — see below), and
+`stack_temporal_window`/`stack_flow_neighbour` (docs/impl territory) read that toggle
+per-instance to decide whether the layer's decode reaches back to -1 and computes a flow
+field at all, unlike every other trait here which is fixed per schema. A single bilinear
+tap per pixel reads the -1 neighbour at the position its own flow vector displaces to — a
+motion-compensated prediction, not Motion blur's multi-tap streak integral — then blends
+against the already block/scanline'd frame by Intensity (Intensity 0 is the same bit-exact
+passthrough the rest of the effect pins). Off by default: unlike Block displacement and
+Scanlines (on since Glitch first shipped), this section is footage-only and adds a flow
+computation, so it opts in rather than silently changing every existing Glitch instance's
+output the moment it lands. It operates on the layer's *source* frames, not the upstream
+stack's output at -1 — the same v1 simplification Echo and Motion blur already made ("full
+temporal stacking is later"). A layer can carry only one flow field per frame in v1; if a
+stack somehow has both a live Motion blur and a Datamosh-on Glitch, whichever comes first
+in stack order wins the single slot and the other's flow-dependent behaviour degrades to
+its own missing-field passthrough — never a fault, pinned by test. Category is
+**Distortion**, matching Shake and RGB split — its
 closest siblings (a seeded positional wobble; a channel split) — not the additive-light
 Stylise pair (Glow, Flash). Intensity (0–1, the master dial per §1.2) scales *every* hashed
 quantity across both sections — grid jitter, displacement, channel offset, slice-repeat odds

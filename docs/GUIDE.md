@@ -112,9 +112,9 @@ Two mechanisms make this safe, and you'll see them by name in the code:
 - `crates/lumit-core/src/model.rs` — **What a project is.** Structs for the document,
   comps, layers, footage items. Each has an `extra` field that preserves anything a future
   Lumit version adds — so old and new versions can share project files.
-- **Glitch** — the corrupted-video look, as two sub-effects sharing one Intensity dial (a
-  third, Datamosh, waits on machinery — the flow field, §3.1 — no effect has yet; it's
-  written down as a clearly deferred follow-up, not quietly dropped). **Block displacement**
+- **Glitch** — the corrupted-video look, as three sub-effects sharing one Intensity dial (the
+  third, Datamosh, is explained further down, once the flow-field machinery it needs has been
+  introduced). **Block displacement**
   carves the frame into a grid (Block size) and, per block, reads its picture from a
   slightly different spot — a random-looking but fully repeatable jump, plus an optional
   colour-channel split and a "slice repeat" look where a thin strip of the block tiles
@@ -150,8 +150,9 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   so — like the flow fix earlier — you never get a stale, frozen trail. In this first version
   Echo reaches back up to eight frames one frame apart, fades each by a Decay you set, and
   offers three ways to stack the trail (Add for bright streaks, Behind for ghosting, Max for a
-  lighten-only look); wider/looser trails, and the other effects that want neighbouring frames
-  (motion blur that follows real motion, the datamosh look), build on this same machinery.
+  lighten-only look); wider/looser trails are a follow-up, and the other effects that want
+  neighbouring frames — motion blur that follows real motion, and the datamosh look — build on
+  this same machinery (both explained further down).
 - **Motion blur that follows real motion** — the second temporal effect, and the one that
   turns game capture (which has no natural blur — every frame is pin-sharp) into footage that
   streaks the way a real camera would. It builds on two things already in the box: Echo's
@@ -168,6 +169,25 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   each streak — more is smoother but slower). A still frame, or a shutter of zero, leaves the
   picture untouched. For now it follows the footage's own motion only (not, yet, motion you
   add with keyframes) and works on footage layers, the same starting scope Echo has.
+- **Datamosh, Glitch's third section** — the corrupted-video "reused an old frame's motion"
+  look, and the third effect to use the flow-field machinery Motion blur introduced. Real
+  video codecs sometimes drop a frame's actual picture data and just reuse the previous
+  frame's content nudged by that frame's motion vectors — which looks like melting, trailing
+  smears where things moved. This section fakes that on purpose: it works out how far every
+  pixel moved between the frame *before* this one and this one (the same kind of arrow-map
+  Motion blur reads, just measured one frame earlier), then paints each pixel of *this* frame
+  by looking up where that arrow says its content used to be, back in the previous frame — a
+  single lookup per pixel, not Motion blur's multi-step smear along the arrow. Intensity (the
+  same master dial the other two sections share) fades between the ordinary frame and the
+  moshed one. It has its own on/off switch, off by default, because — unlike Block
+  displacement and Scanlines, which have always been part of Glitch — turning it on means
+  fetching an extra frame and running the motion-arrow calculation, so existing projects with
+  Glitch already applied do not suddenly start moshing the moment this ships. One wrinkle
+  worth knowing: the app can only carry one motion-arrow map per layer per frame right now, so
+  if a layer somehow had both Motion blur and a moshing Glitch turned on together, only
+  whichever one is listed first in the effect stack gets its arrows this frame — the other
+  quietly sits out, the same "missing data, do nothing" safety rule every temporal effect
+  already follows.
 - **Blur gains a Radial mode** — the third and final mode of the §3.8 trio, alongside
   Gaussian and Directional. Drop a Centre point anywhere on the frame (as two percentages,
   Centre X and Centre Y, of the frame's width and height) and pick a Type: **Spin** streaks

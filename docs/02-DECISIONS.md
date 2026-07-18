@@ -885,3 +885,26 @@ v1 scope composes the 2D affine (position/anchor/scale/rotation); inheriting the
 (`position_z`, `rotation_x/y`) is a follow-up. UI: a Parent picker in the layer's inspector
 rows. Staged deliberately so the safe, fully-tested foundation ships before the render-path
 change, which is best verified visually with the owner present.
+
+**K-104 · DECIDED · Datamosh (Glitch's third section) ships, reusing Motion blur's flow
+machinery rather than adding new plumbing.** Datamosh (docs/08 §3.12) was deferred at K-094
+pending "machinery no effect has yet"; Motion blur (§3.2) built that machinery in the
+meantime, and Datamosh turned out to need only a second frame pair through it, not new
+infrastructure. `fx::stack_temporal_window`/`stack_is_temporal` gain the one case in the
+registry where an effect's temporal reach depends on a param value, not just its static
+schema trait: a live `glitch` instance's `datamosh_enabled` bool (new, off by default) adds
+offset `-1` to the window. `stack_wants_flow_field` (bool) is replaced by
+`stack_flow_neighbour` (`Option<i32>`): Motion blur wants neighbour `1`, Datamosh wants
+`-1`. A layer carries only one flow field per frame in v1 (`CompLayerPixels::flow_field`
+stays a single slot) — if a stack somehow has both a live Motion blur and a Datamosh-on
+Glitch, the first one encountered in stack order wins the slot and the other's flow-
+dependent behaviour degrades to its existing missing-field passthrough (pinned by test).
+Datamosh itself is one GPU pass sharing Motion blur's `mb_layout`/`mb_pl` (three sampled
+inputs — current frame, `-1` neighbour, flow field — plus storage-out and uniform): a single
+bilinear tap per pixel (motion-compensated prediction), not a streak integral, blended
+against the already block/scanline'd frame by the shared Intensity dial. Off by default
+(unlike Block displacement/Scanlines, which have been on since Glitch first shipped) because
+it is footage-only and adds a flow computation the moment it is live — existing Glitch
+instances render byte-identically until an editor opts in. Operates on the layer's *source*
+frames, the same v1 simplification Echo and Motion blur already made. Oracle: GPU matches
+`lumit_core::fx::cpu::datamosh` at ≤ 2 fp16 ULP (measured 0–1).
