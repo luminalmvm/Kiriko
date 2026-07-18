@@ -1056,9 +1056,9 @@ pub(crate) fn keyframe_nav(
     let on_key = keys.iter().any(|k| (k.time.to_f64() - ctx.lt).abs() < tol);
     if ui
         .add(small(if on_key {
-            Icon::Keyframe
+            Icon::KeyframeFilled
         } else {
-            Icon::KeyframeAdd
+            Icon::Keyframe
         }))
         .on_hover_text(if on_key {
             "Remove keyframe here"
@@ -1152,9 +1152,9 @@ pub(crate) fn keyframe_nav_scale(
     let on_key = times.iter().any(|&t| (t - ctx.lt).abs() < tol);
     if ui
         .add(small(if on_key {
-            Icon::Keyframe
+            Icon::KeyframeFilled
         } else {
-            Icon::KeyframeAdd
+            Icon::Keyframe
         }))
         .on_hover_text(if on_key {
             "Remove keyframe here"
@@ -2278,16 +2278,18 @@ pub(crate) fn effects_rows(
             let (row_rect, mut c) = row_frame(ui, ctx, false);
             section_bar(ui, ctx, row_rect, title_hl);
             fx_title_rows.push(row_rect);
-            // The per-effect visibility toggle (K-090 confirmation of §1.5):
-            // the same eye as layer visibility, dimmed while bypassed.
-            let eye_col = if e.enabled {
-                ctx.theme.text_secondary
+            // The per-effect visibility toggle (K-090 confirmation of §1.5): the
+            // same eye as layer visibility, and it swaps to a closed eye when the
+            // effect is bypassed — the state-matching-icon parity a toggleable eye
+            // gets everywhere in the app (owner request; note 2.8.4).
+            let (eye_icon, eye_col) = if e.enabled {
+                (Icon::Eye, ctx.theme.text_secondary)
             } else {
-                ctx.theme.text_disabled
+                (Icon::EyeClosed, ctx.theme.text_disabled)
             };
             let (eye_rect, eye_resp) =
                 c.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
-            crate::icons::paint(c.painter(), eye_rect, Icon::Eye, eye_col, 1.4);
+            crate::icons::paint(c.painter(), eye_rect, eye_icon, eye_col, 1.4);
             if eye_resp
                 .on_hover_text(if e.enabled {
                     "Bypass this effect"

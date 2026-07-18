@@ -79,8 +79,12 @@ pub enum Icon {
     NextKeyframe,
     /// Add a keyframe at the playhead.
     KeyframeAdd,
-    /// A keyframe is here (clicking removes it).
+    /// A keyframe (outline diamond) — the navigator's add button when the
+    /// playhead is between keys.
     Keyframe,
+    /// A keyframe, filled — shown on the navigator's add/remove button when the
+    /// playhead sits on a key (note 2.4).
+    KeyframeFilled,
     /// The animate toggle on a property row.
     Stopwatch,
     /// Disclosure twirl, closed (points right).
@@ -101,7 +105,7 @@ pub enum Icon {
 
 impl Icon {
     /// Every variant, for exhaustive iteration (tests, palettes).
-    pub const ALL: [Icon; 39] = [
+    pub const ALL: [Icon; 40] = [
         Icon::Pointer,
         Icon::Move,
         Icon::Rectangle,
@@ -133,6 +137,7 @@ impl Icon {
         Icon::NextKeyframe,
         Icon::KeyframeAdd,
         Icon::Keyframe,
+        Icon::KeyframeFilled,
         Icon::Stopwatch,
         Icon::TwirlClosed,
         Icon::TwirlOpen,
@@ -177,6 +182,7 @@ impl Icon {
             Icon::NextKeyframe => "nav-arrow-right",
             Icon::KeyframeAdd => "keyframe-plus",
             Icon::Keyframe => "keyframe",
+            Icon::KeyframeFilled => "keyframe",
             Icon::Stopwatch => "timer",
             Icon::TwirlClosed => "nav-arrow-right",
             Icon::TwirlOpen => "nav-arrow-down",
@@ -188,12 +194,22 @@ impl Icon {
         }
     }
 
+    /// The drawing style for this icon. Almost every glyph is the Regular
+    /// (outline) weight; a few name a Filled variant of the same Iconoir icon so
+    /// a toggle can swap outline↔filled to show state (e.g. a keyframe that is
+    /// hollow between keys and solid on a key — note 2.4).
+    fn style(self) -> Style {
+        match self {
+            Icon::KeyframeFilled => Style::Filled,
+            _ => Style::Regular,
+        }
+    }
+
     /// The glyph and font family for this icon, or None if the pack lacks it
     /// (guarded by `every_icon_resolves`, so None never happens in practice —
     /// and the UI degrades to painting nothing rather than faulting).
     fn glyph(self) -> Option<(char, &'static str)> {
-        let r =
-            iconflow::try_icon(Pack::Iconoir, self.name(), Style::Regular, Size::Regular).ok()?;
+        let r = iconflow::try_icon(Pack::Iconoir, self.name(), self.style(), Size::Regular).ok()?;
         Some((char::from_u32(r.codepoint)?, r.family))
     }
 }
