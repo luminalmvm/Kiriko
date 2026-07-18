@@ -937,6 +937,59 @@ pub(crate) fn effect_controls_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut 
     ui.add_space(2.0);
     ui.separator();
 
+    let mut pending: Option<lumit_core::Op> = None;
+
+    // Parent (K-103): follow another layer's transform. The dropdown lists the
+    // comp's other layers, hiding any that would form a cycle, plus None to
+    // clear. Committing a `SetLayerParent` is one ordinary undo step.
+    if let Some(comp) = doc.comp(comp_id) {
+        let current = layer
+            .parent
+            .and_then(|pid| comp.layers.iter().find(|l| l.id == pid))
+            .map(|l| trim_title(&l.name))
+            .unwrap_or_else(|| "None".to_string());
+        ui.horizontal(|ui| {
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Parent")
+                    .small()
+                    .color(theme.text_muted),
+            );
+            bare_dropdown(ui, egui::RichText::new(current).small(), |ui| {
+                if ui
+                    .selectable_label(layer.parent.is_none(), "None")
+                    .clicked()
+                {
+                    if layer.parent.is_some() {
+                        pending = Some(lumit_core::Op::SetLayerParent {
+                            comp: comp_id,
+                            layer: layer_id,
+                            parent: None,
+                        });
+                    }
+                    ui.close_menu();
+                }
+                for cand in &comp.layers {
+                    if cand.id == layer_id
+                        || lumit_core::model::parenting_would_cycle(comp, layer_id, cand.id)
+                    {
+                        continue;
+                    }
+                    let sel = layer.parent == Some(cand.id);
+                    if ui.selectable_label(sel, trim_title(&cand.name)).clicked() {
+                        pending = Some(lumit_core::Op::SetLayerParent {
+                            comp: comp_id,
+                            layer: layer_id,
+                            parent: Some(cand.id),
+                        });
+                        ui.close_menu();
+                    }
+                }
+            });
+        });
+        ui.add_space(2.0);
+    }
+
     let panel = ui.max_rect();
     let ctx = RowCtx {
         theme,
@@ -954,7 +1007,6 @@ pub(crate) fn effect_controls_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut 
         view_start: 0.0,
         graph_mode: true,
     };
-    let mut pending: Option<lumit_core::Op> = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .id_salt("effect-controls-scroll")

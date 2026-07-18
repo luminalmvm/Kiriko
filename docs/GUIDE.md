@@ -386,14 +386,15 @@ Two mechanisms make this safe, and you'll see them by name in the code:
 - `crates/lumit-core/src/ops.rs` — **Every possible edit, as data.** An edit is an `Op`
   (AddLayer, SetLayerSpan…). Applying an op returns its exact inverse — that pair is what
   makes undo *provably* correct instead of hopefully correct.
-- **Layer parenting** (K-103, groundwork) — a layer can name another layer as its **parent**,
-  so moving the parent carries the child with it (the After Effects null-object rig). This
-  first step adds the data (`Layer.parent`) and the edit (`SetLayerParent`, which refuses a
-  parent that would make a loop, checked by a small tested helper), all invisible for now:
-  every layer starts with no parent, so nothing renders differently yet. The next steps make
-  the picture actually follow the parent, and add a "Parent" chooser to the layer's controls —
-  kept separate so the safe, well-tested groundwork lands before the part that changes what
-  you see on screen.
+- **Layer parenting** (K-103) — a layer can name another layer as its **parent**, so moving,
+  rotating or scaling the parent carries the child with it (the After Effects null-object
+  rig). Pick a parent from the **Parent** dropdown at the top of the Effect Controls panel;
+  the list hides any choice that would make a loop, and "None" clears it. Under the hood the
+  child's picture is placed inside the parent's coordinate space by multiplying the parent's
+  transform in front of the child's — reusing the very same machinery a collapsed precomp
+  already uses — computed identically for the preview and the export so they always match.
+  A layer with no parent (every layer, until you set one) renders exactly as before. For now
+  it inherits the flat 2D move/rotate/scale; inheriting the 2.5D depth/tilt is a later touch.
 - `crates/lumit-core/src/anim.rs` — **the keyframe engine.** Between two keyframes the
   value follows a bezier curve shaped by AE-style *speed* (units per second) and
   *influence* (how far each handle reaches). The subtle part: the curve is parametric, so
