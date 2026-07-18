@@ -26,6 +26,7 @@ Rules of engagement:
 | [rational-time.md](rational-time.md) | Overflow-safe rational time arithmetic, canonical form, hashing, f64 conversion, grid rounding | everything |
 | [keyframe-eval.md](keyframe-eval.md) | AE bezier keyframe evaluation, cubic solving, Retime segment evaluation and inversion | 03, 04 |
 | [lut.md](lut.md) | `.cube` LUT parsing, shared trilinear maths, 3D-texture upload with manual shader interpolation, caching by path | 08, 03 |
+| [layer-input.md](layer-input.md) | Effect parameters that reference another layer (mirroring track mattes), threading the rendered texture into `run_ops`, and completing the DoF effect on top | 08, 03 |
 | [gpu-foundation.md](gpu-foundation.md) | wgpu device/texture pool/bind groups, fp16 pipeline, device-lost recovery, egui viewport, colour blit | 05, 06 |
 | [media-io.md](media-io.md) | ffmpeg via rsmpeg, frame index, exact seeking, D3D11VA/VideoToolbox hardware decode → wgpu, NV12 WGSL, audio decode | 05 |
 | [playback-scheduler.md](playback-scheduler.md) | Epoch cancellation, job pool, bounded pipelines, cpal audio clock, ring buffer, preview modes | 05, 06 |
