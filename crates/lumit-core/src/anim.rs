@@ -65,11 +65,31 @@ impl Keyframe {
         }
     }
 
+    /// This keyframe held on both sides: the value stays exactly at the key
+    /// until the next key's time, then steps to it — no interpolation in
+    /// between. This is the discrete/stepped key, and the only animation a
+    /// string-valued property (e.g. a File param) can carry, since two file
+    /// paths cannot be blended.
+    pub fn to_hold(self) -> Keyframe {
+        Keyframe {
+            interp_in: SideInterp::Hold,
+            interp_out: SideInterp::Hold,
+            ..self
+        }
+    }
+
     /// True when either side is a bezier (an eased key), so the UI can show it
     /// as a circle and give it tangent handles.
     pub fn is_bezier(&self) -> bool {
         matches!(self.interp_in, SideInterp::Bezier { .. })
             || matches!(self.interp_out, SideInterp::Bezier { .. })
+    }
+
+    /// True when the out-side holds, so the value steps at the next key rather
+    /// than blending toward it (the out-side is what governs the span leaving
+    /// this key — see [`evaluate_span`]).
+    pub fn is_hold(&self) -> bool {
+        matches!(self.interp_out, SideInterp::Hold)
     }
 }
 
@@ -367,6 +387,26 @@ mod tests {
         assert_eq!(evaluate(&keys, 0.5), Some(5.0)); // linear
         assert_eq!(evaluate(&keys, 2.5), Some(20.0)); // hold-out wins the span
         assert_eq!(evaluate(&keys, 9.0), Some(5.0)); // clamp after
+    }
+
+    #[test]
+    fn hold_key_steps_at_the_next_key_not_before() {
+        // A hold key keeps its exact value across the whole span, then the
+        // value jumps to the next key at that key's time — the discrete/stepped
+        // behaviour a File param relies on.
+        let keys = [
+            key(rat(0, 1), 3.0, SideInterp::Linear).to_hold(),
+            key(rat(2, 1), 9.0, SideInterp::Linear).to_hold(),
+            key(rat(4, 1), 1.0, SideInterp::Linear),
+        ];
+        assert!(keys[0].is_hold());
+        assert_eq!(evaluate(&keys, 0.0), Some(3.0)); // at the key
+        assert_eq!(evaluate(&keys, 1.999), Some(3.0)); // still held just before
+        assert_eq!(evaluate(&keys, 2.0), Some(9.0)); // steps exactly at the key
+        assert_eq!(evaluate(&keys, 3.5), Some(9.0)); // held across the next span
+        assert_eq!(evaluate(&keys, 4.0), Some(1.0)); // and again at the last key
+                                                     // A hold span has zero speed throughout (no blend to differentiate).
+        assert_eq!(evaluate_speed(&keys, 1.0), Some(0.0));
     }
 
     #[test]

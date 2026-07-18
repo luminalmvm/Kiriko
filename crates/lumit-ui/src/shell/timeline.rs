@@ -1680,6 +1680,13 @@ pub(crate) fn timeline_bottom_bar(
             {
                 app.graph_set_interp = Some(lumit_core::anim::EASY_EASE);
             }
+            if zc
+                .small_button("Hold")
+                .on_hover_text("Hold the selected keys (or all) — value steps at the next key")
+                .clicked()
+            {
+                app.graph_set_interp = Some(lumit_core::anim::SideInterp::Hold);
+            }
         }
     }
 

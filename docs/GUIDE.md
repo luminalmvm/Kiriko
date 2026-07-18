@@ -765,8 +765,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   let go of Alt and the handles stay broken. The same gesture reverses it — **Alt-drag a broken
   handle** and the pair re-unifies, snapping collinear again. (Right-click → **Unify handles**
   still works too.) The **Linear** button (bottom bar) straightens
-  the selected keys again, and right-clicking a key still offers Easy ease / Linear / Hold /
-  Delete. Whatever the handles, the curve always passes exactly through the keys.
+  the selected keys again, and its neighbour the **Hold** button *steps* them — the value
+  freezes at the key and jumps to the next one only when the playhead reaches it, never
+  blending in between (a square key; the discrete choice a File param uses). Right-clicking a
+  key still offers the same Easy ease / Linear / Hold / Delete. Whatever the handles, the
+  curve always passes exactly through the keys.
   The **marquee works in both views**: drag a box over the speed view's background and the
   speed points inside it are selected, just like value keys.
   The **Retime channel's Velocity lens** can now edit *eased* ramps too: a ramp shaped with
