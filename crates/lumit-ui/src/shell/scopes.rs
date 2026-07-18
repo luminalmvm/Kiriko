@@ -9,12 +9,15 @@
 //! centre).
 //!
 //! Each Scopes panel shows one scope, chosen in its header, so opening a few
-//! side by side gives a colourist's bench (UI-SPEC §8). The scope is drawn
-//! from the last composited frame Lumit banked in RAM — the frame you see in
-//! the Viewer while paused or scrubbing. During playback that banking is
-//! skipped to protect the frame budget, so the scope holds the last shown
-//! frame until you pause again; a live-during-playback path waits on a
-//! GPU-side scope pass (K-096, a stated v1 limit).
+//! side by side gives a colourist's bench (UI-SPEC §8). The scope is drawn from
+//! the composited frame Lumit banks in RAM under the playhead — the frame you
+//! see in the Viewer. It reads that frame from the cache every paint and, while
+//! playing, requests a repaint at the playback cadence, so the trace tracks the
+//! live frame for every frame the cache holds (K-130). When a playback frame
+//! isn't banked yet — one the frame budget skipped, or still rendering — the
+//! scope holds the last frame it showed rather than blanking, and catches up as
+//! soon as the current frame is banked. Guaranteed every-frame tracing under
+//! all conditions still waits on a GPU-side scope pass (the K-096 v1 note).
 //!
 //! All colours come from `theme.scope`; the trace textures are built as raw
 //! RGBA byte buffers so this module constructs no `Color32` of its own (the
@@ -66,6 +69,22 @@ const GRID: usize = 256;
 /// cheap without changing the shape of the distribution.
 const MAX_SAMPLES: usize = 240_000;
 
+/// Which banked frame key a scope reads this paint: the frame under the
+/// playhead when it is banked, otherwise the last key the pane showed (so a
+/// not-yet-banked playback frame holds the last real trace rather than
+/// blanking). Both candidates must still be present, tested via `is_banked`.
+/// Pure, so the choice is unit-tested without a cache or a GPU.
+fn shown_frame_key(
+    current: Option<u128>,
+    last: Option<u128>,
+    is_banked: impl Fn(u128) -> bool,
+) -> Option<u128> {
+    match current {
+        Some(k) if is_banked(k) => Some(k),
+        _ => last.filter(|&k| is_banked(k)),
+    }
+}
+
 /// One Scopes panel. Reads the banked composited frame for the previewed
 /// comp and draws the chosen scope; the header switches the scope in place.
 pub(crate) fn scopes_panel(ui: &mut egui::Ui, theme: &Theme, app: &AppState, kind: &mut ScopeKind) {
@@ -81,14 +100,33 @@ pub(crate) fn scopes_panel(ui: &mut egui::Ui, theme: &Theme, app: &AppState, kin
     ui.add_space(2.0);
     ui.separator();
 
-    // The composited frame the Viewer last banked (RAM tier). None while a
-    // comp preview has not produced a frame yet, or while a plain footage
-    // item (not a comp) is previewed.
-    let frame = app
+    // The frame the Viewer is showing right now: the key under the playhead
+    // (`preview_frame` advances every playback tick), read from the RAM cache
+    // each paint so the scope tracks the live frame during playback wherever
+    // that frame is banked — the same peek the eyedropper reads. `frame_key_for`
+    // is None while a plain footage item (not a comp) is previewed.
+    let current = app
         .preview_comp
-        .and_then(|comp| app.frame_key_for(comp, app.preview_frame))
-        .and_then(|key| app.comp_frame_cache.peek(&key));
-    let Some(frame) = frame else {
+        .and_then(|comp| app.frame_key_for(comp, app.preview_frame));
+    // Hold the last frame this pane showed (per-pane, in egui temp memory) so a
+    // playback frame that isn't banked yet — one the frame budget skipped, or
+    // still rendering — keeps the last real trace on screen instead of blanking
+    // mid-play. A cached current frame always wins and refreshes the held key.
+    let shown_id = ui.id().with("scopes-shown-frame");
+    let last = ui.data(|d| d.get_temp::<u128>(shown_id));
+    let shown_key = shown_frame_key(current, last, |k| app.comp_frame_cache.contains_key(&k));
+    if let Some(k) = shown_key {
+        ui.data_mut(|d| d.insert_temp(shown_id, k));
+    }
+    // Keep re-sampling while the playhead moves. `request_repaint_after` at the
+    // playback cadence (rather than a bare `request_repaint`) tracks live at
+    // ~60 fps without shortening the frame delay to zero, so it never busies the
+    // idle-paused UI (the guard) nor spins faster than playback itself.
+    if app.is_playing() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(16));
+    }
+    let Some(frame) = shown_key.and_then(|k| app.comp_frame_cache.peek(&k)) else {
         empty_hint(
             ui,
             theme,
@@ -437,6 +475,22 @@ mod tests {
             v.extend_from_slice(&[r, g, b, 0xff]);
         }
         v
+    }
+
+    #[test]
+    fn shown_frame_key_prefers_current_then_holds_last() {
+        let banked = |k: u128| k == 10 || k == 20; // frames 10 and 20 are cached
+                                                   // Current frame cached: it wins, whatever the held key was.
+        assert_eq!(shown_frame_key(Some(10), Some(20), banked), Some(10));
+        // Current frame not banked yet: hold the last shown frame instead.
+        assert_eq!(shown_frame_key(Some(30), Some(20), banked), Some(20));
+        // Current unkeyable (footage preview): still hold the last shown frame.
+        assert_eq!(shown_frame_key(None, Some(10), banked), Some(10));
+        // The held key was evicted (no longer banked): show nothing, don't blank
+        // onto a dangling key.
+        assert_eq!(shown_frame_key(Some(30), Some(40), banked), None);
+        // Nothing to show at all.
+        assert_eq!(shown_frame_key(None, None, banked), None);
     }
 
     #[test]

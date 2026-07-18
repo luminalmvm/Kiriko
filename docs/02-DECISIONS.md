@@ -1321,3 +1321,21 @@ to this folder so saving and browsing share one home, while still allowing the u
 elsewhere. The scan/label/sort and load-with-fresh-ids logic are pure helpers (`preset::list_presets`,
 `preset::load_instantiated`) with unit tests. Drag-a-preset-onto-a-layer, favourites, and preset
 thumbnails (§7) remain later steps. Built in an isolated worktree; not pushed.
+**K-130 · DECIDED · Scopes trace the live frame during playback from the CPU cache (docs/07
+§8, extends K-096).** K-096 shipped scopes that updated only while paused/scrubbing and held the
+last frame during playback, deferring live tracing to a GPU-side scope pass. This lifts that for
+the common case without a new readback or any change to the render loop: the Scopes panel reads the
+composited frame **under the playhead** (`comp_frame_cache.peek(frame_key_for(preview_frame))`, the
+same frame the eyedropper reads) **every paint**, and while `app.is_playing()` requests
+`request_repaint_after(16ms)` so it re-samples at the playback cadence. Because playback already
+banks frames ahead (prefetch) and warms the work area when idle, the frame under the playhead is
+normally cached, so the scope tracks live end to end. When it is not yet banked — a frame the budget
+readback skipped, or one still rendering — the pane **holds the last frame it showed** (its key kept
+in egui temp memory, re-validated against the cache so an evicted key never dangles) instead of
+blanking, matching §8's "degrade the update rate under load". `request_repaint_after` (not a bare
+`request_repaint`) is used deliberately so the panel never shortens the frame delay to zero and
+never busies an idle-paused UI (the `is_playing` guard) nor spins faster than playback. The frame
+choice is a pure `shown_frame_key` helper with a unit test. Guaranteed every-frame tracing under all
+conditions (a cold, unwarmed comp) still waits on the GPU-side scope pass K-096 named; this is a
+strict improvement over "holds during playback", not that pass. No change to the playback loop,
+banking, or GPU code. Built in an isolated worktree; not pushed.
