@@ -84,10 +84,18 @@ pub(crate) fn viewer_overlay(
     let over_image = draw.contains(cursor);
     let over_viewer = image_area.contains(cursor);
 
-    // Shift+scroll grows or shrinks the averaged region.
-    let (shift, scroll) = ui
-        .ctx()
-        .input(|i| (i.modifiers.shift, i.raw_scroll_delta.y));
+    // Shift+scroll grows or shrinks the averaged region. With Shift held, most
+    // platforms deliver the wheel on the X axis (it becomes a horizontal scroll),
+    // so take whichever axis actually carries the motion — reading only `.y`
+    // meant the size never changed while Shift was down (owner-reported bug).
+    let (shift, dx, dy) = ui.ctx().input(|i| {
+        (
+            i.modifiers.shift,
+            i.raw_scroll_delta.x,
+            i.raw_scroll_delta.y,
+        )
+    });
+    let scroll = if dy.abs() >= dx.abs() { dy } else { dx };
     if shift && scroll.abs() > 0.5 {
         let step = if scroll > 0.0 { 1 } else { -1 };
         app.eyedropper_region =
