@@ -481,6 +481,9 @@ pub(crate) fn layer_keyframe_times(layer: &lumit_core::model::Layer) -> Vec<f64>
 pub(crate) struct RowCtx<'a> {
     pub(crate) theme: &'a Theme,
     pub(crate) comp_id: uuid::Uuid,
+    /// The composition, for rows that need its other layers (e.g. a Layer
+    /// effect parameter's picker — K-123).
+    pub(crate) comp: &'a lumit_core::model::Composition,
     pub(crate) layer: &'a lumit_core::model::Layer,
     pub(crate) lt: f64,
     pub(crate) off: f64,
@@ -612,6 +615,7 @@ pub(crate) fn transform_property_rows(
     let ctx = RowCtx {
         theme,
         comp_id,
+        comp,
         layer,
         lt: app.preview_frame as f64 / fps - layer.start_offset.0.to_f64(),
         off: layer.start_offset.0.to_f64(),
@@ -2304,6 +2308,38 @@ pub(crate) fn effects_rows(
                             }
                         }
                     }
+                }
+                (EffectValue::Layer(cur), ParamKind::Layer { .. }) => {
+                    // A picker for a layer-reference parameter (K-123), e.g. the
+                    // DoF depth layer: this comp's other layers, plus None.
+                    let (_row, mut c) = row_frame(ui, ctx, false);
+                    c.label(
+                        egui::RichText::new(ps.label)
+                            .small()
+                            .color(ctx.theme.text_muted),
+                    );
+                    let cur_name = (*cur)
+                        .and_then(|id| ctx.comp.layers.iter().find(|l| l.id == id))
+                        .map_or("None", |l| l.name.as_str());
+                    bare_dropdown(&mut c, egui::RichText::new(cur_name).small(), |ui| {
+                        if ui.selectable_label(cur.is_none(), "None").clicked() {
+                            let mut effects = layer.effects.clone();
+                            effects[idx].params[pi].value = EffectValue::Layer(None);
+                            *pending = Some(commit(effects));
+                            ui.close_menu();
+                        }
+                        for other in ctx.comp.layers.iter().filter(|l| l.id != layer.id) {
+                            if ui
+                                .selectable_label(*cur == Some(other.id), other.name.as_str())
+                                .clicked()
+                            {
+                                let mut effects = layer.effects.clone();
+                                effects[idx].params[pi].value = EffectValue::Layer(Some(other.id));
+                                *pending = Some(commit(effects));
+                                ui.close_menu();
+                            }
+                        }
+                    });
                 }
                 _ => {}
             }

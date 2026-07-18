@@ -1535,6 +1535,7 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                         let fx_ctx = RowCtx {
                             theme,
                             comp_id,
+                            comp,
                             layer,
                             lt: app.preview_frame as f64 / fps2 - layer.start_offset.0.to_f64(),
                             off: layer.start_offset.0.to_f64(),
@@ -1560,6 +1561,7 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                             let flow_ctx = RowCtx {
                                 theme,
                                 comp_id,
+                                comp,
                                 layer,
                                 lt: app.preview_frame as f64 / fps3
                                     - layer.start_offset.0.to_f64(),

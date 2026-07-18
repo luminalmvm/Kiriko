@@ -1043,9 +1043,15 @@ pub(crate) fn effect_controls_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut 
     ui.add_space(2.0);
 
     let panel = ui.max_rect();
+    // The comp, for a Layer effect parameter's picker (K-123). Present here (the
+    // layer above was derived from it), handled safely regardless.
+    let Some(comp) = doc.comp(comp_id) else {
+        return;
+    };
     let ctx = RowCtx {
         theme,
         comp_id,
+        comp,
         layer,
         lt: app.preview_frame as f64 / fps - layer.start_offset.0.to_f64(),
         off: layer.start_offset.0.to_f64(),
