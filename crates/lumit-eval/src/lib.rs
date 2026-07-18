@@ -117,9 +117,11 @@ fn feed_comp(
         }
     }
     // Comp-wide motion blur (docs/06 §4, K-120): the shutter shape is content
-    // for every layer that blurs. Hashed only when the master is on, so a comp
-    // with motion blur off keeps every pre-motion-blur key.
-    if comp.motion_blur.enabled {
+    // for every layer that blurs. Hashed only when the master is on AND at least
+    // one layer actually has its motion-blur switch set — so toggling the master
+    // (or nudging the shutter) in a comp where nothing blurs changes no pixels
+    // and retires no cached frames.
+    if comp.motion_blur.enabled && comp.layers.iter().any(|l| l.switches.motion_blur) {
         h.update(b"mblur/");
         feed_f64(h, comp.motion_blur.shutter_angle);
         feed_f64(h, comp.motion_blur.shutter_phase);

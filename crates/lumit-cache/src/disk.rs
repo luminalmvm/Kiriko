@@ -69,10 +69,15 @@ pub fn cache_root_for(project_path: &Path, override_root: Option<&Path>) -> Opti
     let canonical = project_path
         .canonicalize()
         .unwrap_or_else(|_| project_path.to_path_buf());
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    let hash = hasher.finish();
+    // A stable FNV-1a hash over the path bytes, NOT `DefaultHasher`: SipHash's
+    // algorithm and seeding are not guaranteed stable across Rust releases, so a
+    // toolchain bump would silently rename every override cache folder — cold
+    // caches and orphaned `-cache` dirs. FNV is fixed for all time.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in canonical.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
     Some(root.join(format!("{stem}-{:08x}-cache", hash as u32)))
 }
 
@@ -419,6 +424,17 @@ mod tests {
         let b = cache_root_for(p, Some(over));
         assert!(a.is_some());
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cache_root_for_hash_is_stable_across_toolchains() {
+        // FNV-1a is a fixed algorithm; this pins the exact folder name for a
+        // known path so any change to the hashing (e.g. a slip back to
+        // DefaultHasher) is caught here rather than silently orphaning every
+        // user's override cache on a Rust toolchain bump.
+        let over = Path::new("E:/lumit-cache");
+        let root = cache_root_for(Path::new("D:/edits/montage.lum"), Some(over)).unwrap();
+        assert_eq!(root, over.join("montage-6fe0182f-cache"));
     }
 
     #[test]
