@@ -65,6 +65,8 @@ pub enum Icon {
     Camera,
     /// Layer visibility switch: an eye.
     Eye,
+    /// Hidden layer: an eye, closed (the visibility switch when off).
+    EyeClosed,
     /// Audible layer: a speaker.
     Audio,
     /// Muted layer: a speaker, off.
@@ -97,7 +99,7 @@ pub enum Icon {
 
 impl Icon {
     /// Every variant, for exhaustive iteration (tests, palettes).
-    pub const ALL: [Icon; 37] = [
+    pub const ALL: [Icon; 38] = [
         Icon::Pointer,
         Icon::Move,
         Icon::Rectangle,
@@ -121,6 +123,7 @@ impl Icon {
         Icon::Text,
         Icon::Camera,
         Icon::Eye,
+        Icon::EyeClosed,
         Icon::Audio,
         Icon::Mute,
         Icon::PopOut,
@@ -163,6 +166,7 @@ impl Icon {
             Icon::Text => "text",
             Icon::Camera => "video-camera",
             Icon::Eye => "eye",
+            Icon::EyeClosed => "eye-closed",
             Icon::Audio => "sound-high",
             Icon::Mute => "sound-off",
             Icon::PopOut => "open-new-window",

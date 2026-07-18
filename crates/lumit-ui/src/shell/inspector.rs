@@ -29,13 +29,15 @@ pub(crate) fn visible_control(
     pending: &mut Option<lumit_core::Op>,
 ) {
     let vis = layer.switches.visible;
-    let col = if vis {
-        theme.text_secondary
+    // Swap the glyph to a closed eye when hidden, not just dim it (note 2.8.4:
+    // a toggle shows the state's matching icon, as Mute/Audio already do).
+    let (icon, col) = if vis {
+        (Icon::Eye, theme.text_secondary)
     } else {
-        theme.text_disabled
+        (Icon::EyeClosed, theme.text_disabled)
     };
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
-    crate::icons::paint(ui.painter(), rect, Icon::Eye, col, 1.4);
+    crate::icons::paint(ui.painter(), rect, icon, col, 1.4);
     if resp.on_hover_text("Show / hide this layer").clicked() {
         *pending = Some(lumit_core::Op::SetLayerVisible {
             comp: comp_id,
@@ -204,15 +206,38 @@ pub(crate) fn blend_control(
     );
 }
 
-/// 3D-switch subcolumn.
+/// 3D-switch subcolumn: a small square box, empty when flat and holding a
+/// centred dot when the layer is 3D (note 2.8.5) — a clearer state read than the
+/// old "3D" text toggle. The box corner follows the theme shape (crisp under
+/// Sharp, softened under Round).
 pub(crate) fn three_d_control(
     ui: &mut egui::Ui,
+    theme: &Theme,
     comp_id: uuid::Uuid,
     layer: &lumit_core::model::Layer,
     pending: &mut Option<lumit_core::Op>,
 ) {
-    if ui
-        .selectable_label(layer.switches.three_d, egui::RichText::new("3D").small())
+    let on = layer.switches.three_d;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+    let hovered = resp.hovered();
+    let box_col = if on || hovered {
+        theme.accent
+    } else {
+        theme.text_secondary
+    };
+    let side = 11.0;
+    let sq = egui::Rect::from_center_size(rect.center(), egui::vec2(side, side));
+    let round = f32::from(theme.tokens.control_radius).min(side * 0.5);
+    ui.painter().rect_stroke(
+        sq,
+        round,
+        egui::Stroke::new(1.2_f32, box_col),
+        egui::StrokeKind::Inside,
+    );
+    if on {
+        ui.painter().circle_filled(rect.center(), 2.0, theme.accent);
+    }
+    if resp
         .on_hover_text("Place this layer in z-space (needs a Camera layer)")
         .clicked()
     {

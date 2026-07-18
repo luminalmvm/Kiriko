@@ -831,7 +831,7 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                     blend_control(ui, comp_id, layer, &mut pending)
                 });
                 place(ui, td_r, &mut |ui| {
-                    three_d_control(ui, comp_id, layer, &mut pending)
+                    three_d_control(ui, theme, comp_id, layer, &mut pending)
                 });
                 if is_footage {
                     place(ui, vol_r, &mut |ui| {
