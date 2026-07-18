@@ -345,39 +345,50 @@ pub fn run_ops(
                     },
                 );
             }
-            Resolved::Glitch {
+            Resolved::BlockGlitch {
                 intensity,
                 seed,
                 tick,
-                block_enabled,
                 block_size_px,
                 jitter_frac,
                 amount_px,
                 chan_px,
                 slice_frac,
-                scanline_enabled,
+                mix,
+            } => {
+                tex = fx.block_glitch(
+                    ctx,
+                    &tex,
+                    w,
+                    h,
+                    &lumit_gpu::fx::BlockGlitchOp {
+                        intensity: *intensity,
+                        seed: *seed,
+                        tick: *tick,
+                        block_size_px: *block_size_px,
+                        jitter_frac: *jitter_frac,
+                        amount_px: *amount_px,
+                        chan_px: *chan_px,
+                        slice_frac: *slice_frac,
+                        mix: *mix,
+                    },
+                );
+            }
+            Resolved::Scanlines {
+                intensity,
                 period_px,
                 darkness,
                 roll_px,
                 interlace,
                 mix,
             } => {
-                tex = fx.glitch(
+                tex = fx.scanlines(
                     ctx,
                     &tex,
                     w,
                     h,
-                    &lumit_gpu::fx::GlitchOp {
+                    &lumit_gpu::fx::ScanlinesOp {
                         intensity: *intensity,
-                        seed: *seed,
-                        tick: *tick,
-                        block_enabled: *block_enabled,
-                        block_size_px: *block_size_px,
-                        jitter_frac: *jitter_frac,
-                        amount_px: *amount_px,
-                        chan_px: *chan_px,
-                        slice_frac: *slice_frac,
-                        scanline_enabled: *scanline_enabled,
                         period_px: *period_px,
                         darkness: *darkness,
                         roll_px: *roll_px,

@@ -1029,50 +1029,47 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
-    // Glitch (docs/08 §3.12): Block displacement and Scanlines. Datamosh
-    // (K-104) shipped as a third section of this same effect; K-107 split it
-    // out into its own standalone `datamosh` schema below, since it alone
-    // needs a neighbour frame and a flow field — see that schema's comment.
-    // Seeded, like Shake — category Distortion to match Shake and RGB
-    // split, its closest siblings (positional wobble, channel split), not
-    // the additive-light Stylise pair (Glow, Flash).
+    // Block glitch (docs/08 §3.12, split out of the old combined Glitch
+    // effect by K-107 — one of three now-standalone one-thing effects,
+    // alongside Scanlines and Datamosh below). Seeded — category Distortion
+    // to match Shake and RGB split, its closest siblings (positional
+    // wobble, channel split), not the additive-light Stylise pair (Glow,
+    // Flash). Stacking Block glitch → Scanlines, each at Mix 100%,
+    // reproduces the old combined Glitch's look bit-for-bit at Intensity 1
+    // (each section ran unconditionally there too).
     //
     // Status (shipped): the spec text names most of these without ranges;
-    // pinned here. Intensity (0–1, the master dial) scales *everything*
-    // glitched — block jitter, displacement, channel offset, slice-repeat
-    // odds and scanline darkness alike — so it is a genuine single "how
-    // glitched" knob and 0 is the bit-exact passthrough regardless of
-    // which sections are enabled. "Rows/columns jitter" is one Block
-    // jitter % (of Block size), not separate row/column controls, applied
-    // as a per-nominal-block hashed offset to where that block's content
-    // is read from — a cheap stand-in for actually moving grid lines
-    // (which would need a boundary search a single pointwise pass cannot
-    // do), pinned as a deliberate simplification. "Channel-offset toggle
-    // or amount" ships as a Float (Channel offset, % diag) — continuous
-    // like every other amount-shaped parameter in the catalogue, following
-    // RGB split's R/B-offset-from-G shape but with a per-block hashed
-    // offset instead of one global vector. Slice repetition ships as a
-    // Float 0–100%: the odds (scaled by Intensity) that a given block
-    // folds its own content to repeat a short hashed strip instead of a
-    // plain positional read. Per-block hashing runs inside the GPU kernel
-    // (the block index is a per-pixel quantity, so the hash cannot be a
-    // host-precomputed table — docs/08 §3.12 asks for this if the block
-    // hash must run on the GPU): WGSL has no 64-bit integer type, so it
-    // cannot host Shake's actual splitmix64 lattice. `splitmix32` is a
-    // matching-spirit 32-bit sibling added alongside it for exactly this
-    // (both CPU and GPU use it, so they agree on the integer hash
-    // bit-for-bit; only the fp16 sampling that follows carries the usual
-    // small tolerance) — Shake's own splitmix64/value_noise_1d are
-    // untouched. "Time-derived tick" (the spec's phrase for per-frame
-    // block variation) steps at a fixed, unexposed 8 Hz — chosen so
-    // blocks visibly pop rather than blur into continuous noise; no rate
-    // parameter is listed in the spec text, so this is pinned as an
-    // internal constant. Roll speed's sign is open (either direction);
-    // Interlace alternates which half of each scanline period darkens on
-    // odd periods, the classic interlaced-field look.
+    // pinned here, carried over unchanged from the combined effect.
+    // Intensity (0–1, the master dial) scales *everything* glitched — grid
+    // jitter, displacement, channel offset and slice-repeat odds alike — so
+    // it is a genuine single "how glitched" knob and 0 is the bit-exact
+    // passthrough. "Rows/columns jitter" is one Block jitter % (of Block
+    // size), not separate row/column controls, applied as a per-nominal-
+    // block hashed offset to where that block's content is read from — a
+    // cheap stand-in for actually moving grid lines (which would need a
+    // boundary search a single pointwise pass cannot do), pinned as a
+    // deliberate simplification. "Channel-offset toggle or amount" ships as
+    // a Float (Channel offset, % diag) — continuous like every other
+    // amount-shaped parameter in the catalogue, following RGB split's
+    // R/B-offset-from-G shape but with a per-block hashed offset instead of
+    // one global vector. Slice repetition ships as a Float 0–100%: the
+    // odds (scaled by Intensity) that a given block folds its own content
+    // to repeat a short hashed strip instead of a plain positional read.
+    // Per-block hashing runs inside the GPU kernel (the block index is a
+    // per-pixel quantity, so the hash cannot be a host-precomputed table):
+    // WGSL has no 64-bit integer type, so it cannot host Shake's actual
+    // splitmix64 lattice. `splitmix32` is a matching-spirit 32-bit sibling
+    // added alongside it for exactly this (both CPU and GPU use it, so they
+    // agree on the integer hash bit-for-bit; only the fp16 sampling that
+    // follows carries the usual small tolerance) — Shake's own
+    // splitmix64/value_noise_1d are untouched. "Time-derived tick" (the
+    // spec's phrase for per-frame block variation) steps at a fixed,
+    // unexposed 8 Hz — chosen so blocks visibly pop rather than blur into
+    // continuous noise; no rate parameter is listed in the spec text, so
+    // this is pinned as an internal constant.
     EffectSchema {
-        match_name: "glitch",
-        label: "Glitch",
+        match_name: "block_glitch",
+        label: "Block glitch",
         version: 1,
         category: FxCategory::Distortion,
         traits: EffectTraits {
@@ -1087,7 +1084,7 @@ pub const BUILTINS: &[EffectSchema] = &[
             ParamSchema {
                 id: "intensity",
                 label: "Intensity",
-                // The master dial (§1.2): scales every section's strength.
+                // The master dial (§1.2): scales every hashed quantity.
                 // 0 is the bit-exact passthrough (pinned by test).
                 kind: ParamKind::Float {
                     default: 0.35,
@@ -1099,11 +1096,6 @@ pub const BUILTINS: &[EffectSchema] = &[
                 id: "seed",
                 label: "Seed",
                 kind: ParamKind::Seed,
-            },
-            ParamSchema {
-                id: "block_enabled",
-                label: "Block displacement",
-                kind: ParamKind::Bool { default: true },
             },
             ParamSchema {
                 id: "block_size",
@@ -1156,10 +1148,40 @@ pub const BUILTINS: &[EffectSchema] = &[
                     hard: (Some(0.0), Some(100.0)),
                 },
             },
+            MIX_PARAM,
+        ],
+    },
+    // Scanlines (docs/08 §3.12, split out of the old combined Glitch effect
+    // by K-107). No hash, no seed — a pointwise periodic darken read
+    // straight from the input pixel, never a neighbour, so its ROI is
+    // `exact` (tighter than Block glitch's full-frame). Category Distortion,
+    // alongside Block glitch and Datamosh. Roll speed's sign is open (either
+    // direction); Interlace alternates which half of each scanline period
+    // darkens on odd periods, the classic interlaced-field look.
+    EffectSchema {
+        match_name: "scanlines",
+        label: "Scanlines",
+        version: 1,
+        category: FxCategory::Distortion,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            roi: Roi::Exact,
+            temporal: &[0],
+            premultiplied: true,
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
             ParamSchema {
-                id: "scanline_enabled",
-                label: "Scanlines",
-                kind: ParamKind::Bool { default: true },
+                id: "intensity",
+                label: "Intensity",
+                // The master dial (§1.2): scales the darken strength. 0 is
+                // the bit-exact passthrough (pinned by test).
+                kind: ParamKind::Float {
+                    default: 0.35,
+                    slider: (0.0, 1.0),
+                    hard: (Some(0.0), Some(1.0)),
+                },
             },
             ParamSchema {
                 id: "scanline_period",
@@ -1691,22 +1713,19 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
-    /// Glitch (docs/08 §3.12, schema status note): Block displacement and
-    /// Scanlines, one kernel pass. `tick` is the local time already
-    /// discretised at [`GLITCH_TICK_HZ`] (host-side, so the kernel never
-    /// sees raw time or does its own time maths); `roll_px` is the
-    /// scanline pattern's already-computed pixel offset (roll speed ×
-    /// local time × period). Intensity 0 is the bit-exact passthrough
-    /// (pinned by test) — see the schema's status note for why every
-    /// hashed quantity here is scaled by it.
-    Glitch {
-        /// The master 0..1 dial; scales every section's strength.
+    /// Block glitch (docs/08 §3.12, split out by K-107). `tick` is the
+    /// local time already discretised at [`GLITCH_TICK_HZ`] (host-side, so
+    /// the kernel never sees raw time or does its own time maths).
+    /// Intensity 0 is the bit-exact passthrough (pinned by test) — see the
+    /// schema's status note for why every hashed quantity here is scaled by
+    /// it.
+    BlockGlitch {
+        /// The master 0..1 dial; scales every hashed quantity.
         intensity: f32,
         seed: u32,
         /// Local time discretised at [`GLITCH_TICK_HZ`] (§3.12 status
         /// note): per-block hashing reads this, not raw time.
         tick: i32,
-        block_enabled: bool,
         /// Raster pixels (px@comp × the §2.3 preview factor).
         block_size_px: f32,
         /// 0..1, fraction of block_size_px (the "Rows/columns jitter").
@@ -1717,7 +1736,16 @@ pub enum Resolved {
         chan_px: f32,
         /// 0..1: odds (before the Intensity scale) a block slice-repeats.
         slice_frac: f32,
-        scanline_enabled: bool,
+        /// 0..1.
+        mix: f32,
+    },
+    /// Scanlines (docs/08 §3.12, split out by K-107). `roll_px` is the
+    /// scanline pattern's already-computed pixel offset (roll speed × local
+    /// time × period), host-computed so the kernel never sees raw time.
+    /// Intensity 0 is the bit-exact passthrough (pinned by test).
+    Scanlines {
+        /// The master 0..1 dial; scales the darken strength.
+        intensity: f32,
         /// Raster pixels (px@comp × the §2.3 preview factor).
         period_px: f32,
         /// 0..1.
@@ -2508,7 +2536,7 @@ pub fn resolve_stack(
                     mix,
                 })
             }
-            "glitch" => {
+            "block_glitch" => {
                 let intensity =
                     (e.float_at("intensity", lt).unwrap_or(0.35) as f32).clamp(0.0, 1.0);
                 let seed = match e.param("seed") {
@@ -2518,10 +2546,6 @@ pub fn resolve_stack(
                 // Local time discretised at the fixed tick rate (§3.12
                 // status note): block hashing reads this, never raw time.
                 let tick = (lt * GLITCH_TICK_HZ).floor() as i32;
-                let block_enabled = match e.param("block_enabled") {
-                    Some(EffectValue::Bool(b)) => *b,
-                    _ => true,
-                };
                 let block_size_px =
                     (e.float_at("block_size", lt).unwrap_or(24.0) as f32 * px_scale).max(1.0);
                 let jitter_frac =
@@ -2530,10 +2554,22 @@ pub fn resolve_stack(
                 let chan_pct = e.float_at("channel_offset", lt).unwrap_or(1.0) as f32;
                 let slice_frac =
                     (e.float_at("slice_repeat", lt).unwrap_or(20.0) as f32 / 100.0).clamp(0.0, 1.0);
-                let scanline_enabled = match e.param("scanline_enabled") {
-                    Some(EffectValue::Bool(b)) => *b,
-                    _ => true,
-                };
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::BlockGlitch {
+                    intensity,
+                    seed,
+                    tick,
+                    block_size_px,
+                    jitter_frac,
+                    amount_px: (amount_pct / 100.0 * diag_px).max(0.0),
+                    chan_px: (chan_pct / 100.0 * diag_px).max(0.0),
+                    slice_frac,
+                    mix,
+                })
+            }
+            "scanlines" => {
+                let intensity =
+                    (e.float_at("intensity", lt).unwrap_or(0.35) as f32).clamp(0.0, 1.0);
                 let period_px =
                     (e.float_at("scanline_period", lt).unwrap_or(3.0) as f32 * px_scale).max(1.0);
                 let darkness = (e.float_at("scanline_darkness", lt).unwrap_or(40.0) as f32 / 100.0)
@@ -2550,17 +2586,8 @@ pub fn resolve_stack(
                     _ => false,
                 };
                 let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Glitch {
+                Some(Resolved::Scanlines {
                     intensity,
-                    seed,
-                    tick,
-                    block_enabled,
-                    block_size_px,
-                    jitter_frac,
-                    amount_px: (amount_pct / 100.0 * diag_px).max(0.0),
-                    chan_px: (chan_pct / 100.0 * diag_px).max(0.0),
-                    slice_frac,
-                    scanline_enabled,
                     period_px,
                     darkness,
                     roll_px,
@@ -2759,41 +2786,39 @@ pub mod cpu {
                 );
                 transform(rgba, w, h, anchor, position, scale, rot, 1.0, *mix);
             }
-            Resolved::Glitch {
+            Resolved::BlockGlitch {
                 intensity,
                 seed,
                 tick,
-                block_enabled,
                 block_size_px,
                 jitter_frac,
                 amount_px,
                 chan_px,
                 slice_frac,
-                scanline_enabled,
-                period_px,
-                darkness,
-                roll_px,
-                interlace,
                 mix,
-            } => glitch(
+            } => block_glitch(
                 rgba,
                 w,
                 h,
                 *intensity,
                 *seed,
                 *tick,
-                *block_enabled,
                 *block_size_px,
                 *jitter_frac,
                 *amount_px,
                 *chan_px,
                 *slice_frac,
-                *scanline_enabled,
-                *period_px,
-                *darkness,
-                *roll_px,
-                *interlace,
                 *mix,
+            ),
+            Resolved::Scanlines {
+                intensity,
+                period_px,
+                darkness,
+                roll_px,
+                interlace,
+                mix,
+            } => scanlines(
+                rgba, w, h, *intensity, *period_px, *darkness, *roll_px, *interlace, *mix,
             ),
             // Echo is temporal: it needs the layer's neighbour frames, which
             // this single-buffer in-place dispatcher does not carry. The real
@@ -3657,119 +3682,143 @@ pub mod cpu {
         }
     }
 
-    /// Glitch (docs/08 §3.12, schema status note): Block displacement and
-    /// Scanlines in one pass (Datamosh is deferred — see the status note).
+    /// Block glitch (docs/08 §3.12, split out by K-107): standalone block
+    /// displacement, the block section of the old combined Glitch effect.
     ///
-    /// Block displacement partitions the raster into a `block_size_px`
-    /// grid; each *nominal* block hashes a small jitter offset
-    /// (`jitter_frac` of `block_size_px`, scaled by Intensity) that decides
-    /// which block's content a pixel actually reads from — a cheap stand-in
-    /// for moving grid lines themselves. That block then hashes its own
-    /// displacement (± `amount_px` per axis), R/B channel split (±
-    /// `chan_px`, alpha follows green exactly like [`rgb_split`]), and
-    /// slice-repeat odds (`slice_frac` × Intensity: folds the block's own
-    /// local Y to a short hashed repeat height instead of a plain read).
-    /// Every hashed quantity is scaled by Intensity, so Intensity 0
-    /// collapses every read back to the pixel's own position — pinned as
-    /// the bit-exact passthrough by the early return below (matching
-    /// [`glow`]'s neutral short-circuit, not the tap-sum coincidence the
-    /// blur family relies on, because Glitch's Mix should not be able to
-    /// perturb a fully neutral instance either).
-    ///
-    /// Scanlines darken by a periodic band in raster Y (plus the
-    /// precomputed roll offset), alternating which half of the period
-    /// darkens on odd periods when Interlace is on.
+    /// Partitions the raster into a `block_size_px` grid; each *nominal*
+    /// block hashes a small jitter offset (`jitter_frac` of `block_size_px`,
+    /// scaled by Intensity) that decides which block's content a pixel
+    /// actually reads from — a cheap stand-in for moving grid lines
+    /// themselves. That block then hashes its own displacement (±
+    /// `amount_px` per axis), R/B channel split (± `chan_px`, alpha follows
+    /// green exactly like [`rgb_split`]), and slice-repeat odds
+    /// (`slice_frac` × Intensity: folds the block's own local Y to a short
+    /// hashed repeat height instead of a plain read). Every hashed quantity
+    /// is scaled by Intensity, so Intensity 0 collapses every read back to
+    /// the pixel's own position — pinned as the bit-exact passthrough by
+    /// the early return below (matching [`glow`]'s neutral short-circuit,
+    /// not the tap-sum coincidence the blur family relies on, because
+    /// Mix should not be able to perturb a fully neutral instance either).
     ///
     /// Clamp-addressed bilinear sampling throughout (like [`rgb_split`]);
     /// fixed evaluation order for determinism (§2.4).
     #[allow(clippy::too_many_arguments)]
-    pub fn glitch(
+    pub fn block_glitch(
         rgba: &mut [f32],
         w: u32,
         h: u32,
         intensity: f32,
         seed: u32,
         tick: i32,
-        block_enabled: bool,
         block_size_px: f32,
         jitter_frac: f32,
         amount_px: f32,
         chan_px: f32,
         slice_frac: f32,
-        scanline_enabled: bool,
+        mix: f32,
+    ) {
+        if intensity == 0.0 {
+            return; // neutral: bit-exact identity (the WGSL twin matches)
+        }
+        let original = rgba.to_vec();
+        let bw = block_size_px.max(1.0);
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let pos = (x as f32 + 0.5, y as f32 + 0.5);
+
+                let bx0 = (pos.0 / bw).floor();
+                let by0 = (pos.1 / bw).floor();
+                let h01 = |ch: u32, bxx: f32, byy: f32| {
+                    super::block_hash01(seed, ch, bxx as i32, byy as i32, tick)
+                };
+                // Grid jitter (status note): a hashed offset of the
+                // *nominal* block, scaled by Intensity, decides which
+                // block a pixel actually reads from.
+                let jx = (h01(0, bx0, by0) - 0.5) * 2.0 * jitter_frac * bw * intensity;
+                let jy = (h01(1, bx0, by0) - 0.5) * 2.0 * jitter_frac * bw * intensity;
+                let jpos = (pos.0 + jx, pos.1 + jy);
+                let bx = (jpos.0 / bw).floor();
+                let by = (jpos.1 / bw).floor();
+
+                let dx = (h01(2, bx, by) - 0.5) * 2.0 * amount_px * intensity;
+                let dy = (h01(3, bx, by) - 0.5) * 2.0 * amount_px * intensity;
+                let chan = (h01(4, bx, by) - 0.5) * 2.0 * chan_px * intensity;
+                let slice_u = h01(5, bx, by);
+                let slice_h_u = h01(6, bx, by);
+
+                // Slice repeat: fold the block's own local Y to a short
+                // hashed repeat height instead of a plain read.
+                let mut eff_y = jpos.1;
+                if slice_u < slice_frac * intensity {
+                    let local_y = jpos.1 - by * bw;
+                    let repeat_h = (slice_h_u * bw * 0.25).max(1.0);
+                    let folded = local_y - (local_y / repeat_h).floor() * repeat_h;
+                    eff_y = by * bw + folded;
+                }
+                let (sx, sy) = (jpos.0 + dx, eff_y + dy);
+
+                // R/B split from the block hash (alpha follows green, like
+                // rgb_split).
+                let r = bilinear(&original, w, h, sx - chan, sy)[0];
+                let g = bilinear(&original, w, h, sx, sy);
+                let b = bilinear(&original, w, h, sx + chan, sy)[2];
+                let c = [r, g[1], b, g[3]];
+
+                for ch in 0..4 {
+                    rgba[i + ch] = original[i + ch] * (1.0 - mix) + c[ch] * mix;
+                }
+            }
+        }
+    }
+
+    /// Scanlines (docs/08 §3.12, split out by K-107): standalone periodic
+    /// darken, the scanline section of the old combined Glitch effect. No
+    /// hash, no block resample — reads the input pixel directly (pointwise,
+    /// [`Roi::Exact`](super::Roi::Exact)), darkens by a periodic band in
+    /// raster Y (plus the precomputed roll offset), alternating which half
+    /// of the period darkens on odd periods when Interlace is on. Intensity
+    /// 0 is the bit-exact passthrough, pinned by the early return below —
+    /// the same neutral shape [`block_glitch`] uses.
+    #[allow(clippy::too_many_arguments)]
+    pub fn scanlines(
+        rgba: &mut [f32],
+        w: u32,
+        h: u32,
+        intensity: f32,
         period_px: f32,
         darkness: f32,
         roll_px: f32,
         interlace: bool,
         mix: f32,
     ) {
-        if intensity == 0.0 || (!block_enabled && !scanline_enabled) {
+        if intensity == 0.0 {
             return; // neutral: bit-exact identity (the WGSL twin matches)
         }
         let original = rgba.to_vec();
-        let bw = block_size_px.max(1.0);
         let period = period_px.max(1.0);
         for y in 0..h {
             for x in 0..w {
                 let i = ((y * w + x) * 4) as usize;
-                let pos = (x as f32 + 0.5, y as f32 + 0.5);
+                let pos_y = y as f32 + 0.5;
+                let mut c = [
+                    original[i],
+                    original[i + 1],
+                    original[i + 2],
+                    original[i + 3],
+                ];
 
-                let (sx, sy, chan) = if block_enabled {
-                    let bx0 = (pos.0 / bw).floor();
-                    let by0 = (pos.1 / bw).floor();
-                    let h01 = |ch: u32, bxx: f32, byy: f32| {
-                        super::block_hash01(seed, ch, bxx as i32, byy as i32, tick)
-                    };
-                    // Grid jitter (status note): a hashed offset of the
-                    // *nominal* block, scaled by Intensity, decides which
-                    // block a pixel actually reads from.
-                    let jx = (h01(0, bx0, by0) - 0.5) * 2.0 * jitter_frac * bw * intensity;
-                    let jy = (h01(1, bx0, by0) - 0.5) * 2.0 * jitter_frac * bw * intensity;
-                    let jpos = (pos.0 + jx, pos.1 + jy);
-                    let bx = (jpos.0 / bw).floor();
-                    let by = (jpos.1 / bw).floor();
-
-                    let dx = (h01(2, bx, by) - 0.5) * 2.0 * amount_px * intensity;
-                    let dy = (h01(3, bx, by) - 0.5) * 2.0 * amount_px * intensity;
-                    let chan = (h01(4, bx, by) - 0.5) * 2.0 * chan_px * intensity;
-                    let slice_u = h01(5, bx, by);
-                    let slice_h_u = h01(6, bx, by);
-
-                    // Slice repeat: fold the block's own local Y to a short
-                    // hashed repeat height instead of a plain read.
-                    let mut eff_y = jpos.1;
-                    if slice_u < slice_frac * intensity {
-                        let local_y = jpos.1 - by * bw;
-                        let repeat_h = (slice_h_u * bw * 0.25).max(1.0);
-                        let folded = local_y - (local_y / repeat_h).floor() * repeat_h;
-                        eff_y = by * bw + folded;
-                    }
-                    (jpos.0 + dx, eff_y + dy, chan)
-                } else {
-                    (pos.0, pos.1, 0.0)
-                };
-
-                // R/B split from the block hash (alpha follows green, like
-                // rgb_split); always computed (chan is exactly 0.0 when
-                // block displacement is off, an exact no-op offset).
-                let r = bilinear(&original, w, h, sx - chan, sy)[0];
-                let g = bilinear(&original, w, h, sx, sy);
-                let b = bilinear(&original, w, h, sx + chan, sy)[2];
-                let mut c = [r, g[1], b, g[3]];
-
-                if scanline_enabled {
-                    let yp = pos.1 + roll_px;
-                    let cell = yp / period;
-                    let cell_floor = cell.floor();
-                    let t = cell - cell_floor;
-                    let odd = (cell_floor as i64).rem_euclid(2) != 0;
-                    let bright = (t < 0.5) != (interlace && odd);
-                    let band = if bright { 1.0 } else { 1.0 - darkness };
-                    let eff_mult = 1.0 - intensity * (1.0 - band);
-                    c[0] *= eff_mult;
-                    c[1] *= eff_mult;
-                    c[2] *= eff_mult;
-                }
+                let yp = pos_y + roll_px;
+                let cell = yp / period;
+                let cell_floor = cell.floor();
+                let t = cell - cell_floor;
+                let odd = (cell_floor as i64).rem_euclid(2) != 0;
+                let bright = (t < 0.5) != (interlace && odd);
+                let band = if bright { 1.0 } else { 1.0 - darkness };
+                let eff_mult = 1.0 - intensity * (1.0 - band);
+                c[0] *= eff_mult;
+                c[1] *= eff_mult;
+                c[2] *= eff_mult;
 
                 for ch in 0..4 {
                     rgba[i + ch] = original[i + ch] * (1.0 - mix) + c[ch] * mix;
@@ -3873,8 +3922,8 @@ mod tests {
         assert!(stack_is_temporal(one, true));
         assert_eq!(stack_flow_neighbour(one, true), Some(-1));
 
-        // A plain Glitch (block/scanline only) stays single-frame.
-        let plain = instantiate("glitch").unwrap();
+        // A plain Block glitch stays single-frame.
+        let plain = instantiate("block_glitch").unwrap();
         let plain_one = std::slice::from_ref(&plain);
         assert_eq!(stack_temporal_window(plain_one, true), vec![0]);
         assert!(!stack_is_temporal(plain_one, true));
@@ -5928,30 +5977,15 @@ mod tests {
     }
 
     #[test]
-    fn glitch_instantiates_and_resolves() {
-        let e = instantiate("glitch").unwrap();
+    fn block_glitch_instantiates_and_resolves() {
+        let e = instantiate("block_glitch").unwrap();
         assert_eq!(e.float_at("intensity", 0.0), Some(0.35));
         assert!(matches!(e.param("seed"), Some(EffectValue::Seed(_))));
-        assert!(matches!(
-            e.param("block_enabled"),
-            Some(EffectValue::Bool(true))
-        ));
         assert_eq!(e.float_at("block_size", 0.0), Some(24.0));
         assert_eq!(e.float_at("block_jitter", 0.0), Some(25.0));
         assert_eq!(e.float_at("block_amount", 0.0), Some(3.0));
         assert_eq!(e.float_at("channel_offset", 0.0), Some(1.0));
         assert_eq!(e.float_at("slice_repeat", 0.0), Some(20.0));
-        assert!(matches!(
-            e.param("scanline_enabled"),
-            Some(EffectValue::Bool(true))
-        ));
-        assert_eq!(e.float_at("scanline_period", 0.0), Some(3.0));
-        assert_eq!(e.float_at("scanline_darkness", 0.0), Some(40.0));
-        assert_eq!(e.float_at("scanline_roll", 0.0), Some(0.0));
-        assert!(matches!(
-            e.param("scanline_interlace"),
-            Some(EffectValue::Bool(false))
-        ));
 
         // Resolving is deterministic: the same instance at the same time
         // yields the identical result, twice — and the px_scale factor
@@ -5972,43 +6006,31 @@ mod tests {
             &MarkerContext::NONE,
         );
         assert_eq!(a, b);
-        let Resolved::Glitch {
+        let Resolved::BlockGlitch {
             intensity,
             tick,
-            block_enabled,
             block_size_px,
             jitter_frac,
             amount_px,
             chan_px,
             slice_frac,
-            scanline_enabled,
-            period_px,
-            darkness,
-            roll_px,
-            interlace,
             mix,
             ..
         } = a[0]
         else {
-            panic!("expected a Glitch");
+            panic!("expected a BlockGlitch");
         };
         assert_eq!(intensity, 0.35);
         assert_eq!(tick, 3); // floor(0.4 * GLITCH_TICK_HZ 8) = 3
-        assert!(block_enabled);
         assert_eq!(block_size_px, 12.0); // 24 px@comp * px_scale 0.5
         assert_eq!(jitter_frac, 0.25);
         assert_eq!(amount_px, 30.0); // 3% of a 1000px diagonal
         assert_eq!(chan_px, 10.0); // 1% of a 1000px diagonal
         assert_eq!(slice_frac, 0.20);
-        assert!(scanline_enabled);
-        assert_eq!(period_px, 1.5); // 3 px@comp * px_scale 0.5
-        assert_eq!(darkness, 0.40);
-        assert_eq!(roll_px, 0.0); // roll speed 0
-        assert!(!interlace);
         assert_eq!(mix, 1.0);
 
         // A different frame ticks differently (the per-block hash itself
-        // only runs inside cpu::glitch/the kernel, not here).
+        // only runs inside cpu::block_glitch/the kernel, not here).
         let later = resolve_stack(
             std::slice::from_ref(&e),
             0.9,
@@ -6020,32 +6042,61 @@ mod tests {
     }
 
     #[test]
-    fn cpu_glitch_is_identity_at_zero_intensity_and_with_sections_off() {
-        let (w, h) = (17u32, 9u32);
-        let img = transform_card(w, h);
+    fn scanlines_instantiates_and_resolves() {
+        let e = instantiate("scanlines").unwrap();
+        assert_eq!(e.float_at("intensity", 0.0), Some(0.35));
+        assert_eq!(e.float_at("scanline_period", 0.0), Some(3.0));
+        assert_eq!(e.float_at("scanline_darkness", 0.0), Some(40.0));
+        assert_eq!(e.float_at("scanline_roll", 0.0), Some(0.0));
+        assert!(matches!(
+            e.param("scanline_interlace"),
+            Some(EffectValue::Bool(false))
+        ));
 
-        // Intensity 0: every hashed quantity collapses regardless of
-        // section toggles or Mix — the early return skips the blend
-        // entirely, so this holds for any Mix, unlike the blur family's
-        // tap-sum coincidence.
-        let mut a = img.clone();
-        cpu::glitch(
-            &mut a, w, h, 0.0, 7, 3, true, 6.0, 0.5, 5.0, 2.0, 0.5, true, 3.0, 0.6, 1.0, true, 0.4,
-        );
-        assert_eq!(a, img, "intensity 0 is the exact identity");
-
-        // Both sections off: the same guarantee, at full intensity and any
-        // Mix.
-        let mut b = img.clone();
-        cpu::glitch(
-            &mut b, w, h, 1.0, 7, 3, false, 6.0, 0.5, 5.0, 2.0, 0.5, false, 3.0, 0.6, 1.0, true,
+        let a = resolve_stack(
+            std::slice::from_ref(&e),
             0.4,
+            1000.0,
+            0.5,
+            &MarkerContext::NONE,
         );
-        assert_eq!(b, img, "both sections off is the exact identity");
+        assert_eq!(
+            a,
+            vec![Resolved::Scanlines {
+                intensity: 0.35,
+                period_px: 1.5, // 3 px@comp * px_scale 0.5
+                darkness: 0.40,
+                roll_px: 0.0, // roll speed 0
+                interlace: false,
+                mix: 1.0,
+            }]
+        );
     }
 
     #[test]
-    fn cpu_glitch_block_params_each_move_the_result() {
+    fn cpu_block_glitch_is_identity_at_zero_intensity() {
+        let (w, h) = (17u32, 9u32);
+        let img = transform_card(w, h);
+
+        // Intensity 0: every hashed quantity collapses — the early return
+        // skips the blend entirely, so this holds for any Mix, unlike the
+        // blur family's tap-sum coincidence.
+        let mut a = img.clone();
+        cpu::block_glitch(&mut a, w, h, 0.0, 7, 3, 6.0, 0.5, 5.0, 2.0, 0.5, 0.4);
+        assert_eq!(a, img, "intensity 0 is the exact identity");
+    }
+
+    #[test]
+    fn cpu_scanlines_is_identity_at_zero_intensity() {
+        let (w, h) = (17u32, 9u32);
+        let img = transform_card(w, h);
+        let mut a = img.clone();
+        cpu::scanlines(&mut a, w, h, 0.0, 3.0, 0.6, 1.0, true, 0.4);
+        assert_eq!(a, img, "intensity 0 is the exact identity");
+    }
+
+    #[test]
+    fn cpu_block_glitch_params_each_move_the_result() {
         // Every hashed quantity at zero is still an exact identity even
         // though block displacement runs (not the early return) — the
         // "scale by zero" branches must themselves be exact.
@@ -6054,9 +6105,8 @@ mod tests {
         let (seed, tick) = (42u32, 5i32);
         let run = |amount: f32, jitter: f32, chan: f32, slice: f32| {
             let mut out = img.clone();
-            cpu::glitch(
-                &mut out, w, h, 1.0, seed, tick, true, 8.0, jitter, amount, chan, slice, false,
-                4.0, 0.5, 0.0, false, 1.0,
+            cpu::block_glitch(
+                &mut out, w, h, 1.0, seed, tick, 8.0, jitter, amount, chan, slice, 1.0,
             );
             out
         };
@@ -6080,7 +6130,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_glitch_scanlines_darken_a_periodic_band() {
+    fn cpu_scanlines_darken_a_periodic_band() {
         let (w, h) = (4u32, 12u32);
         let mut img = vec![0.0f32; (w * h * 4) as usize];
         for px in img.chunks_exact_mut(4) {
@@ -6091,10 +6141,7 @@ mod tests {
         // Period 4px, no roll, no interlace: rows 0-1 of every period are
         // bright, rows 2-3 dark — the same shape every period.
         let mut out = img.clone();
-        cpu::glitch(
-            &mut out, w, h, 1.0, 0, 0, false, 8.0, 0.0, 0.0, 0.0, 0.0, true, 4.0, 0.5, 0.0, false,
-            1.0,
-        );
+        cpu::scanlines(&mut out, w, h, 1.0, 4.0, 0.5, 0.0, false, 1.0);
         for y in 0..h {
             let expect = if (y % 4) < 2 { 1.0 } else { 0.5 };
             assert_eq!(red_at(&out, y), expect, "row {y}");
@@ -6104,10 +6151,7 @@ mod tests {
         // (rows 4-7) is dark-then-bright instead of bright-then-dark;
         // period 0 and period 2 (even) are unaffected.
         let mut inter = img.clone();
-        cpu::glitch(
-            &mut inter, w, h, 1.0, 0, 0, false, 8.0, 0.0, 0.0, 0.0, 0.0, true, 4.0, 0.5, 0.0, true,
-            1.0,
-        );
+        cpu::scanlines(&mut inter, w, h, 1.0, 4.0, 0.5, 0.0, true, 1.0);
         assert_eq!(red_at(&inter, 0), 1.0, "period 0 unaffected");
         assert_eq!(red_at(&inter, 2), 0.5, "period 0 unaffected");
         assert_eq!(red_at(&inter, 4), 0.5, "period 1 flips: dark first");
