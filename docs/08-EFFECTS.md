@@ -213,6 +213,7 @@ specified in §3.1's original text but surfaced as layer UI, not an effect. Summ
 | 3.22 | Depth of field | Frischluft / Camera Lens Blur | moderate | `{0}` |
 | 3.23 | Invert | stock CC pack invert | cheap | `{0}` |
 | 3.24 | Tint | AE Tint / duotone | cheap | `{0}` |
+| 3.25 | Posterize time | AE Posterize Time | cheap | `{0}` |
 
 ### 3.1 Flow engine — optical-flow retime interpolation (Twixtor-class)
 
@@ -1001,6 +1002,46 @@ colours render through the inspector's existing `ParamKind::Colour` arm — no i
 was needed. Distinct from Colour balance's three-channel trackballs: a two-colour duotone that
 remaps by luma rather than grading in place. The fuller shadows/mids/highlights **Tritone**
 (three colour stops) is tracked as a Tier 2 follow-up (§4).
+
+### 3.25 Posterize time — temporal frame-rate hold (stop-motion look)
+
+**Parameters:** Frame rate (fps, default 12), Phase (comp seconds, default 0), Scope
+(*Everything below* | *This layer's effects*, default *Everything below*).
+
+**Algorithm sketch.** A **temporal** effect, not a per-pixel one: it changes *what time* the
+layers it covers render at. The current comp time snaps down to a coarser grid —
+`held_t = floor((t − phase)·rate)/rate + phase` — and the covered content re-renders at
+`held_t` instead of `t`, so the animation updates only `rate` times a second (the choppy
+stop-motion / on-twos look). It re-resolves **transforms, effects and the camera** at the held
+time; **footage frames are held** at the current frame (sub-frame footage playback is the flow
+Motion blur effect's job, §3.2), so this quantises comp-driven animation. Because it re-renders
+rather than filters, it lives at the frame-orchestration layer — detected where
+`build_comp_draws` + realise (preview) and `render_comp_linear` (export) run, never in
+`run_ops` — and so resolves to **no** per-pixel op. See
+[docs/impl/temporal-rerender.md](impl/temporal-rerender.md).
+
+**Scope.** *Everything below* is **adjustment behaviour**: the composite of everything beneath
+the effect's adjustment layer re-renders at `held_t` and is laid back over the live composite
+by the adjustment's coverage (its mask × opacity), so the owner's global "posterise the whole
+scene" pass is simply the effect on a full-frame adjustment layer. *This layer's effects*
+holds only the layer's own source + stack at `held_t` (a per-layer time substitution feeding
+its own stack) — the AE per-layer form. (v1 ships *Everything below*; *This layer's effects* is
+the immediate follow-up — the schema, scope choice and held-time maths are already in place.)
+
+**Determinism & cache.** `held_t` is a pure function of `t`, `rate` and `phase`, so many
+frames share it and re-render identically; the frame key folds the effect's parameters, and
+the held-time dedup (keying the below-stack at `held_t` so identical held frames collapse to
+one cache entry) is a tracked optimisation on top — correctness never depends on it.
+
+**Preview == export (K-031).** Both paths re-render the below-stack through the **one** shared
+`render_below_at` = `build_comp_draws` at `held_t` (reusing the held decoded pixels) → the
+shared `Realiser`. A still-scene re-render at the same time is bit-identical to no re-render,
+and a full-coverage posterised frame is bit-identical to a plain render at the held time (both
+pinned by test). **Boundaries (v1):** temporal effects *inside* the held below-stack (echo,
+flow Motion blur, Datamosh) degrade to stills — the held re-render reuses the frame-time decode
+and carries no neighbour frames (the same boundary the after-effects matte takes, K-125); and a
+Posterize adjustment *inside a collapsed* Precomp degrades to a no-op (its held draws are sized
+for the nested comp). `cheap` cost, `FullFrame` ROI, `{0}` temporal, Category **Temporal**.
 
 ---
 

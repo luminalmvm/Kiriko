@@ -1520,6 +1520,71 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
+    // Posterize time (docs/08 §3.25, docs/impl/temporal-rerender.md): a
+    // temporal resample that holds its input on a coarser frame-rate grid, for
+    // the choppy stop-motion look. NOT a per-pixel op — it changes *what time*
+    // the layers it covers render at, so it is detected and executed at the
+    // frame-orchestration layer (the adjustment re-render seam in `draws`/`gpu`
+    // and export's `render_comp_linear`), never in `run_ops`; `resolve_stack`
+    // deliberately has no arm for it, so it resolves to nothing. Category
+    // Temporal, cheap (one render at the held time — often the SAME held time
+    // across many frames). Scope chooses adjustment behaviour (Everything below,
+    // the owner's global pass) or a per-layer time hold (This layer's effects).
+    EffectSchema {
+        match_name: "posterize_time",
+        label: "Posterize time",
+        version: 1,
+        category: FxCategory::Temporal,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            // It re-renders the composite below at a held time; no per-pixel ROI
+            // applies. Full-frame is the safe static declaration.
+            roi: Roi::FullFrame,
+            // The held frame is the frame the decode already produced (footage
+            // is held, docs/impl/temporal-rerender.md §2), so no neighbour
+            // window is requested — the decode planner is never re-entered.
+            temporal: &[0],
+            premultiplied: true,
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "rate",
+                label: "Frame rate",
+                // The posterised grid in fps: the animation updates only this
+                // many times a second. Default 12 (the classic on-twos look).
+                kind: ParamKind::Float {
+                    default: 12.0,
+                    slider: (1.0, 60.0),
+                    hard: (Some(0.01), None),
+                },
+            },
+            ParamSchema {
+                id: "phase",
+                label: "Phase",
+                // Comp seconds: shifts where the steps land, so the hold can be
+                // aligned to a beat. 0 snaps to the comp's own zero.
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-1.0, 1.0),
+                    hard: (None, None),
+                },
+            },
+            ParamSchema {
+                id: "scope",
+                label: "Scope",
+                // Everything below = adjustment behaviour (the whole composite
+                // beneath holds); This layer's effects = only the layer's own
+                // source and stack hold. Default adjustment, the owner's global
+                // pass.
+                kind: ParamKind::Choice {
+                    options: &["Everything below", "This layer's effects"],
+                    default: 0,
+                },
+            },
+        ],
+    },
     // Motion blur (flow) / RSMB-class (docs/08 §3.2): synthesised motion blur
     // from real optical flow. Game capture has no natural blur; this estimates
     // the per-pixel motion between the current source frame and the next

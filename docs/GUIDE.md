@@ -192,6 +192,25 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   on together, only whichever one is listed first in the effect stack gets its arrows this
   frame — the other quietly sits out, the same "missing data, do nothing" safety rule every
   temporal effect already follows.
+- **Posterize time — the stop-motion "on twos" look, and a new kind of effect entirely.**
+  Every effect so far takes a finished picture and paints on it. **Posterize time** does
+  something different: it changes *what moment in time* the layers render at. Drop it on a
+  full-frame adjustment layer, set a frame rate like 12, and the whole scene beneath updates
+  only 12 times a second — the animation goes choppy and hand-made, the classic stop-motion
+  look. The trick is simple arithmetic: the current time is rounded *down* to the nearest step
+  on that coarser grid (so any moment between two steps shows the earlier one), and the scene
+  below is re-rendered at that held moment. Because it re-renders rather than repaints, it
+  cannot live where the other effects live (they only ever see a finished picture, not the
+  layers or the clock). Instead it plugs in at the one place that holds the layers and the
+  time — the render loop itself — and that place is the same in the preview and in an export,
+  so they always agree (the whole point of the shared `render_below_at` helper: both the live
+  viewer and the file are literally the same re-render code). Two honest details: the footage
+  itself is *held* (it does not step frame-by-frame — smoothing footage in time is the flow
+  Motion blur effect's job), so Posterize quantises the *movement and effects*, not the video
+  playback; and a couple of exotic combinations (an echo *inside* the held part, or Posterize
+  buried in a collapsed precomp) quietly do nothing rather than risk a wrong picture. There is
+  a Scope switch for a per-layer version ("just this layer's own effects") that is the next
+  small step — the maths and the switch are already in place.
 - **Depth of field becomes a real effect — and effects can now read another layer.** Until
   now every effect took numbers, colours, a file. Depth of field needs a *second picture*: a
   "depth map" that says how far away each pixel is. The natural place to get one is **another

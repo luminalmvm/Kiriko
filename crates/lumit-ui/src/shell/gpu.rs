@@ -83,6 +83,19 @@ pub enum DrawSource {
     Adjust,
 }
 
+/// The below-stack re-rendered at a held/sample time for a temporal adjustment
+/// (Posterize Time, docs/08 §3.25; docs/impl/temporal-rerender.md): the draws
+/// beneath the effect's layer, built by `build_comp_draws` at the held comp
+/// time `tau`, plus the comp's camera at `tau`. Carried on the adjustment's
+/// [`DrawSource::Adjust`] draw so `Realiser::realise` composites the held
+/// version in place of the plain below-composite — the same `build_comp_draws`
+/// + `realise` export drives, so preview equals export (K-031).
+#[cfg(feature = "media")]
+pub struct TemporalBelow {
+    pub draws: Vec<CompLayerDraw>,
+    pub camera: Option<lumit_core::model::CameraPose>,
+}
+
 #[cfg(feature = "media")]
 pub struct CompLayerDraw {
     pub source: DrawSource,
@@ -142,6 +155,14 @@ pub struct CompLayerDraw {
     /// these and averages them into one smeared layer; the single-placement
     /// fields above stay the frame-time (k=0-ish) representative placement.
     pub mb: Vec<lumit_gpu::MbSample>,
+    /// The below-stack re-rendered at a held time for a temporal adjustment
+    /// (Posterize Time, docs/08 §3.25). Some only on an adjustment
+    /// [`DrawSource::Adjust`] draw whose stack holds a Posterize Time effect
+    /// scoped to *everything below*: `realise` then composites this held
+    /// version (with the adjustment's own remaining effects) in place of the
+    /// plain below-composite, blended by the adjustment's coverage. None on
+    /// every ordinary draw, so nothing changes when no temporal effect is live.
+    pub temporal_below: Option<TemporalBelow>,
 }
 
 /// GPU display path (slice 5 completion): decoded sRGB bytes → linear fp16
@@ -205,6 +226,26 @@ pub(crate) fn vram_evict_count(entry_bytes: &[u64], total: u64, incoming: u64, c
     n
 }
 
+/// The GPU primitives that turn a comp draw list into a linear texture,
+/// borrowed from whichever owner is compositing — the preview's [`GpuViewer`]
+/// or the export renderer (`crate::export`). Factoring the realise logic behind
+/// one borrowed handle is what lets the preview and export share a single
+/// re-render path (`render_below_at`, docs/impl/temporal-rerender.md): both
+/// drive the identical compositor, so a comp realises the same in the viewport
+/// and the file (K-031).
+#[cfg(feature = "media")]
+pub(crate) struct Realiser<'a> {
+    /// Owned handle (a cheap Arc-backed clone via [`lumit_gpu::GpuContext::
+    /// from_parts`]) so the moved realise code keeps passing `&self.ctx`
+    /// unchanged; the engines below cannot be cloned, so they stay borrowed.
+    pub ctx: lumit_gpu::GpuContext,
+    pub engine: &'a lumit_gpu::ColourEngine,
+    pub compositor: &'a lumit_gpu::Compositor,
+    pub fx: &'a lumit_gpu::fx::FxEngine,
+    pub lut_cache:
+        &'a std::cell::RefCell<std::collections::HashMap<String, crate::fxops::LoadedLut>>,
+}
+
 #[cfg(feature = "media")]
 impl GpuViewer {
     pub fn new(render_state: egui_wgpu::RenderState) -> Self {
@@ -229,6 +270,42 @@ impl GpuViewer {
         }
     }
 
+    /// A second handle to the shared device for the export thread.
+    pub fn export_context(&self) -> lumit_gpu::GpuContext {
+        lumit_gpu::GpuContext::from_parts(self.ctx.device.clone(), self.ctx.queue.clone())
+    }
+
+    /// Borrow this viewer's GPU primitives as a [`Realiser`] — the shared
+    /// draw-list compositor both the preview (here) and export
+    /// (`render_comp_linear`) drive, so a comp realises identically in the
+    /// viewport and the file (K-031).
+    fn realiser(&self) -> Realiser<'_> {
+        Realiser {
+            ctx: lumit_gpu::GpuContext::from_parts(self.ctx.device.clone(), self.ctx.queue.clone()),
+            engine: &self.engine,
+            compositor: &self.compositor,
+            fx: &self.fx,
+            lut_cache: &self.lut_cache,
+        }
+    }
+
+    /// Realise a draw list into a linear comp texture — delegates to the shared
+    /// [`Realiser`].
+    fn realise(
+        &self,
+        camera: Option<lumit_core::model::CameraPose>,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        layers: &[CompLayerDraw],
+    ) -> egui_wgpu::wgpu::Texture {
+        self.realiser()
+            .realise(camera, width, height, background, layers)
+    }
+}
+
+#[cfg(feature = "media")]
+impl Realiser<'_> {
     /// Turn a layer's ordered `lut_files` into the parallel `luts` list
     /// `run_ops` binds (docs/08 §3.11): each `Some(path)` is parsed and
     /// uploaded once (cached by path), a 1D or unreadable/absent file yields a
@@ -265,11 +342,6 @@ impl GpuViewer {
                 cache.get(path).cloned()
             })
             .collect()
-    }
-
-    /// A second handle to the shared device for the export thread.
-    pub fn export_context(&self) -> lumit_gpu::GpuContext {
-        lumit_gpu::GpuContext::from_parts(self.ctx.device.clone(), self.ctx.queue.clone())
     }
 
     /// Realise a draw list into a linear comp texture (recursive for
@@ -309,7 +381,7 @@ impl GpuViewer {
                 } else {
                     let luts = self.load_luts(&d.lut_files);
                     crate::fxops::run_ops(
-                        &self.fx,
+                        self.fx,
                         &self.ctx,
                         linear,
                         d.tex_w,
@@ -322,7 +394,7 @@ impl GpuViewer {
                     )
                 };
                 Some(crate::fxops::render_layer_input(
-                    &self.compositor,
+                    self.compositor,
                     &self.ctx,
                     w,
                     h,
@@ -334,7 +406,7 @@ impl GpuViewer {
             .collect()
     }
 
-    fn realise(
+    pub(crate) fn realise(
         &self,
         camera: Option<lumit_core::model::CameraPose>,
         width: u32,
@@ -359,10 +431,21 @@ impl GpuViewer {
             // comp-sized composite, so its depth inputs resample to comp size.
             let luts = self.load_luts(&l.lut_files);
             let layer_inputs = self.render_dof_inputs(&l.dof_inputs, width, height);
+            // Posterize Time everything-below (docs/08 §3.25): the input this
+            // adjustment's own effects run on is the below-stack held at the
+            // posterised time, not the plain below-composite. The held draws and
+            // camera were built by the shared `below_draws_at` (identical to the
+            // texture export's `render_below_at` produces, K-031); the coverage
+            // blend below still lays the result over the live below-at-t, so a
+            // mask reveals the held region. None on an ordinary adjustment.
+            let fx_input = match &l.temporal_below {
+                Some(tb) => self.realise(tb.camera, width, height, background, &tb.draws),
+                None => below.clone(),
+            };
             let processed = crate::fxops::run_ops(
-                &self.fx,
+                self.fx,
                 &self.ctx,
-                below.clone(),
+                fx_input,
                 width,
                 height,
                 &l.fx,
@@ -495,7 +578,7 @@ impl GpuViewer {
                 // (§3.22); the same render export runs (K-031).
                 let layer_inputs = self.render_dof_inputs(&l.dof_inputs, w, h);
                 crate::fxops::run_ops(
-                    &self.fx,
+                    self.fx,
                     &self.ctx,
                     tex,
                     w,
@@ -563,7 +646,7 @@ impl GpuViewer {
                     } else {
                         let luts = self.load_luts(&m.lut_files);
                         crate::fxops::run_ops(
-                            &self.fx,
+                            self.fx,
                             &self.ctx,
                             linear,
                             m.tex_w,
@@ -665,7 +748,10 @@ impl GpuViewer {
             seed.as_ref(),
         )
     }
+}
 
+#[cfg(feature = "media")]
+impl GpuViewer {
     /// Realise a comp frame straight to display-ready sRGB bytes (Kura's
     /// cache-fill path — nothing is registered for painting).
     pub(crate) fn realise_to_bytes(

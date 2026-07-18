@@ -2,6 +2,78 @@ use super::*;
 use crate::anim::{Animation, Property};
 use crate::model::{Composition, EffectInstance, EffectNamespace, EffectValue, Layer};
 
+// Posterize time (docs/08 §3.25): the held comp time snaps down to the coarser
+// grid. The two comp times that share a held frame MUST return the exact same
+// tau (that equality is what lets the frame cache dedup them) and never divide
+// by zero on a degenerate rate.
+#[test]
+fn posterize_held_time_snaps_to_the_grid() {
+    // 10 fps grid, no phase: every time in [0.3, 0.4) holds at 0.3.
+    assert_eq!(posterize_held_time(0.30, 10.0, 0.0), 0.3);
+    assert_eq!(posterize_held_time(0.35, 10.0, 0.0), 0.3);
+    assert!((posterize_held_time(0.399, 10.0, 0.0) - 0.3).abs() < 1e-9);
+    // The next step lands exactly on 0.4.
+    assert!((posterize_held_time(0.40, 10.0, 0.0) - 0.4).abs() < 1e-9);
+    // Two times sharing a held frame agree bit-for-bit (the dedup property):
+    // at 12 fps the cell [4/12, 5/12) holds both 0.34 and 0.40 at 4/12.
+    assert_eq!(
+        posterize_held_time(0.34, 12.0, 0.0),
+        posterize_held_time(0.40, 12.0, 0.0)
+    );
+    // A phase offset shifts where the steps land.
+    assert!((posterize_held_time(0.35, 10.0, 0.05) - 0.35).abs() < 1e-9);
+    // A degenerate rate holds nothing and never divides by zero.
+    assert_eq!(posterize_held_time(0.42, 0.0, 0.0), 0.42);
+    assert_eq!(posterize_held_time(0.42, -5.0, 0.0), 0.42);
+}
+
+// stack_posterize finds the effect, resolves its grid and scope, and reports
+// nothing for a bypassed stack or a plain one — so a layer with no Posterize
+// pays nothing.
+#[test]
+fn stack_posterize_detects_and_resolves() {
+    let mut e = instantiate("posterize_time").unwrap();
+    // Default scope is Everything below; default rate 12, phase 0.
+    let p = stack_posterize(std::slice::from_ref(&e), true, 0.0).unwrap();
+    assert_eq!(p.rate, 12.0);
+    assert_eq!(p.phase, 0.0);
+    assert_eq!(p.scope, PosterizeScope::EverythingBelow);
+    // The This-layer scope is reported so the adjustment path can skip it.
+    for param in &mut e.params {
+        match param.id.as_str() {
+            "rate" => param.value = EffectValue::Float(Property::fixed(8.0)),
+            "scope" => param.value = EffectValue::Choice(1),
+            _ => {}
+        }
+    }
+    let p = stack_posterize(std::slice::from_ref(&e), true, 0.0).unwrap();
+    assert_eq!(p.rate, 8.0);
+    assert_eq!(p.scope, PosterizeScope::ThisLayer);
+    // Bypassed (fx off) or disabled → nothing.
+    assert!(stack_posterize(std::slice::from_ref(&e), false, 0.0).is_none());
+    e.enabled = false;
+    assert!(stack_posterize(std::slice::from_ref(&e), true, 0.0).is_none());
+    // A plain stack reports nothing.
+    let blur = instantiate("blur").unwrap();
+    assert!(stack_posterize(std::slice::from_ref(&blur), true, 0.0).is_none());
+}
+
+// A Posterize Time effect has no per-pixel op: it must resolve to nothing (it is
+// executed at the orchestration layer, not in run_ops), exactly like a
+// placeholder — so it never reaches a kernel.
+#[test]
+fn posterize_resolves_to_no_op() {
+    let e = instantiate("posterize_time").unwrap();
+    assert!(resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE
+    )
+    .is_empty());
+}
+
 #[test]
 fn instantiate_carries_declared_defaults() {
     let e = instantiate("blur").unwrap();

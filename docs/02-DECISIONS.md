@@ -1339,3 +1339,26 @@ choice is a pure `shown_frame_key` helper with a unit test. Guaranteed every-fra
 conditions (a cold, unwarmed comp) still waits on the GPU-side scope pass K-096 named; this is a
 strict improvement over "holds during playback", not that pass. No change to the playback loop,
 banking, or GPU code. Built in an isolated worktree; not pushed.
+
+**K-131 · DECIDED · Temporal re-render effects share one `render_below_at`; Posterize time
+(everything-below) ships first (docs/08 §3.25, docs/impl/temporal-rerender.md).**
+Posterize time and (next) accumulation motion blur are not per-pixel effects — they change
+*what time the layers below them render at*, so they live at the frame-orchestration layer, not
+`run_ops`. Both re-render the below-stack at a changed time through **one** shared helper,
+`render_below_at` = `build_comp_draws` at the held/sample time (reusing the SAME held decoded
+pixels — footage is held, only transforms/effects/camera re-resolve) → a shared `Realiser`
+(the GpuViewer compositor factored behind a borrowed handle so export can drive it too). Both
+the preview comp-render entry and export's `render_comp_linear` call it, so preview equals
+export pixel-for-pixel (K-031). Proved by a still-scene identity test (a re-render at the same
+time is bit-identical to no re-render) and a moving-scene test (a full-coverage posterised
+frame equals a plain render at the held time). Posterize time is an **adjustment** effect
+(Everything below scope) detected on the adjustment layer; a Posterize effect resolves to no
+op, so the detection — not the resolved stack — keeps such an adjustment live, and its held
+below composites in place of the plain below-composite before the coverage blend. **Held-time
+maths** `floor((t − phase)·rate)/rate + phase` (rate ≤ 0 holds nothing, never divides by
+zero). **Boundaries (v1):** temporal effects inside the held below-stack (echo, flow motion
+blur, datamosh) degrade to stills (the held re-render carries no neighbour decode, matching the
+after-effects matte, K-125); a Posterize adjustment inside a collapsed Precomp is a no-op (its
+held draws are sized for the nested comp); *This layer's effects* scope and the held-time cache
+dedup are tracked follow-ups (the schema and maths are already in place). Built in an isolated
+worktree; not pushed.
