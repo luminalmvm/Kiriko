@@ -268,6 +268,7 @@ mod tests {
             work_area: None,
             layers,
             markers: Vec::new(),
+            motion_blur: Default::default(),
             extra: serde_json::Map::new(),
         }
     }

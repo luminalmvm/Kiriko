@@ -6316,6 +6316,7 @@ mod tests {
             work_area: None,
             layers: Vec::new(),
             markers,
+            motion_blur: Default::default(),
             extra: serde_json::Map::new(),
         };
         let layer = Layer {

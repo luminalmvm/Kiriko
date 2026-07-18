@@ -84,10 +84,47 @@ pub struct Composition {
     /// §11), in no required order (snapping and drawing sort as needed).
     #[serde(default)]
     pub markers: Vec<crate::markers::Marker>,
+    /// Comp-wide motion-blur shutter (docs/06). Off by default; when on, only
+    /// layers whose own `motion_blur` switch is set actually blur.
+    #[serde(default)]
+    pub motion_blur: MotionBlur,
     /// Unknown fields from newer Lumit versions, preserved on load/save
     /// (docs/10-FILE-FORMAT.md §1.1 — mandatory forward compatibility).
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Comp-wide motion-blur settings (docs/06, K-120). Per-layer motion blur is a
+/// cheap transform-sampled blur: with the comp master on, each layer whose own
+/// `motion_blur` switch is set is drawn `samples` times across the open shutter,
+/// its transform re-evaluated at each sub-frame time and the draws averaged, so
+/// the layer smears along its own motion. The shutter *shape* is one comp
+/// setting, exactly as in After Effects; the per-layer switch decides who blurs.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MotionBlur {
+    /// Comp master enable. Off means nothing blurs, whatever the layer switches.
+    pub enabled: bool,
+    /// Shutter angle in degrees: the fraction of the frame interval the shutter
+    /// is open is `shutter_angle / 360`. 180 (half a frame) is the AE default.
+    pub shutter_angle: f64,
+    /// Shutter phase in degrees: where the open interval sits relative to the
+    /// frame time. -90 centres the blur on the frame (the AE default), pairing
+    /// with a 180 angle to open a quarter-frame either side.
+    pub shutter_phase: f64,
+    /// Sub-frame samples per blurred layer across the open shutter (≥ 2 to blur;
+    /// higher is smoother and more expensive). 16 is a tasteful default.
+    pub samples: u32,
+}
+
+impl Default for MotionBlur {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            shutter_angle: 180.0,
+            shutter_phase: -90.0,
+            samples: 16,
+        }
+    }
 }
 
 /// Layer transform (docs/03-DATA-MODEL.md §6; 2.5D fields join with the
@@ -382,6 +419,11 @@ pub struct Switches {
     /// against nothing. Off by default, so nothing changes until it is set.
     #[serde(default)]
     pub solo: bool,
+    /// Per-layer motion blur (K-120): when set and the comp's motion-blur master
+    /// is on, this layer is drawn across the open shutter and its transform
+    /// samples averaged, smearing it along its own motion. Off by default.
+    #[serde(default)]
+    pub motion_blur: bool,
 }
 
 /// Whether any layer in `comp` is soloed (K-105). When true, the compositor
@@ -401,6 +443,7 @@ impl Default for Switches {
             collapse: false,
             fx: true,
             solo: false,
+            motion_blur: false,
         }
     }
 }
@@ -831,6 +874,25 @@ mod tests {
     }
 
     #[test]
+    fn motion_blur_defaults_and_forward_compat() {
+        // The AE-style defaults: off, half-frame shutter centred on the frame.
+        let mb = MotionBlur::default();
+        assert!(!mb.enabled);
+        assert_eq!(mb.shutter_angle, 180.0);
+        assert_eq!(mb.shutter_phase, -90.0);
+        assert_eq!(mb.samples, 16);
+        // A comp saved before motion blur existed (no `motion_blur` key) loads
+        // with the default rather than failing (docs/10 §1.1 forward compat).
+        // Build a real comp, strip the key, and confirm it re-loads defaulted.
+        let mut v = serde_json::to_value(comp_with_cameras()).unwrap();
+        v.as_object_mut().unwrap().remove("motion_blur");
+        let comp: Composition = serde_json::from_value(v).unwrap();
+        assert_eq!(comp.motion_blur, MotionBlur::default());
+        // And a layer without the `motion_blur` switch defaults it off.
+        assert!(!Switches::default().motion_blur);
+    }
+
+    #[test]
     fn file_param_serde_round_trips() {
         let fp = FileParam::single("C:/luts/teal-orange.cube");
         let json = serde_json::to_string(&fp).unwrap();
@@ -854,6 +916,7 @@ mod tests {
             work_area: None,
             layers: Vec::new(),
             markers: Vec::new(),
+            motion_blur: Default::default(),
             extra: serde_json::Map::new(),
         };
         let cam = |name: &str, zoom: f64, z_pos: f64, visible: bool, in_s: i64, out_s: i64| Layer {

@@ -2351,6 +2351,7 @@ impl AppState {
             work_area: None,
             layers: Vec::new(),
             markers: Vec::new(),
+            motion_blur: lumit_core::model::MotionBlur::default(),
             extra: serde_json::Map::new(),
         };
         let id = comp.id;

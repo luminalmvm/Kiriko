@@ -2105,6 +2105,7 @@ mod geometry_tests {
             work_area: None,
             layers: vec![layer.clone()],
             markers: Vec::new(),
+            motion_blur: Default::default(),
             extra: serde_json::Map::new(),
         };
         // Native 1920x1080, decoded 480x270 (zoomed out, quarter res).
@@ -2174,6 +2175,7 @@ mod geometry_tests {
             work_area: None,
             layers: vec![text_layer()],
             markers: Vec::new(),
+            motion_blur: Default::default(),
             extra: serde_json::Map::new(),
         };
         let nested_id = nested.id;
@@ -2196,6 +2198,7 @@ mod geometry_tests {
             work_area: None,
             layers: vec![pre_layer.clone()],
             markers: Vec::new(),
+            motion_blur: Default::default(),
             extra: serde_json::Map::new(),
         };
         let map: HashMap<Uuid, &CompLayerPixels> = HashMap::new();
@@ -2307,6 +2310,7 @@ mod geometry_tests {
             work_area: None,
             layers: vec![layer.clone()],
             markers: Vec::new(),
+            motion_blur: Default::default(),
             extra: serde_json::Map::new(),
         };
 
@@ -2388,6 +2392,7 @@ mod geometry_tests {
             // Index 0 = top: the adjustment sits above the solid.
             layers: vec![adj.clone(), base.clone()],
             markers: Vec::new(),
+            motion_blur: Default::default(),
             extra: serde_json::Map::new(),
         };
         let map: HashMap<Uuid, &CompLayerPixels> = HashMap::new();
