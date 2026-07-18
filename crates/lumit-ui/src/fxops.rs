@@ -272,6 +272,18 @@ pub fn run_ops(
                     &lumit_gpu::fx::ContrastOp { k: *k, mix: *mix },
                 );
             }
+            Resolved::Gamma { gamma, mix } => {
+                tex = fx.gamma(
+                    ctx,
+                    &tex,
+                    w,
+                    h,
+                    &lumit_gpu::fx::GammaOp {
+                        gamma: *gamma,
+                        mix: *mix,
+                    },
+                );
+            }
             Resolved::Transform {
                 anchor,
                 position,

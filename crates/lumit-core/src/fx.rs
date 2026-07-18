@@ -835,6 +835,45 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
+    // Gamma (docs/08 §3.19): a per-channel power curve in the effect's
+    // scene-linear working space — out = pow(max(in, 0), 1/gamma) per RGB
+    // channel, alpha untouched. The input is clamped to ≥ 0 before the pow
+    // (scene-linear can dip slightly negative, and the clamp must be
+    // byte-identical on CPU and GPU so the §1.6 oracle holds). pow is
+    // non-linear, so — like Contrast and Saturation — it does NOT commute with
+    // premultiplied alpha: premultiplied: false, and the host unpremultiplies,
+    // curves, and re-premultiplies. Gamma 1.0 is the neutral point (a bit-exact
+    // passthrough short-circuit, not a reliance on pow(x, 1) == x). Continuous
+    // everywhere for input ≥ 0, so the §1.6 oracle holds. Category Colour,
+    // beside its grade siblings.
+    EffectSchema {
+        match_name: "gamma",
+        label: "Gamma",
+        version: 1,
+        category: FxCategory::Colour,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            roi: Roi::Exact,
+            temporal: &[0],
+            premultiplied: false, // §2.2: a non-linear curve shifts matte edges
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "gamma",
+                label: "Gamma",
+                // The power curve raises to 1/gamma. 1 is neutral; hard floor
+                // 0.01 keeps 1/gamma finite, no hard ceiling above.
+                kind: ParamKind::Float {
+                    default: 1.0,
+                    slider: (0.1, 4.0),
+                    hard: (Some(0.01), None),
+                },
+            },
+            MIX_PARAM,
+        ],
+    },
     // Transform (docs/08 §3.5, K-090): the layer transform group as a stack
     // entry — same parameter names, units and animatability. Its point is
     // adjustment layers: applied there, it transforms the composite of
@@ -1774,6 +1813,16 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
+    /// Gamma (docs/08 §3.19): the per-channel power curve
+    /// `out = pow(max(in, 0), 1/gamma)` on unpremultiplied colour, alpha
+    /// untouched. `gamma` 1.0 is the neutral point.
+    Gamma {
+        /// Gamma value; the curve raises to `1/gamma`. 1.0 is neutral,
+        /// clamped ≥ 0.01 so the reciprocal stays finite.
+        gamma: f32,
+        /// 0..1.
+        mix: f32,
+    },
     Transform {
         /// Anchor point, raster pixels (converted from px@comp, §2.3).
         anchor: [f32; 2],
@@ -2614,6 +2663,13 @@ pub fn resolve_stack(
                 let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
                 Some(Resolved::Contrast { k, mix })
             }
+            "gamma" => {
+                // Hard floor 0.01 keeps 1/gamma finite; no ceiling — the
+                // schema's own honest shape.
+                let gamma = (e.float_at("gamma", lt).unwrap_or(1.0) as f32).max(0.01);
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::Gamma { gamma, mix })
+            }
             "glow" => {
                 let radius_pct = e.float_at("radius", lt).unwrap_or(8.0) as f32;
                 let threshold = (e.float_at("threshold", lt).unwrap_or(1.0) as f32).max(0.0);
@@ -2859,6 +2915,7 @@ pub mod cpu {
             Resolved::Exposure { factor, mix } => exposure(rgba, *factor, *mix),
             Resolved::HueShift { m, mix } => hue_shift(rgba, *m, *mix),
             Resolved::Contrast { k, mix } => contrast(rgba, *k, *mix),
+            Resolved::Gamma { gamma: g, mix } => gamma(rgba, *g, *mix),
             Resolved::Transform {
                 anchor,
                 position,
@@ -3169,6 +3226,35 @@ pub mod cpu {
             for c in 0..3 {
                 let v = (u[c] - CONTRAST_PIVOT) * k + CONTRAST_PIVOT;
                 let graded = v * a;
+                px[c] = px[c] * (1.0 - mix) + graded * mix;
+            }
+        }
+    }
+
+    /// Gamma (docs/08 §3.19): a per-channel power curve
+    /// `out = pow(max(u, 0), 1/gamma)` in the compositor's scene-linear working
+    /// space, on unpremultiplied colour (§2.2), re-premultiplied on the way out
+    /// — exactly Contrast's and Saturation's premultiply handling. pow is
+    /// non-linear, so it does not commute with the alpha multiply: the pixel is
+    /// unpremultiplied, curved, then re-premultiplied. The input is clamped to
+    /// ≥ 0 before the pow (scene-linear colour can dip slightly negative, and
+    /// pow of a negative base is undefined); the clamp is byte-identical in the
+    /// WGSL twin so the §1.6 oracle holds. `gamma` 1.0 short-circuits the whole
+    /// effect (bit-exact identity — a short-circuit, not a reliance on
+    /// `pow(x, 1)` being exactly `x`; the WGSL twin matches). Continuous for
+    /// input ≥ 0, so it is safe under the §1.6 fp16 ULP oracle. `gamma` is
+    /// clamped ≥ 0.01 at resolve so `1/gamma` stays finite; alpha is untouched.
+    pub fn gamma(rgba: &mut [f32], gamma: f32, mix: f32) {
+        if gamma == 1.0 {
+            return; // neutral: bit-exact identity (the WGSL twin matches)
+        }
+        let inv = 1.0 / gamma;
+        for px in rgba.chunks_exact_mut(4) {
+            let a = px[3];
+            let u = unpremult(px);
+            for c in 0..3 {
+                let curved = u[c].max(0.0).powf(inv);
+                let graded = curved * a;
                 px[c] = px[c] * (1.0 - mix) + graded * mix;
             }
         }
@@ -4992,6 +5078,69 @@ mod tests {
         // Empty pixels stay empty (unpremult reads black, re-premult is zero).
         let mut empty = vec![0.0_f32, 0.0, 0.0, 0.0];
         cpu::contrast(&mut empty, 2.0, 1.0);
+        assert_eq!(empty, vec![0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn gamma_is_neutral_at_one_and_curves_per_channel() {
+        let e = instantiate("gamma").unwrap();
+        assert_eq!(e.float_at("gamma", 0.0), Some(1.0));
+        // Default 1.0 resolves to a neutral gamma.
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+        assert_eq!(
+            r,
+            vec![Resolved::Gamma {
+                gamma: 1.0,
+                mix: 1.0
+            }]
+        );
+
+        // Neutral (gamma 1.0) is the bit-exact identity; Mix 0 is too at any
+        // gamma (a short-circuit, not a reliance on pow(x, 1) == x).
+        let mut n = vec![0.4_f32, 0.5, 0.6, 1.0];
+        cpu::gamma(&mut n, 1.0, 1.0);
+        assert_eq!(n, vec![0.4, 0.5, 0.6, 1.0]);
+        let mut m0 = vec![0.4_f32, 0.5, 0.6, 1.0];
+        cpu::gamma(&mut m0, 2.2, 0.0);
+        assert_eq!(m0, vec![0.4, 0.5, 0.6, 1.0]);
+
+        // Opaque pixel, gamma 2.0: each channel becomes pow(u, 1/2).
+        let mut op = vec![0.25_f32, 0.5, 0.81, 1.0];
+        cpu::gamma(&mut op, 2.0, 1.0);
+        for (v, want) in op.iter().zip([0.5_f32, 0.5_f32.powf(0.5), 0.9, 1.0]) {
+            assert!((v - want).abs() < 1e-6, "opaque curve: {v} vs {want}");
+        }
+
+        // 0 and 1 are fixed points of any gamma (pow(0) = 0, pow(1) = 1).
+        let mut ends = vec![0.0_f32, 1.0, 0.0, 1.0];
+        cpu::gamma(&mut ends, 0.45, 1.0);
+        assert!((ends[0] - 0.0).abs() < 1e-6 && (ends[1] - 1.0).abs() < 1e-6);
+
+        // Half-alpha pixel: the curve runs on the unpremultiplied colour and is
+        // re-premultiplied — the premult round trip a naive curve on
+        // premultiplied colour would get wrong. Straight (0.25,0.81,0.49) at
+        // alpha 0.5 is stored premultiplied as (0.125,0.405,0.245); gamma 2.0
+        // curves the straight colour to (0.5,0.9,0.7), re-premultiplied to
+        // (0.25,0.45,0.35); alpha is untouched.
+        let mut half = vec![0.125_f32, 0.405, 0.245, 0.5];
+        cpu::gamma(&mut half, 2.0, 1.0);
+        for (v, want) in half.iter().zip([0.25_f32, 0.45, 0.35, 0.5]) {
+            assert!((v - want).abs() < 1e-6, "half-alpha curve: {v} vs {want}");
+        }
+
+        // Negative scene-linear input is clamped to 0 before the pow (pow of a
+        // negative base is undefined), so it curves to 0 rather than NaN.
+        let mut neg = vec![-0.2_f32, 0.0, 0.0, 1.0];
+        cpu::gamma(&mut neg, 2.0, 1.0);
+        assert!(
+            neg[0].is_finite() && neg[0].abs() < 1e-6,
+            "clamped, not NaN: {}",
+            neg[0]
+        );
+
+        // Empty pixels stay empty (unpremult reads black, re-premult is zero).
+        let mut empty = vec![0.0_f32, 0.0, 0.0, 0.0];
+        cpu::gamma(&mut empty, 2.0, 1.0);
         assert_eq!(empty, vec![0.0, 0.0, 0.0, 0.0]);
     }
 

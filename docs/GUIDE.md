@@ -431,6 +431,16 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   pixel — Lumit briefly divides the alpha back out, applies the contrast, then multiplies it
   back in, so soft edges keep their shape instead of fringing. Exposure does not need that
   step because a plain multiply already behaves the same with or without the alpha folded in.
+- **Gamma (K-112 proposed).** A brightness curve for the mid-tones: it leaves pure black and
+  pure white where they are but bends everything in between. A Gamma above 1 lifts the middle
+  (a brighter, flatter look); below 1 pushes it down (darker, punchier). It is the classic
+  "gamma" slider, where the number behaves like a monitor's gamma. Like Contrast it works on the
+  "straight" colour of a semi-transparent pixel (Lumit divides the alpha out, curves, then
+  multiplies it back in), so soft edges keep their shape. One safety detail: colours in the
+  compositor's light space can dip a hair below zero, and raising a negative number to a power is
+  meaningless, so Lumit nudges any such value up to zero before curving — done identically on the
+  preview and the export, so the two never disagree. A Gamma of 1 leaves the picture exactly as
+  it was.
 - `crates/lumit-core/src/lut.rs` — **reading a colour LUT (`.cube` file).** A LUT
   (look-up table) is a colour recipe a colourist bakes elsewhere: feed it a red/green/blue
   and it hands back a graded red/green/blue. The common `.cube` text format stores that as a
