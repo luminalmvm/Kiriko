@@ -135,6 +135,44 @@ no-op), never a panic.
   mtime forces a re-parse; a blank path yields identity.
 - **Determinism**: same inputs → identical bytes across runs (docs/14).
 
+## 8. Wiring the effect into the pipeline (`Resolved` is `Copy`)
+
+The effect stack is resolved to `&[Resolved]` (lumit-core `fx::resolve_stack`),
+and `Resolved` is `#[derive(Copy)]` carrying plain scalars — it cannot hold a
+`String` path or the LUT data. So the LUT is threaded the same way `flow_field`
+and `neighbours` already are (`fxops::run_ops` takes them as separate params for
+the effects that need them):
+
+- **`Resolved::Lut { mix: f32 }`** carries only the mix. The resolve arm reads
+  Mix; it does not touch the file (there is nowhere Copy to put it).
+- **The loaded LUT is threaded alongside `ops`.** `run_ops` gains a parameter
+  parallel to `ops` — `luts: &[Option<LoadedLut>]`, one slot per op, `Some` only
+  for a `Lut` op whose file loaded. Its `Lut` arm binds that texture and calls
+  `FxEngine::lut`; a `None` slot (unset path, or a parse/IO failure) is a
+  passthrough — the §3.11 "missing file is a labelled no-op, never a fault" rule
+  and the never-crash rule both fall out of this.
+- **The caller prepares the LUTs.** `build_comp_draws` (preview) and the export
+  renderer both already call `resolve_stack` next to the layer's `EffectInstance`
+  list; for each `Lut` effect they read its File param with
+  `EffectInstance::path_at("file", lt)`, run it through the cache (§4), and fill
+  the parallel `luts` slot. Both paths call the one shared `run_ops`, so preview
+  == export (K-031) for free.
+- **CPU fallback / the oracle.** Because the LUT data never reaches the
+  `Resolved`-based `cpu::apply`, that arm is a **passthrough** (the CPU
+  degradation rung renders a LUT as a no-op — acceptable: a LUT is a GPU colour
+  map). The CPU *reference* for the §1.6 oracle is `lut::Lut3d::sample` used
+  directly in the GPU test (§7), not `cpu::apply` — the one effect whose oracle
+  reference lives outside `cpu::apply`, precisely because its parameter is a file,
+  not a number.
+
+**v1 shipped subset (to log as K-114 with the effect).** The §3.11 spec lists
+File, Input space, Interpolation and Mix; v1 ships **File + Mix** only, **3D
+trilinear** only (Tetrahedral deferred), applied in the scene-linear working
+space **as-is** (no Input-space transfer — a `.cube` authored for a different
+space is applied directly, flagged for the owner). The Input-space control,
+Tetrahedral interpolation, the content-hash cache key, and embedding small LUTs
+in the project (K-040) are all recorded follow-ups.
+
 ## Feeds
 
 08 (LUT effect §3.11), 03 (File parameter), 05/06 (the 3D-texture addition to
