@@ -1032,7 +1032,36 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   Once a property is animated its row also carries a **keyframe navigator** — `◄ ◆ ►` — where
   the middle button adds a key at the playhead (or removes the one already there) and the
   arrows jump the playhead to the previous or next key, so you can walk a property's keys
-  without hunting for them by eye.
+  without hunting for them by eye. (Effect parameters get this same navigator now too — an
+  animated Glow radius or blur amount steps and adds/removes keys from its row exactly as a
+  transform property does.)
+  **The diamonds on the lane are live, not just a picture (notes 2.1/2.6).** Click a keyframe
+  diamond to select it — it wears a ring — and **drag it left or right to change its time**;
+  while the **magnet** (the bottom-bar toggle, on by default) is lit it snaps to the nearest
+  whole frame, exactly like a key drag in the graph editor. On the lane only the *time* moves
+  (a key's value and easing are shaped in the graph editor). Select several at once and they
+  slide together as one undo step: **Shift-click** adds a key to the selection, **Ctrl-click**
+  toggles one, and dragging over empty timeline space draws a **marquee** box that selects
+  every key it covers — *across different property rows*, so you can grab, say, a Position key
+  and a Rotation key together and nudge them in step. Hold **Shift** while you drag the
+  marquee to add to the current selection instead of replacing it. A drag that begins on a
+  layer bar still moves the bar, and one that begins on a key drags the key — the marquee only
+  opens on genuinely empty space. Every key you move commits through the normal document
+  edit, so it is one undo step and the preview re-renders exactly as the export will. (A
+  linked Position/Anchor/Scale row shows the union of both axes' keys as one diamond per time;
+  dragging it moves *both* axes' keys at that time, keeping the pair in step.)
+  You can also **highlight several property rows at once** by their names, the usual list way
+  (note 2.6b): **Ctrl-click** a name to add or remove that one row, **Shift-click** to select
+  the whole run of rows between it and the last one you clicked. A plain click still picks a
+  single row and opens its curve; a Ctrl/Shift-click only changes the highlight and leaves the
+  graphed channel alone.
+  **Copy and paste keyframes (note 2.2).** With keys selected, **Ctrl/Cmd+C** copies them —
+  bezier handles and all — remembering each key's time relative to the earliest one in the
+  set. Move the playhead and **Ctrl/Cmd+V** drops them back down at the playhead, keeping their
+  spacing and their easing, and **overwriting** any key that already sits at the same time. A
+  paste is one undo step. (Copying a key on a linked Position/Scale/Anchor row carries both
+  axes, so the pair pastes back together.) These only fire when no text box is focused, so
+  typing still copies and pastes text as normal.
   (When the layer is twirled shut, the layer bar still shows a summary of all its keys.)
   Scale is special: by default x and y are locked together on a single "Scale %" row that
   keeps their ratio as you drag; the 🔓 button unlocks them into two separate rows for

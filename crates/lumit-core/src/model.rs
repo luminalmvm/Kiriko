@@ -214,7 +214,7 @@ impl Default for TransformGroup {
 }
 
 /// Which transform property an op addresses (stable, serialisable path).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TransformProp {
     AnchorX,
     AnchorY,

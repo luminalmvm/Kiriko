@@ -576,6 +576,47 @@ pub fn pan_behind_position(
     )
 }
 
+/// Merge pasted keyframes into an existing list, OVERWRITING any existing key
+/// whose time is within `tol` of a pasted key (note 2.2), then keeping the list
+/// sorted and unique by time — the pasted key wins the collision (it is inserted
+/// after the survivors are filtered). Pure; the paste commit and its test share
+/// it.
+pub(crate) fn merge_paste_keys(
+    existing: &[lumit_core::anim::Keyframe],
+    pasted: &[lumit_core::anim::Keyframe],
+    tol: f64,
+) -> Vec<lumit_core::anim::Keyframe> {
+    let mut out: Vec<lumit_core::anim::Keyframe> = existing
+        .iter()
+        .filter(|k| {
+            !pasted
+                .iter()
+                .any(|p| (p.time.to_f64() - k.time.to_f64()).abs() < tol)
+        })
+        .copied()
+        .collect();
+    out.extend_from_slice(pasted);
+    out.sort_by_key(|k| k.time);
+    out.dedup_by(|a, b| a.time == b.time);
+    out
+}
+
+/// The Y partner of a linked pair's X channel (Anchor/Position/Scale), or None —
+/// so copy carries both axes of a linked keyframe.
+fn linked_axis_partner(
+    p: lumit_core::model::TransformProp,
+) -> Option<lumit_core::model::TransformProp> {
+    use lumit_core::model::TransformProp::{
+        AnchorX, AnchorY, PositionX, PositionY, ScaleX, ScaleY,
+    };
+    match p {
+        AnchorX => Some(AnchorY),
+        PositionX => Some(PositionY),
+        ScaleX => Some(ScaleY),
+        _ => None,
+    }
+}
+
 /// A transform whose origin (anchor) is the centre of a `nat_w`×`nat_h`
 /// object, placed at the centre of a `comp_w`×`comp_h` composition — the AE
 /// default so a new layer appears centred and pivots about its middle.
@@ -913,19 +954,78 @@ impl GraphSelection {
 /// (note 2.8.2). One row at a time in v1 — multi-property selection (note 2.6)
 /// will grow this into a set. Shared by the Timeline and Effect Controls panels
 /// so a row highlights in both (note 2.8.7).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PropSel {
     pub layer: Uuid,
     pub row: PropRow,
 }
 
 /// The identity of a property row within a layer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PropRow {
     /// A transform channel (position, anchor, scale, rotation, opacity).
     Transform(lumit_core::model::TransformProp),
     /// One effect parameter: the effect's index in the stack and the param index.
     Effect { effect: usize, param: usize },
+}
+
+/// A single keyframe picked out in the timeline lane/layer view (note 2.1). The
+/// lane is a pure time axis, so a key is named by its property row and its own
+/// (layer-local) time — never a value or a list index. Identifying keys by time
+/// is what lets a marquee span several property rows at once (note 2.6) and lets
+/// the linked Anchor/Position/Scale rows, whose lane shows the union of both
+/// axes' keys, treat both axes' keys at one time as a single draggable point.
+/// Selection is UI state only; every edit still commits through the document
+/// ops, so preview equals export.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LaneKeySel {
+    pub layer: Uuid,
+    pub row: PropRow,
+    pub time: Rational,
+}
+
+/// An in-flight lane keyframe drag (note 2.1): the grabbed key's identity and
+/// the provisional (layer-local) time it is being dragged to — already frame
+/// snapped when the magnet is on. The whole lane selection rides the same delta
+/// `to − grabbed.time`; the release commits one Batch so the slide is a single
+/// undo step.
+#[derive(Clone, Copy, Debug)]
+pub struct LaneKeyDrag {
+    pub grabbed: LaneKeySel,
+    pub to: f64,
+}
+
+impl LaneKeyDrag {
+    /// The time shift (seconds) the drag currently applies to every selected
+    /// key: the grabbed key's landing time minus its resting time.
+    pub fn delta(&self) -> f64 {
+        self.to - self.grabbed.time.to_f64()
+    }
+}
+
+/// One drawn keyframe glyph on a lane this frame: its selection identity and its
+/// screen position, gathered across every property row so the timeline's
+/// marquee can hit-test keys from different rows in one pass (note 2.6). Rebuilt
+/// each frame; never persisted.
+#[derive(Clone, Copy, Debug)]
+pub struct LaneGlyph {
+    pub sel: LaneKeySel,
+    pub pos: egui::Pos2,
+}
+
+/// A keyframe on the lane clipboard (note 2.2): the key itself (carrying its
+/// bezier handles in `interp_in`/`interp_out`) plus the layer and property row
+/// it came from and its time relative to the copy anchor (the earliest selected
+/// key). Paste replays these onto their own property at the playhead, preserving
+/// each key's offset and its handles and overwriting any key whose time
+/// coincides. Clipboard is UI state, never the document.
+#[derive(Clone, Copy, Debug)]
+pub struct ClipboardKey {
+    pub layer: Uuid,
+    pub row: PropRow,
+    /// Time of this key minus the earliest copied key's time (seconds).
+    pub offset: f64,
+    pub key: lumit_core::anim::Keyframe,
 }
 
 pub struct AppState {
@@ -1038,9 +1138,60 @@ pub struct AppState {
     /// dragged key. Pinned to one channel; see `GraphSelection`.
     pub graph_selection: Option<GraphSelection>,
     /// The highlighted property row in the layer/Effect Controls area (note
-    /// 2.8.1; see [`PropSel`]). Set by clicking a row; None when nothing is
-    /// selected.
+    /// 2.8.1; see [`PropSel`]). The *anchor* of the property-row selection — the
+    /// most recently clicked row, which a shift-click ranges to and which the
+    /// graph follows. `None` when nothing is selected. Kept in step with
+    /// `selected_props`: whenever that set is non-empty this is its anchor.
     pub selected_prop: Option<PropSel>,
+    /// The full set of highlighted property rows (note 2.6): plain click picks
+    /// one, Ctrl-click toggles one, Shift-click ranges from the anchor over the
+    /// rows drawn between. Every row in the set lifts its background; the single
+    /// `selected_prop` remains the anchor. UI state only.
+    pub selected_props: Vec<PropSel>,
+    /// Keyframes picked out on the timeline lanes (note 2.1): by clicking a key,
+    /// by the lane marquee, or by the last lane drag. Spans property rows
+    /// (note 2.6). Entries pin a key by time; a stale one (its key edited away)
+    /// simply matches nothing. UI state only.
+    pub lane_selection: Vec<LaneKeySel>,
+    /// In-flight lane keyframe time drag (note 2.1), driving the live preview of
+    /// every selected key's slide; committed as one Batch on release.
+    pub lane_key_drag: Option<LaneKeyDrag>,
+    /// In-flight lane marquee (rubber-band) on empty timeline space: (press
+    /// anchor, current corner) in screen points, mirroring the graph editor's.
+    /// `Some` only while the button is down; on release it selects the keys it
+    /// covered.
+    pub lane_marquee: Option<(egui::Pos2, egui::Pos2)>,
+    /// Whether the live lane marquee adds to the existing selection (Shift held
+    /// when the drag began) rather than replacing it (note 2.6c).
+    pub lane_marquee_add: bool,
+    /// A released lane marquee band waiting to be hit-tested: set when the drag
+    /// ends, resolved after the row loop has refilled `lane_glyphs`. Transient.
+    pub lane_marquee_commit: Option<(egui::Pos2, egui::Pos2)>,
+    /// Every keyframe glyph drawn on the lanes this frame, gathered for the
+    /// marquee's cross-row hit-test (see [`LaneGlyph`]). Cleared and refilled
+    /// each timeline frame.
+    pub lane_glyphs: Vec<LaneGlyph>,
+    /// The lane keyframe clipboard (note 2.2): the copied keys with their bezier
+    /// handles, offset from the copy anchor. Ctrl+V replays them at the
+    /// playhead, overwriting any key whose time coincides.
+    pub keyframe_clipboard: Vec<ClipboardKey>,
+    /// Set on the frame a lane keyframe drag is released: the time shift
+    /// (seconds) to apply to the whole lane selection. `timeline_panel` reads it
+    /// after the row loop, builds one Batch, and clears it. Transient.
+    pub lane_drag_commit: Option<f64>,
+    /// Transform rows drawn this frame as a *linked* Anchor/Position/Scale pair
+    /// (layer, the x channel): so a lane drag on such a row moves both axes' keys
+    /// at that time, while a standalone (unlinked) axis row moves only its own.
+    /// Rebuilt each frame. Transient.
+    pub lane_linked: Vec<(Uuid, lumit_core::model::TransformProp)>,
+    /// The property rows drawn this frame in visual (top-to-bottom) order, for
+    /// Shift range-select of property names (note 2.6b). Rebuilt each timeline
+    /// frame. Transient.
+    pub prop_row_order: Vec<PropSel>,
+    /// A Shift-click on a property name, resolved after the row loop against
+    /// `prop_row_order`: the range from the anchor (`selected_prop`) to this row
+    /// becomes `selected_props`. Transient.
+    pub prop_range_target: Option<PropSel>,
     /// In-flight speed-graph drag: (key index, provisional speed in
     /// value-units/second). Separate from `graph_edit` because the speed lens
     /// edits a keyframe's tangent (K-070), not its value or time.
@@ -1246,6 +1397,18 @@ impl Default for AppState {
             graph_marquee: None,
             graph_selection: None,
             selected_prop: None,
+            selected_props: Vec::new(),
+            lane_selection: Vec::new(),
+            lane_key_drag: None,
+            lane_marquee: None,
+            lane_marquee_add: false,
+            lane_marquee_commit: None,
+            lane_glyphs: Vec::new(),
+            keyframe_clipboard: Vec::new(),
+            lane_drag_commit: None,
+            lane_linked: Vec::new(),
+            prop_row_order: Vec::new(),
+            prop_range_target: None,
             graph_speed_edit: None,
             graph_tangent_edit: None,
             graph_tangent_mode: None,
@@ -1899,6 +2062,218 @@ impl AppState {
             layer: layer_id,
         });
         self.selected_layer = None;
+        #[cfg(feature = "media")]
+        self.refresh_preview();
+    }
+
+    /// Copy the selected lane keyframes to the clipboard (note 2.2): each with
+    /// its bezier handles and its offset from the earliest selected key. A key on
+    /// a linked Anchor/Position/Scale row copies BOTH axes' keys at that time, so
+    /// a paste rebuilds the pair. Nothing selected leaves the clipboard as it was.
+    pub fn copy_selected_keyframes(&mut self) {
+        use lumit_core::anim::{Animation, Keyframe};
+        use lumit_core::model::{EffectValue, Layer, TransformProp};
+        if self.lane_selection.is_empty() {
+            return;
+        }
+        let doc = self.store.snapshot();
+        let Some(comp) = self.selected_comp.and_then(|id| doc.comp(id)) else {
+            return;
+        };
+        let tol = 0.5 / comp.frame_rate.fps().max(1.0);
+        let tf_key = |layer: &Layer, prop: TransformProp, t: f64| -> Option<Keyframe> {
+            if let Animation::Keyframed(keys) = &layer.transform.get(prop).animation {
+                keys.iter()
+                    .find(|k| (k.time.to_f64() - t).abs() < tol)
+                    .copied()
+            } else {
+                None
+            }
+        };
+        let fx_key = |layer: &Layer, e: usize, p: usize, t: f64| -> Option<Keyframe> {
+            let param = layer.effects.get(e)?.params.get(p)?;
+            if let EffectValue::Float(prop) = &param.value {
+                if let Animation::Keyframed(keys) = &prop.animation {
+                    return keys
+                        .iter()
+                        .find(|k| (k.time.to_f64() - t).abs() < tol)
+                        .copied();
+                }
+            }
+            None
+        };
+        // (layer, row, absolute local time, key).
+        let mut collected: Vec<(Uuid, PropRow, f64, Keyframe)> = Vec::new();
+        for s in &self.lane_selection {
+            let Some(layer) = comp.layers.iter().find(|l| l.id == s.layer) else {
+                continue;
+            };
+            let t = s.time.to_f64();
+            match s.row {
+                PropRow::Transform(prop) => {
+                    if let Some(k) = tf_key(layer, prop, t) {
+                        collected.push((s.layer, PropRow::Transform(prop), t, k));
+                    }
+                    // A linked pair carries its partner axis too.
+                    if self
+                        .lane_linked
+                        .iter()
+                        .any(|(l, pp)| *l == s.layer && *pp == prop)
+                    {
+                        if let Some(py) = linked_axis_partner(prop) {
+                            if let Some(k) = tf_key(layer, py, t) {
+                                collected.push((s.layer, PropRow::Transform(py), t, k));
+                            }
+                        }
+                    }
+                }
+                PropRow::Effect { effect, param } => {
+                    if let Some(k) = fx_key(layer, effect, param, t) {
+                        collected.push((s.layer, s.row, t, k));
+                    }
+                }
+            }
+        }
+        if collected.is_empty() {
+            return;
+        }
+        let anchor = collected
+            .iter()
+            .map(|(_, _, t, _)| *t)
+            .fold(f64::INFINITY, f64::min);
+        self.keyframe_clipboard = collected
+            .into_iter()
+            .map(|(layer, row, t, key)| ClipboardKey {
+                layer,
+                row,
+                offset: t - anchor,
+                key,
+            })
+            .collect();
+    }
+
+    /// Paste the clipboard keyframes at the playhead (note 2.2): each lands on
+    /// its own property at `playhead + offset` (layer-local), OVERWRITING any key
+    /// whose time coincides and carrying its bezier handles. One Batch, so a
+    /// paste is a single undo step; the pasted keys become the lane selection.
+    pub fn paste_keyframes(&mut self) {
+        use lumit_core::anim::{Animation, Keyframe};
+        use lumit_core::model::{EffectValue, TransformProp};
+        if self.keyframe_clipboard.is_empty() {
+            return;
+        }
+        let doc = self.store.snapshot();
+        let Some(comp_id) = self.selected_comp else {
+            return;
+        };
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let fps = comp.frame_rate.fps().max(1.0);
+        let tol = 0.5 / fps;
+        let playhead_comp = self.preview_frame as f64 / fps;
+        let rt = |s: f64| {
+            Rational::from_f64_on_grid(s.max(0.0), Rational::FLICK_DEN).unwrap_or(Rational::ZERO)
+        };
+
+        // Group the pasted keys per (layer, transform channel) and (layer, effect
+        // index, param index), placing each at the playhead plus its offset.
+        let mut tf: Vec<(Uuid, TransformProp, Vec<Keyframe>)> = Vec::new();
+        let mut fx: Vec<(Uuid, usize, usize, Vec<Keyframe>)> = Vec::new();
+        let mut new_sel: Vec<LaneKeySel> = Vec::new();
+        for c in &self.keyframe_clipboard {
+            let Some(layer) = comp.layers.iter().find(|l| l.id == c.layer) else {
+                continue;
+            };
+            let local = playhead_comp - layer.start_offset.0.to_f64() + c.offset;
+            let time = rt(local);
+            let mut key = c.key;
+            key.time = time;
+            new_sel.push(LaneKeySel {
+                layer: c.layer,
+                row: c.row,
+                time,
+            });
+            match c.row {
+                PropRow::Transform(prop) => {
+                    match tf.iter_mut().find(|(l, p, _)| *l == c.layer && *p == prop) {
+                        Some((_, _, ks)) => ks.push(key),
+                        None => tf.push((c.layer, prop, vec![key])),
+                    }
+                }
+                PropRow::Effect { effect, param } => {
+                    match fx
+                        .iter_mut()
+                        .find(|(l, e, p, _)| *l == c.layer && *e == effect && *p == param)
+                    {
+                        Some((_, _, _, ks)) => ks.push(key),
+                        None => fx.push((c.layer, effect, param, vec![key])),
+                    }
+                }
+            }
+        }
+
+        let mut ops: Vec<Op> = Vec::new();
+        for (layer_id, prop, pasted) in &tf {
+            let Some(layer) = comp.layers.iter().find(|l| l.id == *layer_id) else {
+                continue;
+            };
+            let existing: Vec<Keyframe> = match &layer.transform.get(*prop).animation {
+                Animation::Keyframed(k) => k.clone(),
+                Animation::Static(_) => Vec::new(),
+            };
+            ops.push(Op::SetTransformProperty {
+                comp: comp_id,
+                layer: *layer_id,
+                prop: *prop,
+                animation: Animation::Keyframed(merge_paste_keys(&existing, pasted, tol)),
+            });
+        }
+        // Effect params: one SetLayerEffects per layer, all its params folded in.
+        let mut fx_layers: Vec<Uuid> = Vec::new();
+        for (l, ..) in &fx {
+            if !fx_layers.contains(l) {
+                fx_layers.push(*l);
+            }
+        }
+        for layer_id in fx_layers {
+            let Some(layer) = comp.layers.iter().find(|l| l.id == layer_id) else {
+                continue;
+            };
+            let mut effects = layer.effects.clone();
+            let mut touched = false;
+            for (_l, e, p, pasted) in fx.iter().filter(|(l, ..)| *l == layer_id) {
+                if let Some(param) = effects.get_mut(*e).and_then(|inst| inst.params.get_mut(*p)) {
+                    if let EffectValue::Float(prop) = &mut param.value {
+                        let existing: Vec<Keyframe> = match &prop.animation {
+                            Animation::Keyframed(k) => k.clone(),
+                            Animation::Static(_) => Vec::new(),
+                        };
+                        prop.animation =
+                            Animation::Keyframed(merge_paste_keys(&existing, pasted, tol));
+                        touched = true;
+                    }
+                }
+            }
+            if touched {
+                ops.push(Op::SetLayerEffects {
+                    comp: comp_id,
+                    layer: layer_id,
+                    effects,
+                });
+            }
+        }
+
+        if ops.is_empty() {
+            return;
+        }
+        let op = if ops.len() == 1 {
+            ops.remove(0)
+        } else {
+            Op::Batch { ops }
+        };
+        self.commit(op);
+        self.lane_selection = new_sel;
         #[cfg(feature = "media")]
         self.refresh_preview();
     }
@@ -3800,6 +4175,62 @@ impl AppState {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    fn kf(t: f64, interp: lumit_core::anim::SideInterp) -> lumit_core::anim::Keyframe {
+        lumit_core::anim::Keyframe {
+            time: Rational::from_f64_on_grid(t, Rational::FLICK_DEN).unwrap(),
+            value: 0.0,
+            interp_in: interp,
+            interp_out: interp,
+        }
+    }
+
+    // Paste overwrites the existing key at a coinciding time and carries the
+    // pasted key's bezier handles (note 2.2).
+    #[test]
+    fn paste_overwrites_coincident_key_and_keeps_handles() {
+        use lumit_core::anim::SideInterp;
+        let bez = SideInterp::Bezier {
+            speed: 2.0,
+            influence: 0.4,
+        };
+        let existing = [
+            kf(0.0, SideInterp::Linear),
+            kf(1.0, SideInterp::Linear),
+            kf(2.0, SideInterp::Linear),
+        ];
+        let pasted = [kf(1.0, bez)];
+        let out = merge_paste_keys(&existing, &pasted, 0.5 / 30.0);
+        assert_eq!(out.len(), 3);
+        let at_one = out
+            .iter()
+            .find(|k| (k.time.to_f64() - 1.0).abs() < 1e-6)
+            .unwrap();
+        // The pasted key won the collision, carrying its handles.
+        assert_eq!(at_one.interp_in, bez);
+        assert_eq!(at_one.interp_out, bez);
+    }
+
+    // Pasting at a fresh time inserts without disturbing the others.
+    #[test]
+    fn paste_at_new_time_inserts() {
+        use lumit_core::anim::SideInterp::Linear;
+        let existing = [kf(0.0, Linear), kf(1.0, Linear)];
+        let pasted = [kf(3.0, Linear)];
+        let out = merge_paste_keys(&existing, &pasted, 0.5 / 30.0);
+        let ts: Vec<f64> = out.iter().map(|k| k.time.to_f64()).collect();
+        assert_eq!(ts, vec![0.0, 1.0, 3.0]);
+    }
+
+    #[test]
+    fn linked_axis_partner_maps_x_to_y_only() {
+        use lumit_core::model::TransformProp;
+        assert_eq!(
+            linked_axis_partner(TransformProp::ScaleX),
+            Some(TransformProp::ScaleY)
+        );
+        assert_eq!(linked_axis_partner(TransformProp::Opacity), None);
+    }
 
     #[test]
     fn draft_width_caps_for_instant_scrub_but_never_exceeds_specified() {

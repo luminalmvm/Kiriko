@@ -625,6 +625,28 @@ impl Shell {
         }
     }
 
+    /// Ctrl/Cmd+C copies the selected lane keyframes; Ctrl/Cmd+V pastes them at
+    /// the playhead (note 2.2). Handled on both platforms. Skipped while a text
+    /// field is focused, so its own copy/paste keeps working; otherwise there is
+    /// no other C/V binding, so it is safe to consume.
+    fn keyframe_clipboard_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.memory(|m| m.focused()).is_some() {
+            return;
+        }
+        let (copy, paste) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::C),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::V),
+            )
+        });
+        if copy {
+            self.app.copy_selected_keyframes();
+        }
+        if paste {
+            self.app.paste_keyframes();
+        }
+    }
+
     #[cfg(not(target_os = "macos"))]
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut, Modifiers};
@@ -1625,6 +1647,7 @@ impl Shell {
         self.native_menu_frame();
         #[cfg(not(target_os = "macos"))]
         self.shortcuts(ctx);
+        self.keyframe_clipboard_shortcuts(ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.app.project_title()));
 
         #[cfg(not(target_os = "macos"))]
