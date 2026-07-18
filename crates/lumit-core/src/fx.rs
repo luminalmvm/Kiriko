@@ -1594,6 +1594,81 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
+    // Matte key (docs/08 §3.21): a soft chroma key — a greenscreen remover.
+    // Alpha is driven down where a pixel's chroma sits close to the key
+    // colour's chroma, on straight (unpremultiplied) colour (§2.2, the wrap
+    // fused into the kernel like Saturation's). The distance is Euclidean in
+    // the chroma plane (RGB minus Rec. 709 luma), so greens of varying
+    // brightness key alike; a smoothstep between Tolerance and
+    // Tolerance + Softness makes the key continuous everywhere (no hard step,
+    // so the §1.6 ULP oracle holds — cost class `cheap`). Spill suppression
+    // pulls the residual key-hue projection out of the kept pixels' colour
+    // (desaturating toward luma along the key hue) so green fringes fade.
+    // Category Utility, beside Transform. The default green + Tolerance visibly
+    // keys a typical green screen ("drop it on and it works", §1.2); there is
+    // no neutral no-op default (Mix 0 is the identity). A viewer eyedropper to
+    // pick the key colour off the image is a nice follow-up, out of scope here.
+    EffectSchema {
+        match_name: "matte_key",
+        label: "Matte key",
+        version: 1,
+        category: FxCategory::Utility,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            roi: Roi::Exact,
+            temporal: &[0],
+            premultiplied: false, // §2.2: keying/despill works on straight colour
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "key",
+                label: "Key colour",
+                // Scene-linear RGBA; alpha ignored. Default a saturated green,
+                // the greenscreen the effect exists to remove.
+                kind: ParamKind::Colour {
+                    default: [0.0, 0.6, 0.0, 1.0],
+                    range: (0.0, 4.0),
+                },
+            },
+            ParamSchema {
+                id: "tolerance",
+                label: "Tolerance",
+                // Per cent, the chroma-distance threshold below which a pixel
+                // is fully keyed (alpha ·= 0). Resolves to a plain 0..1
+                // fraction read against the Euclidean chroma metric.
+                kind: ParamKind::Float {
+                    default: 20.0,
+                    slider: (0.0, 100.0),
+                    hard: (Some(0.0), Some(100.0)),
+                },
+            },
+            ParamSchema {
+                id: "softness",
+                label: "Softness",
+                // Per cent, the soft-edge width above Tolerance across which
+                // the keep-factor smoothsteps from 0 to 1.
+                kind: ParamKind::Float {
+                    default: 10.0,
+                    slider: (0.0, 100.0),
+                    hard: (Some(0.0), Some(100.0)),
+                },
+            },
+            ParamSchema {
+                id: "spill",
+                label: "Spill suppression",
+                // Per cent of the residual key-hue chroma pulled out of the
+                // kept colour (0 = off, the default: keying without despill).
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (0.0, 100.0),
+                    hard: (Some(0.0), Some(100.0)),
+                },
+            },
+            MIX_PARAM,
+        ],
+    },
 ];
 
 /// Look a schema up by its match name.
@@ -1856,6 +1931,25 @@ pub enum Resolved {
     Saturation {
         /// Factor about Rec. 709 luma: 0 = greyscale, 1 = neutral, 2 = max.
         saturation: f32,
+        /// 0..1.
+        mix: f32,
+    },
+    /// Matte key (docs/08 §3.21): a soft chroma key. `key` is the scene-linear
+    /// RGBA key colour (resolved at frame time like Vignette's tint, alpha
+    /// ignored); the CPU/GPU maths derive its chroma and hue direction from it
+    /// identically. `tol`/`soft`/`spill` are plain 0..1 fractions. The keep
+    /// factor smoothsteps from 0 (fully keyed, alpha ·= 0) at chroma distance
+    /// `tol` to 1 (fully kept) at `tol + soft`, so it is continuous
+    /// everywhere. There is no neutral no-op default; Mix 0 is the identity.
+    MatteKey {
+        /// Scene-linear RGBA key colour (alpha ignored).
+        key: [f32; 4],
+        /// Chroma-distance threshold, 0..1: at/below it the pixel is fully keyed.
+        tol: f32,
+        /// Soft-edge width above `tol`, 0..1: the smoothstep transition span.
+        soft: f32,
+        /// Key-hue spill removal, 0..1: fraction of residual key chroma pulled out.
+        spill: f32,
         /// 0..1.
         mix: f32,
     },
@@ -2739,6 +2833,24 @@ pub fn resolve_stack(
                 let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
                 Some(Resolved::Saturation { saturation, mix })
             }
+            "matte_key" => {
+                // The colour is resolved to a scene-linear array at frame time,
+                // like Vignette's tint would be; the CPU reference and the WGSL
+                // kernel derive its chroma/hue direction from it identically.
+                // Tolerance/Softness/Spill are per cent → plain 0..1 fractions.
+                let key = e.colour_at("key", lt).unwrap_or([0.0, 0.6, 0.0, 1.0]);
+                let tol = (e.float_at("tolerance", lt).unwrap_or(20.0) as f32 / 100.0).max(0.0);
+                let soft = (e.float_at("softness", lt).unwrap_or(10.0) as f32 / 100.0).max(0.0);
+                let spill = (e.float_at("spill", lt).unwrap_or(0.0) as f32 / 100.0).clamp(0.0, 1.0);
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::MatteKey {
+                    key: key.map(|c| c as f32),
+                    tol,
+                    soft,
+                    spill,
+                    mix,
+                })
+            }
             "vignette" => {
                 let amount = (e.float_at("amount", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
                 let radius = (e.float_at("radius", lt).unwrap_or(0.75) as f32).clamp(0.0, 1.0);
@@ -3043,6 +3155,13 @@ pub mod cpu {
                 mix,
             } => colour_balance(rgba, *lift, *gamma, *gain, *mix),
             Resolved::Saturation { saturation, mix } => saturate(rgba, *saturation, *mix),
+            Resolved::MatteKey {
+                key,
+                tol,
+                soft,
+                spill,
+                mix,
+            } => matte_key(rgba, *key, *tol, *soft, *spill, *mix),
             Resolved::Vignette {
                 amount,
                 radius,
@@ -3311,6 +3430,63 @@ pub mod cpu {
                 let s = v * a;
                 px[c] = px[c] * (1.0 - mix) + s * mix;
             }
+        }
+    }
+
+    /// Matte key (docs/08 §3.21): a soft chroma key (greenscreen removal), on
+    /// straight (unpremultiplied) colour (§2.2) — unpremultiply → key + despill
+    /// → re-premultiply, exactly Saturation's premultiply handling. The metric
+    /// is Euclidean distance in the chroma plane: each colour's chroma is
+    /// `rgb − luma` (Rec. 709 luma, [`LUMA`]), a pure-chroma vector, so greens
+    /// of any brightness sit at the same point and key alike. A **smoothstep**
+    /// keep-factor is 0 (fully keyed, alpha ·= 0) at chroma distance ≤ `tol`,
+    /// 1 (fully kept) at ≥ `tol + soft`, and smooth between — no hard step, so
+    /// the effect is continuous everywhere and safe under the §1.6 fp16 ULP
+    /// oracle (the WGSL twin matches op-for-op). Spill suppression pulls a
+    /// `spill` fraction of the pixel's key-hue projection out of its chroma
+    /// (desaturating toward luma along the key hue), fading green fringes on
+    /// kept pixels. The key's chroma/hue direction are derived here once and
+    /// per-invocation in the kernel from the identical `key`, so both paths use
+    /// the same numbers; a grey key (no hue) makes spill a no-op. Mix 0 is the
+    /// bit-exact identity (the `× (1 − mix) + · × mix` blend collapses to the
+    /// input). `soft`'s transition width floors at a small epsilon so `soft` 0
+    /// reads as a steep edge rather than a division by zero.
+    pub fn matte_key(rgba: &mut [f32], key: [f32; 4], tol: f32, soft: f32, spill: f32, mix: f32) {
+        // Key chroma (a pure-chroma vector: its own luma is zero) and unit hue
+        // direction; a grey key has no hue, so its direction is zero and spill
+        // does nothing.
+        let kl = key[0] * LUMA[0] + key[1] * LUMA[1] + key[2] * LUMA[2];
+        let kc = [key[0] - kl, key[1] - kl, key[2] - kl];
+        let klen = (kc[0] * kc[0] + kc[1] * kc[1] + kc[2] * kc[2]).sqrt();
+        let kdir = if klen > 1e-6 {
+            [kc[0] / klen, kc[1] / klen, kc[2] / klen]
+        } else {
+            [0.0; 3]
+        };
+        let e1 = tol + soft.max(1e-6);
+        for px in rgba.chunks_exact_mut(4) {
+            let a = px[3];
+            let u = unpremult(px);
+            let pl = u[0] * LUMA[0] + u[1] * LUMA[1] + u[2] * LUMA[2];
+            let pc = [u[0] - pl, u[1] - pl, u[2] - pl];
+            // Distance from the key's chroma → smoothstep keep-factor.
+            let dc = [pc[0] - kc[0], pc[1] - kc[1], pc[2] - kc[2]];
+            let d = (dc[0] * dc[0] + dc[1] * dc[1] + dc[2] * dc[2]).sqrt();
+            let t = ((d - tol) / (e1 - tol)).clamp(0.0, 1.0);
+            let keep = t * t * (3.0 - 2.0 * t);
+            // Spill: remove the key-hue projection from the kept colour.
+            let proj = (pc[0] * kdir[0] + pc[1] * kdir[1] + pc[2] * kdir[2]).max(0.0) * spill;
+            let despilled = [
+                u[0] - proj * kdir[0],
+                u[1] - proj * kdir[1],
+                u[2] - proj * kdir[2],
+            ];
+            let out_a = a * keep;
+            for c in 0..3 {
+                let proc = despilled[c] * out_a;
+                px[c] = px[c] * (1.0 - mix) + proc * mix;
+            }
+            px[3] = a * (1.0 - mix) + out_a * mix;
         }
     }
 
@@ -5142,6 +5318,34 @@ mod tests {
     }
 
     #[test]
+    fn matte_key_instantiates_and_resolves_defaults() {
+        let e = instantiate("matte_key").unwrap();
+        // The defaults visibly key a green screen (a green key + a 20 %
+        // tolerance); Spill is off so a fresh instance keys without despill.
+        assert_eq!(e.colour_at("key", 0.0), Some([0.0, 0.6, 0.0, 1.0]));
+        assert_eq!(e.float_at("tolerance", 0.0), Some(20.0));
+        assert_eq!(e.float_at("softness", 0.0), Some(10.0));
+        assert_eq!(e.float_at("spill", 0.0), Some(0.0));
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
+        assert_eq!(
+            r,
+            vec![Resolved::MatteKey {
+                key: [0.0, 0.6, 0.0, 1.0],
+                tol: 0.2,
+                soft: 0.1,
+                spill: 0.0,
+                mix: 1.0,
+            }]
+        );
+    }
+
+    #[test]
     fn exposure_instantiates_resolves_and_gains_light() {
         let e = instantiate("exposure").unwrap();
         assert_eq!(e.float_at("stops", 0.0), Some(0.0));
@@ -5563,6 +5767,61 @@ mod tests {
             assert_eq!(v[3], 1.0);
             assert_eq!(v[7], 0.5);
         }
+    }
+
+    #[test]
+    fn cpu_matte_key_behaves() {
+        let key = [0.0_f32, 0.6, 0.0, 1.0];
+
+        // A pixel exactly the key colour keys out fully (alpha → 0), and its
+        // premultiplied colour collapses with it.
+        let mut on_key = vec![0.0_f32, 0.6, 0.0, 1.0];
+        cpu::matte_key(&mut on_key, key, 0.2, 0.1, 0.0, 1.0);
+        assert_eq!(
+            on_key,
+            vec![0.0, 0.0, 0.0, 0.0],
+            "the key colour is removed"
+        );
+
+        // A half-alpha key pixel (premultiplied [0,0.3,0,0.5] = straight
+        // [0,0.6,0]) keys to nothing too — the metric works on straight colour.
+        let mut half = vec![0.0_f32, 0.3, 0.0, 0.5];
+        cpu::matte_key(&mut half, key, 0.2, 0.1, 0.0, 1.0);
+        assert_eq!(half, vec![0.0, 0.0, 0.0, 0.0], "partial-alpha key removed");
+
+        // A far-from-key colour (red) is kept exactly, with Spill off.
+        let red = vec![0.8_f32, 0.0, 0.0, 1.0];
+        let mut r = red.clone();
+        cpu::matte_key(&mut r, key, 0.2, 0.1, 0.0, 1.0);
+        assert_eq!(r, red, "far-from-key pixels are kept exactly");
+
+        // Mix 0 is the exact identity whatever the settings.
+        let mut m0 = red.clone();
+        cpu::matte_key(&mut m0, key, 0.2, 0.1, 1.0, 0.0);
+        assert_eq!(m0, red, "Mix 0 is the identity");
+
+        // Spill: a kept pixel that is grey plus a pure key-hue tint desaturates
+        // to that grey at full Spill — its chroma is entirely along the key
+        // hue, so removing it lands every channel on the pixel's own luma.
+        let mut spill = vec![0.4_f32, 0.6, 0.4, 1.0];
+        cpu::matte_key(&mut spill, key, 0.2, 0.1, 1.0, 1.0);
+        let luma = 0.4 * cpu::LUMA[0] + 0.6 * cpu::LUMA[1] + 0.4 * cpu::LUMA[2];
+        for (c, v) in spill.iter().take(3).enumerate() {
+            assert!((v - luma).abs() < 1e-4, "channel {c} despilled to luma");
+        }
+        assert_eq!(spill[3], 1.0, "a kept pixel keeps its alpha");
+
+        // The soft edge is continuous: a pixel whose chroma distance lands
+        // between tol and tol+soft keeps a partial alpha, never a hard 0 or 1
+        // — the smoothstep that keeps the effect oracle-safe (§1.6). This
+        // pixel is grey + 0.6·(key chroma), so its distance is 0.4·|key chroma|.
+        let mut edge = vec![0.2425_f32, 0.6025, 0.2425, 1.0];
+        cpu::matte_key(&mut edge, key, 0.2, 0.1, 0.0, 1.0);
+        assert!(
+            edge[3] > 0.0 && edge[3] < 1.0,
+            "soft edge keeps a partial alpha: {}",
+            edge[3]
+        );
     }
 
     #[test]

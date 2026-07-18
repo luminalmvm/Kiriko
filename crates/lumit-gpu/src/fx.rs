@@ -260,6 +260,35 @@ struct SaturationParams {
     _pad: [f32; 2],
 }
 
+/// One resolved matte key (docs/08 §3.21): a soft chroma key on straight
+/// (unpremultiplied) colour. `key` is the scene-linear RGBA key colour (alpha
+/// ignored); `tol`/`soft`/`spill` are 0..1 fractions. The kernel derives the
+/// key's chroma and hue direction from `key`, exactly as the CPU reference
+/// does, so both paths use the same numbers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MatteKeyOp {
+    /// Scene-linear RGBA key colour (alpha ignored).
+    pub key: [f32; 4],
+    /// Chroma-distance threshold, 0..1: at/below it a pixel is fully keyed.
+    pub tol: f32,
+    /// Soft-edge width above `tol`, 0..1: the smoothstep transition span.
+    pub soft: f32,
+    /// Key-hue spill removal, 0..1.
+    pub spill: f32,
+    /// 0..1, blended against the unprocessed input.
+    pub mix: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MatteKeyParams {
+    key: [f32; 4],
+    tol: f32,
+    soft: f32,
+    spill: f32,
+    mix_amt: f32,
+}
+
 /// One resolved vignette (docs/08 §3.14): darkens toward black away from
 /// the frame centre. Radius/Softness/Roundness are already-clamped
 /// fractions; the kernel derives the distance metric from its own
@@ -633,6 +662,7 @@ pub struct FxEngine {
     flash: wgpu::ComputePipeline,
     colour_balance: wgpu::ComputePipeline,
     saturation: wgpu::ComputePipeline,
+    matte_key: wgpu::ComputePipeline,
     vignette: wgpu::ComputePipeline,
     exposure: wgpu::ComputePipeline,
     temperature: wgpu::ComputePipeline,
@@ -865,6 +895,7 @@ impl FxEngine {
         let flash_mod = module(include_str!("fx_flash.wgsl"), "fx-flash");
         let balance_mod = module(include_str!("fx_colourbalance.wgsl"), "fx-colour-balance");
         let saturation_mod = module(include_str!("fx_saturation.wgsl"), "fx-saturation");
+        let matte_key_mod = module(include_str!("fx_matte_key.wgsl"), "fx-matte-key");
         let vignette_mod = module(include_str!("fx_vignette.wgsl"), "fx-vignette");
         let exposure_mod = module(include_str!("fx_exposure.wgsl"), "fx-exposure");
         let temperature_mod = module(include_str!("fx_temperature.wgsl"), "fx-temperature");
@@ -895,6 +926,7 @@ impl FxEngine {
         let flash = pipeline(&flash_mod, "fx-flash", "flash");
         let colour_balance = pipeline(&balance_mod, "fx-colour-balance", "colour_balance");
         let saturation = pipeline(&saturation_mod, "fx-saturation", "saturate_fx");
+        let matte_key = pipeline(&matte_key_mod, "fx-matte-key", "matte_key");
         let vignette = pipeline(&vignette_mod, "fx-vignette", "vignette");
         let exposure = pipeline(&exposure_mod, "fx-exposure", "exposure");
         let temperature = pipeline(&temperature_mod, "fx-temperature", "temperature");
@@ -960,6 +992,7 @@ impl FxEngine {
             flash,
             colour_balance,
             saturation,
+            matte_key,
             vignette,
             exposure,
             temperature,
@@ -1747,6 +1780,39 @@ impl FxEngine {
                 saturation: op.saturation,
                 mix_amt: op.mix,
                 _pad: [0.0; 2],
+            }),
+        );
+        out
+    }
+
+    /// Apply one matte key (docs/08 §3.21) to a linear working texture,
+    /// returning a new texture of the same size. One pointwise pass; the §2.2
+    /// unpremultiply wrap is fused into the kernel, which derives the key's
+    /// chroma/hue direction from `key` exactly as the CPU reference does. There
+    /// is no neutral short-circuit (the default keys); Mix 0 is the identity.
+    pub fn matte_key(
+        &self,
+        ctx: &GpuContext,
+        src: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        op: &MatteKeyOp,
+    ) -> wgpu::Texture {
+        let out = work_texture(ctx, w, h, "fx-matte-key-out");
+        self.dispatch(
+            ctx,
+            &self.matte_key,
+            src,
+            src,
+            &out,
+            w,
+            h,
+            bytemuck::bytes_of(&MatteKeyParams {
+                key: op.key,
+                tol: op.tol,
+                soft: op.soft,
+                spill: op.spill,
+                mix_amt: op.mix,
             }),
         );
         out
@@ -2914,6 +2980,107 @@ mod tests {
             let out2 = fx.saturation(&ctx, &tex, w, h, &op);
             let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
             assert_eq!(gpu, gpu2, "GPU saturation must be bit-stable");
+        }
+    }
+
+    /// The §1.6 oracle for matte key: a cheap pointwise chroma key, so the CPU
+    /// and GPU must agree to ≤ 2 fp16 ULP, the GPU is bit-stable (§2.4), and
+    /// Mix 0 is the bit-exact identity on both paths. The corpus mixes
+    /// near-key greens, far-from-key colours, partial-alpha (premultiplied)
+    /// pixels and an HDR spike, and the settings sweep Tolerance / Softness /
+    /// Spill so the smoothstep transition and the despill path are exercised.
+    #[test]
+    fn wgsl_matte_key_matches_the_cpu_oracle() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        // Corpus (§1.6): a green field on the left sliding to red/magenta on
+        // the right, brightness rising down the frame, alpha in bands 0.25..1
+        // so the unpremultiply round trip is load-bearing, plus an HDR
+        // partial-alpha spike.
+        let mut img = vec![0.0f32; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let fx_ = x as f32 / (w - 1) as f32;
+                let fy = y as f32 / (h - 1) as f32;
+                let r = fx_;
+                let g = (1.0 - fx_) * (0.4 + 0.6 * fy);
+                let b = 0.25 * fx_;
+                let a = 0.25 + 0.75 * fy;
+                img[i] = r * a;
+                img[i + 1] = g * a;
+                img[i + 2] = b * a;
+                img[i + 3] = a;
+            }
+        }
+        let spike = ((10 * w + 20) * 4) as usize;
+        img[spike..spike + 4].copy_from_slice(&[6.0, 3.0, 1.5, 0.5]);
+        let img: Vec<f32> = img.iter().map(|v| f16_to_f32(f16_bits(*v))).collect();
+
+        let green = [0.0f32, 0.6, 0.0, 1.0];
+        for (name, op) in [
+            (
+                "default",
+                MatteKeyOp {
+                    key: green,
+                    tol: 0.2,
+                    soft: 0.1,
+                    spill: 0.0,
+                    mix: 1.0,
+                },
+            ),
+            (
+                "wide+spill",
+                MatteKeyOp {
+                    key: green,
+                    tol: 0.35,
+                    soft: 0.2,
+                    spill: 0.5,
+                    mix: 1.0,
+                },
+            ),
+            (
+                "tight+despill",
+                MatteKeyOp {
+                    key: green,
+                    tol: 0.1,
+                    soft: 0.05,
+                    spill: 1.0,
+                    mix: 0.8,
+                },
+            ),
+            (
+                "identity_mix0",
+                MatteKeyOp {
+                    key: green,
+                    tol: 0.2,
+                    soft: 0.1,
+                    spill: 0.3,
+                    mix: 0.0,
+                },
+            ),
+        ] {
+            let mut cpu = img.clone();
+            lumit_core::fx::cpu::matte_key(&mut cpu, op.key, op.tol, op.soft, op.spill, op.mix);
+
+            let tex = upload_linear_f32(&ctx, &img, w, h);
+            let out = fx.matte_key(&ctx, &tex, w, h, &op);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+
+            let worst = worst_f16_ulp(&cpu, &gpu);
+            eprintln!("matte key {name}: worst {worst} ulp");
+            assert!(worst <= 2, "{name}: worst {worst} fp16 ULP");
+            if name == "identity_mix0" {
+                assert_eq!(gpu, img, "Mix 0 must be the bit-exact identity");
+            }
+
+            let out2 = fx.matte_key(&ctx, &tex, w, h, &op);
+            let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
+            assert_eq!(gpu, gpu2, "GPU matte key must be bit-stable");
         }
     }
 

@@ -450,6 +450,26 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   fuller version, which shifts the picture along real colour-temperature lines and adds a
   green/magenta Tint axis, is a later Tier-2 job); it is the everyday "make it feel warmer"
   control, and it animates like every other grade.
+- **Matte key — greenscreen removal.** Drop this on green-screen footage and it makes the
+  green vanish, leaving whatever was shot in front of it on a clean transparent background.
+  It works by *colour distance*: you tell it the screen colour (the **Key colour**, a green by
+  default, so it works the moment you add it), and every pixel close to that colour has its
+  transparency turned up until the screen disappears. "Close" is measured ignoring brightness,
+  so a green screen that is brighter in one corner and shadowed in another still keys as one
+  colour. Three dials tune it. **Tolerance** is how close a colour has to be to count as
+  screen — widen it if patches of green survive, narrow it if the foreground starts
+  disappearing. **Softness** is the width of the fuzzy edge between "kept" and "removed": a
+  little softness gives hair and motion-blurred edges a natural fade instead of a jagged
+  cut-out. And **Spill suppression** tackles the green *tint* that a bright screen throws onto
+  the edges of the subject — it gently drains that green back out of the kept pixels so a
+  person's shoulders don't glow green against their new background. Two design points worth
+  knowing: the removal is deliberately a *gradual fade* rather than a hard on/off switch (a
+  hard switch would make the CPU and graphics-card versions disagree by a hair, which the
+  agreement test forbids — same rule as everywhere else), and like the other colour tools it
+  works on the picture's *straight* colours, undoing the alpha pre-multiply first, so it judges
+  edge pixels by their true colour and doesn't leave a fringe. A handy follow-up, not built
+  yet, is an **eyedropper** so you can click the screen in the viewer to set the key colour
+  instead of dialling it in.
 - **LUT (K-114).** Drop this on a layer and press its **Select Cube LUT…** button to pick a
   `.cube` file — a colour recipe a colourist baked elsewhere (the loader below reads it) — and
   the whole picture is regraded through it; the **Mix** slider dials the look back toward the

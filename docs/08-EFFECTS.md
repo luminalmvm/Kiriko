@@ -127,11 +127,14 @@ Colour-manipulation effects operate on unpremultiplied colour, because grading
 premultiplied values shifts matte edges. Effects declaring `alpha mode: unpremultiplied`
 are wrapped by the host: unpremultiply → effect → re-premultiply, fused into the effect's
 first/last passes where possible. The Tier 1 effects requiring this: **the colour effects
-(Colour balance, Saturation, Contrast, Gamma), LUT, Sharpen** (edge haloes otherwise). Contrast
-and Gamma join the list because Contrast's `− pivot` offset makes it *affine* and Gamma's power
-curve is *non-linear* — neither is a pure scale, so unlike Exposure and Hue shift they do not
-commute with premultiplied alpha (§3.18, §3.19). All others consume premultiplied input directly
-(Block glitch, Scanlines and Datamosh among them — §3.12).
+(Colour balance, Saturation, Contrast, Gamma), LUT, Sharpen, Matte key** (edge haloes
+otherwise). Contrast and Gamma join the list because Contrast's `− pivot` offset makes it
+*affine* and Gamma's power curve is *non-linear* — neither is a pure scale, so unlike Exposure
+and Hue shift they do not commute with premultiplied alpha (§3.18, §3.19). Matte key joins it
+because its chroma metric and despill read straight colour: keying the premultiplied values
+would judge (and fringe) the edge pixels by their coverage rather than their true colour
+(§3.21). All others consume premultiplied input directly (Block glitch, Scanlines and Datamosh
+among them — §3.12).
 
 ### 2.3 Resolution-independent units
 
@@ -198,6 +201,7 @@ specified in §3.1's original text but surfaced as layer UI, not an effect. Summ
 | 3.18 | Contrast | stock CC pack contrast/levels | cheap | `{0}` |
 | 3.19 | Gamma | stock CC pack gamma/levels | cheap | `{0}` |
 | 3.20 | Temperature | stock CC pack white-balance | cheap | `{0}` |
+| 3.21 | Matte key | Keylight (basic) / stock chroma keyer | cheap | `{0}` |
 
 ### 3.1 Flow engine — optical-flow retime interpolation (Twixtor-class)
 
@@ -834,6 +838,46 @@ point, pinned by test); Mix 0 is likewise the identity. This is the simple monta
 warmth lever — a fixed ±0.5 R/B gain with green held — not the fuller white balance sketched
 for Tier 2 (§3.10: a Bradford-adapted CCT shift with a Tint axis); it is the common one-click
 warm/cool move, animatable like every other grade.
+
+### 3.21 Matte key — soft chroma key (greenscreen removal)
+
+Removes a chosen key colour by driving alpha down where a pixel is close to it — the montage
+greenscreen staple, and a v1 pull-forward of the colour-key portion of the Tier 2 Keying
+entry (§4). A **soft** key: continuous everywhere, so it is safe under the §1.6 ULP oracle,
+unlike a hard threshold.
+
+**Parameters:** Key colour (a colour param, scene-linear RGBA, default a green ≈ `[0, 0.6, 0]`
+— the screen to remove), Tolerance (%, default 20, how close counts as key), Softness (%,
+default 10, the soft-edge width above Tolerance), Spill suppression (%, default 0, pulls
+residual key-hue out of the kept colour), Mix.
+
+**Algorithm sketch.** Operates on **straight (unpremultiplied) colour** (`alpha mode:
+unpremultiplied`, §2.2), wrapped unpremultiply → key → re-premultiply exactly like Saturation.
+The chroma metric is **Euclidean distance in the chroma plane**: a colour's chroma is
+`rgb − luma` (Rec. 709 luma), a pure-chroma vector, so a pixel's distance from the key ignores
+brightness and greens of any exposure key alike. That distance `d` feeds a **smoothstep**
+keep-factor: `keep = smoothstep(tol, tol + soft, d)` — 0 (fully keyed, alpha `·= 0`) at
+`d ≤ tol`, 1 (fully kept) at `d ≥ tol + soft`, smooth between, so there is **no hard step**
+(a hard `step` would blow the cheap-class ULP oracle). The existing alpha is multiplied by
+`keep`. Spill suppression removes a `spill` fraction of the pixel's projection onto the key
+hue direction (`normalize(key chroma)`) from its chroma, desaturating the kept pixel toward its
+own luma along the key hue so green fringes fade; a grey key has no hue direction, so spill is
+then a no-op. `cheap` cost, `exact` ROI, `{0}` temporal. Category **Utility**, beside Transform.
+
+**Status (v1, shipped):** the chroma metric, soft key and spill model above, with the default
+green key + 20 % Tolerance visibly keying a typical green screen ("drop it on and it works",
+§1.2). The key's chroma and hue direction are derived from the resolved colour identically on
+the CPU reference and in the WGSL kernel, so both paths use the same numbers; the effect is
+continuous (a smoothstep, never a hard step), so the §1.6 oracle holds to ≤ 2 fp16 ULP over a
+corpus of near-key, far-from-key and partial-alpha pixels. There is **no neutral no-op default**
+(the effect exists to key, and the "no no-op default" rule §1.2 applies — the tasteful default
+keys); **Mix 0 is the bit-exact identity**, pinned by test. The softness width floors at a small
+epsilon so Softness 0 reads as a steep edge rather than a division by zero. **Follow-ups:** a
+viewer **eyedropper** to pick the key colour off the image (a nice UX addition, out of scope of
+the first landing); a matte-choker companion (grow/shrink/soften, the Tier 2 §4 entry); and the
+fuller keying suite (luma key, screen key) the Tier 2 Keying row still tracks. The colour param
+renders through the inspector's existing `ParamKind::Colour` arm — no inspector change was
+needed.
 
 ---
 

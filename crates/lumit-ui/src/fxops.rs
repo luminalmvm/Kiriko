@@ -239,6 +239,27 @@ pub fn run_ops(
                     },
                 );
             }
+            Resolved::MatteKey {
+                key,
+                tol,
+                soft,
+                spill,
+                mix,
+            } => {
+                tex = fx.matte_key(
+                    ctx,
+                    &tex,
+                    w,
+                    h,
+                    &lumit_gpu::fx::MatteKeyOp {
+                        key: *key,
+                        tol: *tol,
+                        soft: *soft,
+                        spill: *spill,
+                        mix: *mix,
+                    },
+                );
+            }
             Resolved::Vignette {
                 amount,
                 radius,
