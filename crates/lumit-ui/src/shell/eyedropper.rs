@@ -47,21 +47,11 @@ pub(crate) fn take_arm_request(ctx: &egui::Context) -> Option<EyedropperTarget> 
     })
 }
 
-/// Paint a small eyedropper glyph in `rect`, in `color`. Drawn by hand from
-/// theme-coloured strokes: the Iconoir set carries no dropper, and its module
-/// is owned elsewhere this cycle. No hex — the caller passes a theme colour.
+/// Paint the eyedropper glyph in `rect`, in `color` — Iconoir's `color-picker`
+/// (an eyedropper/pipette), via the shared icon painter. The colour comes from
+/// the theme.
 pub(crate) fn paint_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
-    let stroke = egui::Stroke::new(1.4_f32, color);
-    let tip = egui::pos2(rect.left() + 2.5, rect.bottom() - 2.5);
-    let neck = egui::pos2(rect.right() - 4.5, rect.top() + 4.5);
-    painter.line_segment([tip, neck], stroke);
-    // The collar (a short cross-bar across the barrel just below the bulb).
-    let along = neck - tip;
-    let perp = egui::vec2(-along.y, along.x).normalized() * 2.2;
-    painter.line_segment([neck - perp, neck + perp], stroke);
-    // The squeeze bulb, and a small drop at the tip.
-    painter.circle_filled(egui::pos2(rect.right() - 2.5, rect.top() + 2.5), 2.2, color);
-    painter.circle_filled(tip, 0.9, color);
+    crate::icons::paint(painter, rect, crate::icons::Icon::Eyedropper, color, 1.4);
 }
 
 /// The armed eyedropper's Viewer overlay: the magnifier, the region control,

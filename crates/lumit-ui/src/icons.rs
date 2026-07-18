@@ -95,11 +95,13 @@ pub enum Icon {
     Cube3d,
     /// Snapping toggle in the timeline's bottom bar: a magnet.
     Magnet,
+    /// Sample a colour from the Viewer: an eyedropper/pipette.
+    Eyedropper,
 }
 
 impl Icon {
     /// Every variant, for exhaustive iteration (tests, palettes).
-    pub const ALL: [Icon; 38] = [
+    pub const ALL: [Icon; 39] = [
         Icon::Pointer,
         Icon::Move,
         Icon::Rectangle,
@@ -138,6 +140,7 @@ impl Icon {
         Icon::Flow,
         Icon::Cube3d,
         Icon::Magnet,
+        Icon::Eyedropper,
     ];
 
     /// The Iconoir icon this variant renders.
@@ -181,6 +184,7 @@ impl Icon {
             Icon::Flow => "wind",
             Icon::Cube3d => "cube",
             Icon::Magnet => "magnet",
+            Icon::Eyedropper => "color-picker",
         }
     }
 
