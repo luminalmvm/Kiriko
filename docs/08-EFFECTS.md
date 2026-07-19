@@ -1069,9 +1069,12 @@ flow Motion blur, Datamosh) degrade to stills — the held re-render carries no 
 (only the primary source frame is snapped to the grid), the same boundary the after-effects
 matte takes (K-125); footage is held everywhere below the adjustment (so a *masked* Posterize
 reveals held footage outside the mask too, comp animation stepping only inside it — the
-full-frame adjustment being the intended global pass); and a Posterize adjustment *inside a
-collapsed* Precomp degrades to a no-op (its held draws are sized for the nested comp). `cheap`
-cost, `FullFrame` ROI, `{0}` temporal, Category **Temporal**.
+full-frame adjustment being the intended global pass); a Posterize adjustment *inside a
+collapsed* Precomp degrades to a no-op (its held draws are sized for the nested comp); and the
+footage *inside a collapsed Precomp that sits beneath* a Posterize is not guaranteed to step —
+the collapse splice keeps its inner decode live (the same reason collapsed-Precomp temporal
+effects are a follow-up), so that narrow case is a documented parity boundary rather than a
+promise. `cheap` cost, `FullFrame` ROI, `{0}` temporal, Category **Temporal**.
 
 ### 3.26 Motion blur — the expensive, correct motion blur (accumulation)
 
