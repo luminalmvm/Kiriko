@@ -67,7 +67,15 @@ pub(crate) fn bare_dropdown<R>(
     label: impl Into<egui::WidgetText>,
     add: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Option<R> {
-    ui.menu_button(label, add).inner
+    // A proper combo popup, not a menu button: two vertically-adjacent menu
+    // buttons behave like a menu bar in egui (hovering one while another is open
+    // switches to it), so moving down to pick from one dropdown opened the next
+    // row's dropdown instead (T13). A ComboBox opens an independent popup.
+    let id = ui.next_auto_id();
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label)
+        .show_ui(ui, add)
+        .inner
 }
 
 /// `HH:MM:SS:mmm` from seconds (docs: composition duration display).

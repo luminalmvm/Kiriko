@@ -177,7 +177,7 @@ parallel pass left several not-quite-right). No migration burden (pre-release).
 - [x] T10 Graph-view toggle now uses the magnet's selectable-glyph look with a 3px right inset, so it isn't clipped. (Eyeball.)
 - [ ] T11 Viewfinder still spills over the inner border; round-mode bottom bar not rounded.
 - [x] T12 Posterize now holds the carrying layer's own source (so applying it to a footage layer steps that footage); Everything-below also holds below-layers on any layer kind, not just adjustment layers. (Before, a Posterize on footage held nothing.)
-- [ ] T13 Radial blur Type combobox: moving down to pick opens the Edges menu below instead (menu overlap/UI bug).
+- [x] T13 Effect dropdowns use a real ComboBox popup, not menu_button (two adjacent menu buttons acted like a menu bar and switched on hover). Also gives an AE-like framed combo. (Eyeball the new look.)
 - [ ] T14 New x/y param type: combine Centre X/Y into one row (two float boxes + a viewfinder pixel picker like the dropper). Apply to all x/y-position params.
 - [ ] T15 Sharpen: add an adjustable kernel size.
 - [ ] T16 Vignette: add a ramp/curve control shaping the black↔nothing alpha falloff.
