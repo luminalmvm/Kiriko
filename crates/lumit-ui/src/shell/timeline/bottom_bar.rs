@@ -11,6 +11,11 @@ pub(crate) fn graph_toggle(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState,
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
     child.set_clip_rect(rect);
+    // Pack the two 28 px chips flush (each already carries its own glyph padding,
+    // and the fills shrink 1 px, so they read as a segmented pair): the toggle
+    // then fits its rect exactly instead of spilling one item-gap to the left,
+    // which is what let the left control cluster's clip be pulled in (UI-14).
+    child.spacing_mut().item_spacing.x = 0.0;
     let graph = app.timeline_graph_mode;
     if icon_button(&mut child, theme, Icon::GraphCurve, graph)
         .on_hover_text("Graph editor")
@@ -89,10 +94,13 @@ pub(crate) fn timeline_bottom_bar(
     );
 
     // Zoom controls, bottom-left of the lanes (with room for the lens toggle
-    // that joins them in graph mode).
+    // that joins them in graph mode). The right edge stops just before the view
+    // toggle's true 56 px footprint (K-070) — the old 64 px reservation held back
+    // an item-gap the toggle no longer spends, and clipped the graph-option
+    // buttons at the cluster's right (UI-14).
     let zr = egui::Rect::from_min_max(
         egui::pos2(track_left + 4.0, bar_top),
-        egui::pos2((panel_right - 64.0).max(track_left + 8.0), panel.bottom()),
+        egui::pos2((panel_right - 60.0).max(track_left + 8.0), panel.bottom()),
     );
     let mut zc = ui.new_child(
         egui::UiBuilder::new()
@@ -171,7 +179,7 @@ pub(crate) fn timeline_bottom_bar(
     // the graphed channel: a retimed layer's Speed reads source timecode and
     // per cent, a transform property reads its value and rate of change.
     if app.timeline_graph_mode {
-        zc.add_space(10.0);
+        zc.add_space(6.0);
         let x = zc.cursor().left();
         zc.painter().line_segment(
             [
@@ -180,7 +188,7 @@ pub(crate) fn timeline_bottom_bar(
             ],
             egui::Stroke::new(1.0_f32, theme.hairline_strong),
         );
-        zc.add_space(10.0);
+        zc.add_space(6.0);
         let retime = app.graph_retime;
         let (value_label, speed_label) = if retime {
             ("Time", "Velocity") // K-076: the Retime channel's lenses
@@ -219,7 +227,7 @@ pub(crate) fn timeline_bottom_bar(
         // on drops the manual range and resumes fitting. Only the value lens
         // has a manual range.
         if !app.graph_speed_view {
-            zc.add_space(10.0);
+            zc.add_space(6.0);
             if zc
                 .selectable_label(app.graph_auto_fit, "Fit")
                 .on_hover_text("Keep the curve and its handles fitted to the graph height. Click to freeze the view; scroll or zoom vertically to take over.")
@@ -244,7 +252,7 @@ pub(crate) fn timeline_bottom_bar(
         // eased. Linear is the default key; Bezier is AE's easy-ease (also F9),
         // after which the key's yellow tangent handles are draggable.
         if !retime && app.graph_prop.is_some() {
-            zc.add_space(10.0);
+            zc.add_space(6.0);
             let x = zc.cursor().left();
             zc.painter().line_segment(
                 [
@@ -253,7 +261,7 @@ pub(crate) fn timeline_bottom_bar(
                 ],
                 egui::Stroke::new(1.0_f32, theme.hairline_strong),
             );
-            zc.add_space(10.0);
+            zc.add_space(6.0);
             if zc
                 .small_button("Linear")
                 .on_hover_text("Straighten the selected keys (or all)")

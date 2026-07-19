@@ -1435,7 +1435,14 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                                 selected_prop: app.selected_prop,
                                 selected_props: app.selected_props.clone(),
                             };
-                            flow_group_rows(ui, &flow_ctx, &mut pending);
+                            let mut flow_nav_jump = None;
+                            flow_group_rows(ui, &flow_ctx, &mut pending, &mut flow_nav_jump);
+                            if let Some(kt) = flow_nav_jump {
+                                app.preview_frame =
+                                    ((kt + flow_ctx.off) * flow_ctx.fps).round().max(0.0) as usize;
+                                #[cfg(feature = "media")]
+                                app.refresh_preview();
+                            }
                         }
                     }
                 }

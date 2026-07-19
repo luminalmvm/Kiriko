@@ -1894,3 +1894,20 @@ step); when no frame is to hand — still probing, a pop-out with no texture, or
 — a neutral placeholder carrying the footage glyph stands in. Paired with the panel-wide search
 field (UI-3), which filters the tree live by name (case-insensitive substring, subtree-aware so
 the path to a hit stays visible) per the existing spec §3.1 and needs no separate decision.
+
+**K-160 · DECIDED · The Flow input rate is a keyframeable value field, not a preset
+dropdown.** From the owner (UI-11): the Flow group's **Input rate** (the conform fps of
+K-095) becomes a numeric field the user types any rate into — with the usual stopwatch and
+◄ ◆ ► keyframe navigator — replacing the Native + common-rates dropdown. It is **keyframeable
+like any other property**, so the conform rate can ramp over the clip. Storage changes cleanly
+(pre-release, no migration): `FlowParams.input_fps` moves from `Option<f64>` to an
+`anim::Property`, read at frame time through the new `FlowParams::input_fps_at(lt)`; `0` (the
+default, and any value that rounds to it) means **Native** — the source's own rate — so a
+keyframe ramp from Native to a real rate resolves without a discontinuity. A plain Native rate
+stays out of the serialised file (`skip_serializing_if`), so an un-animated Native flow clip
+writes exactly as before. The frame-cache key hashes the value the property reads at each local
+time (superseding the K-095 single hashed fps), so an animated rate keys each frame distinctly
+and preview still equals export (K-031). This supersedes the "dropdown offers Native and common
+rates" detail of K-095 (which stays otherwise intact — the conform semantics are unchanged).
+Built in an isolated worktree; not pushed — renumber on merge if another agent also claims
+K-160.

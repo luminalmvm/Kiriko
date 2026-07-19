@@ -435,7 +435,7 @@ impl Renderer<'_> {
                         matches!(interp, Some(Interpolation::Blend | Interpolation::Flow(_)));
                     let flow = matches!(interp, Some(Interpolation::Flow(_)));
                     let sample_fps = match interp {
-                        Some(Interpolation::Flow(p)) => p.input_fps,
+                        Some(Interpolation::Flow(p)) => p.input_fps_at(lt),
                         _ => None,
                     };
                     if let Some((rgba, w, h)) =
@@ -455,7 +455,7 @@ impl Renderer<'_> {
                             matches!(interp, Some(Interpolation::Blend | Interpolation::Flow(_)));
                         let flow = matches!(interp, Some(Interpolation::Flow(_)));
                         let sample_fps = match &interp {
-                            Some(Interpolation::Flow(p)) => p.input_fps,
+                            Some(Interpolation::Flow(p)) => p.input_fps_at(lt),
                             _ => None,
                         };
                         if let Some((rgba, w, h)) =
@@ -507,7 +507,7 @@ impl Renderer<'_> {
                 let pair = matches!(interp, Some(Interpolation::Blend | Interpolation::Flow(_)));
                 let flow = matches!(interp, Some(Interpolation::Flow(_)));
                 let sample_fps = match interp {
-                    Some(Interpolation::Flow(p)) => p.input_fps,
+                    Some(Interpolation::Flow(p)) => p.input_fps_at(lt),
                     _ => None,
                 };
                 self.prepare_footage(*item, source_time, pair, flow, sample_fps, &layer.masks)
@@ -524,7 +524,7 @@ impl Renderer<'_> {
                             matches!(interp, Some(Interpolation::Blend | Interpolation::Flow(_)));
                         let flow = matches!(interp, Some(Interpolation::Flow(_)));
                         let sample_fps = match &interp {
-                            Some(Interpolation::Flow(p)) => p.input_fps,
+                            Some(Interpolation::Flow(p)) => p.input_fps_at(lt),
                             _ => None,
                         };
                         self.prepare_footage(item, st, pair, flow, sample_fps, &layer.masks)

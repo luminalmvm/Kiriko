@@ -427,10 +427,15 @@ pub(crate) fn flow_control(
 
 /// The Flow group's rows (K-088): shown while the option is on, beside
 /// Transform and Effects, carrying the engine parameters.
+///
+/// `nav_jump` carries the input-rate navigator's prev/next click out as a
+/// layer-local time (the group holds no `AppState`, so the caller jumps the
+/// playhead — the same routing the effect rows use).
 pub(crate) fn flow_group_rows(
     ui: &mut egui::Ui,
     ctx: &RowCtx,
     pending: &mut Option<lumit_core::Op>,
+    nav_jump: &mut Option<f64>,
 ) {
     use lumit_core::retime::Interpolation;
     let lumit_core::model::LayerKind::Footage {
@@ -473,10 +478,24 @@ pub(crate) fn flow_group_rows(
         }
     });
 
-    // Input rate (K-095): interpret the footage as this fps for flow, so
-    // high-framerate clips (whose adjacent frames barely move) interpolate
-    // across meaningful gaps. Native = the source's own rate.
+    // Input rate (K-095, K-160): the fps the footage is interpreted at for
+    // flow, so high-framerate clips (whose adjacent frames barely move)
+    // interpolate across meaningful gaps. A keyframeable value the user types
+    // any rate into — 0 = Native (the source's own rate). Rendered like any
+    // animatable parameter: stopwatch, ◄ ◆ ► navigator, then the value field.
     let (_row, mut c) = row_frame(ui, ctx, false);
+    let prop = params.input_fps.clone();
+    let is_animated = prop.is_animated();
+
+    // Stopwatch: animate the rate at the playhead, or freeze it to its current
+    // value. One whole-retime SetLayerRetime, so each edit is one undo step.
+    if let Some(animation) = stopwatch(&mut c, ctx.theme, &prop, ctx.lt) {
+        commit_input_rate(ctx, rt, params, pending, animation);
+    }
+    // The ◄ ◆ ► navigator, once the rate is animated (the input-rate twin of
+    // the effect rows' navigator; routes prev/next out through `nav_jump`).
+    flow_input_rate_nav(&mut c, ctx, rt, params, &prop, pending, nav_jump);
+
     c.label(
         egui::RichText::new("Input rate")
             .small()
@@ -484,46 +503,158 @@ pub(crate) fn flow_group_rows(
     )
     .on_hover_text(
         "Treat the footage as this frame rate for flow — lower than the clip's own rate to \
-         flow-interpolate high-speed footage into real slow motion",
+         flow-interpolate high-speed footage into real slow motion. Type a rate, or 0 for native",
     );
-    let cur = match params.input_fps {
-        None => "Native".to_string(),
-        Some(f) => format!("{} fps", f as i64),
-    };
-    let commit = |ctx: &RowCtx,
-                  rt: &lumit_core::retime::Retime,
-                  params: &lumit_core::retime::FlowParams,
-                  pending: &mut Option<lumit_core::Op>,
-                  input_fps: Option<f64>| {
-        let mut r = rt.clone();
-        let mut p = params.clone();
-        p.input_fps = input_fps;
-        r.interpolation = Interpolation::Flow(p);
-        *pending = Some(lumit_core::Op::SetLayerRetime {
-            comp: ctx.comp_id,
-            layer: ctx.layer.id,
-            retime: Some(r),
-        });
-    };
-    bare_dropdown(&mut c, egui::RichText::new(cur).small(), |ui| {
-        if ui
-            .selectable_label(params.input_fps.is_none(), "Native")
-            .clicked()
-        {
-            commit(ctx, rt, params, pending, None);
-            ui.close_menu();
+
+    // The value field: a numeric box the user types into, 0 shown as "Native".
+    // A per-widget temp holds the in-progress edit so the box tracks the drag or
+    // typed value; release commits one SetLayerRetime, like the effect rows.
+    let committed = prop.value_at(ctx.lt);
+    let id = egui::Id::new(("flow-input-rate", ctx.layer.id));
+    let mut v = c.data(|d| d.get_temp::<f64>(id)).unwrap_or(committed);
+    let resp = c
+        .add(
+            egui::DragValue::new(&mut v)
+                .speed(0.25)
+                .range(0.0..=1000.0)
+                .max_decimals(2)
+                .custom_formatter(|n, _| {
+                    if n < 0.5 {
+                        "Native".to_owned()
+                    } else {
+                        format!("{n:.0} fps")
+                    }
+                })
+                .custom_parser(|s| {
+                    let t = s.trim();
+                    if t.is_empty() || t.eq_ignore_ascii_case("native") {
+                        return Some(0.0);
+                    }
+                    // A leading number, ignoring any trailing unit like "fps".
+                    let num: String = t
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect();
+                    num.parse::<f64>().ok()
+                }),
+        )
+        .on_hover_text("Type a frame rate, or 0 for native");
+    if resp.dragged() || resp.has_focus() {
+        c.data_mut(|d| d.insert_temp(id, v));
+    }
+    if resp.drag_stopped() || resp.lost_focus() {
+        if (v - committed).abs() > 1e-9 {
+            let animation = if is_animated {
+                lumit_core::anim::Animation::Keyframed(upsert_key(&prop, ctx.lt, v))
+            } else {
+                lumit_core::anim::Animation::Static(v)
+            };
+            commit_input_rate(ctx, rt, params, pending, animation);
         }
-        for fps in [8.0, 12.0, 15.0, 24.0, 25.0, 30.0, 60.0] {
-            let sel = params.input_fps == Some(fps);
-            if ui
-                .selectable_label(sel, format!("{} fps", fps as i64))
-                .clicked()
-            {
-                commit(ctx, rt, params, pending, Some(fps));
-                ui.close_menu();
-            }
-        }
+        c.data_mut(|d| d.remove::<f64>(id));
+    }
+}
+
+/// Write a new input-rate animation onto a Flow retime as one undoable
+/// `SetLayerRetime` (K-160). Clones the retime, swaps in the property carrying
+/// `animation`, and leaves every other Flow parameter untouched.
+fn commit_input_rate(
+    ctx: &RowCtx,
+    rt: &lumit_core::retime::Retime,
+    params: &lumit_core::retime::FlowParams,
+    pending: &mut Option<lumit_core::Op>,
+    animation: lumit_core::anim::Animation,
+) {
+    use lumit_core::retime::Interpolation;
+    let mut r = rt.clone();
+    let mut p = params.clone();
+    p.input_fps = lumit_core::anim::Property {
+        animation,
+        extra: serde_json::Map::new(),
+    };
+    r.interpolation = Interpolation::Flow(p);
+    *pending = Some(lumit_core::Op::SetLayerRetime {
+        comp: ctx.comp_id,
+        layer: ctx.layer.id,
+        retime: Some(r),
     });
+}
+
+/// The ◄ ◆ ► navigator for the animated Flow input rate — the input-rate twin
+/// of `effect_param_nav`. Shown once the rate is animated: the arrows jump the
+/// playhead to the previous / next key (routed out through `nav_jump` as a
+/// layer-local time, since `flow_group_rows` carries no `AppState`), and the
+/// diamond adds a key at the playhead or removes the one already there. Each
+/// commits one whole-retime `SetLayerRetime`, so every step is one undo.
+#[allow(clippy::too_many_arguments)]
+fn flow_input_rate_nav(
+    c: &mut egui::Ui,
+    ctx: &RowCtx,
+    rt: &lumit_core::retime::Retime,
+    params: &lumit_core::retime::FlowParams,
+    prop: &lumit_core::anim::Property,
+    pending: &mut Option<lumit_core::Op>,
+    nav_jump: &mut Option<f64>,
+) {
+    use lumit_core::anim::Animation;
+    let Animation::Keyframed(keys) = &prop.animation else {
+        return;
+    };
+    let tol = 0.5 / ctx.fps.max(1.0); // within half a frame counts as "on" it
+    let small = |i: Icon| egui::Button::new(crate::icons::text(i, 11.0)).frame(false);
+
+    let has_prev = keys.iter().any(|k| k.time.to_f64() < ctx.lt - tol);
+    if c.add_enabled(has_prev, small(Icon::PrevKeyframe))
+        .on_hover_text("Previous keyframe")
+        .clicked()
+    {
+        *nav_jump = keys
+            .iter()
+            .rev()
+            .find(|k| k.time.to_f64() < ctx.lt - tol)
+            .map(|k| k.time.to_f64());
+    }
+
+    let on_key = keys.iter().any(|k| (k.time.to_f64() - ctx.lt).abs() < tol);
+    if c.add(small(if on_key {
+        Icon::KeyframeFilled
+    } else {
+        Icon::Keyframe
+    }))
+    .on_hover_text(if on_key {
+        "Remove keyframe here"
+    } else {
+        "Add keyframe here"
+    })
+    .clicked()
+    {
+        let animation = if on_key {
+            let kept: Vec<_> = keys
+                .iter()
+                .filter(|k| (k.time.to_f64() - ctx.lt).abs() >= tol)
+                .cloned()
+                .collect();
+            if kept.is_empty() {
+                Animation::Static(prop.value_at(ctx.lt))
+            } else {
+                Animation::Keyframed(kept)
+            }
+        } else {
+            Animation::Keyframed(upsert_key(prop, ctx.lt, prop.value_at(ctx.lt)))
+        };
+        commit_input_rate(ctx, rt, params, pending, animation);
+    }
+
+    let has_next = keys.iter().any(|k| k.time.to_f64() > ctx.lt + tol);
+    if c.add_enabled(has_next, small(Icon::NextKeyframe))
+        .on_hover_text("Next keyframe")
+        .clicked()
+    {
+        *nav_jump = keys
+            .iter()
+            .find(|k| k.time.to_f64() > ctx.lt + tol)
+            .map(|k| k.time.to_f64());
+    }
 }
 
 /// Mute subcolumn (footage layers).

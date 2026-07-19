@@ -631,7 +631,10 @@ fn feed_source(
                     // A flow conform rate (K-095) synthesises from different
                     // source frames at the same source time, so it is content.
                     if let lumit_core::retime::Interpolation::Flow(p) = &r.interpolation {
-                        if let Some(fps) = p.input_fps {
+                        // The conform rate is keyframeable (K-160): hash the
+                        // value it reads at this local time, so each rate along
+                        // an animated ramp keys its own synthesised frame.
+                        if let Some(fps) = p.input_fps_at(lt) {
                             h.update(b"conform");
                             feed_f64(h, fps);
                         }
@@ -703,7 +706,9 @@ fn feed_source(
                             feed_f64(h, st);
                             if let lumit_core::retime::Interpolation::Flow(p) = &clip.interpolation
                             {
-                                if let Some(fps) = p.input_fps {
+                                // Keyframeable conform rate (K-160), read at the
+                                // clip's layer-local time like the footage case.
+                                if let Some(fps) = p.input_fps_at(lt) {
                                     h.update(b"conform");
                                     feed_f64(h, fps);
                                 }
@@ -1572,7 +1577,7 @@ mod tests {
         let half = k(&footage(Some(Interpolation::Flow(FlowParams::default()))));
         let full = k(&footage(Some(Interpolation::Flow(FlowParams {
             half_resolution: false,
-            input_fps: None,
+            input_fps: lumit_core::anim::Property::zero(),
             extra: serde_json::Map::new(),
         }))));
         assert_ne!(blend, half);
@@ -1779,7 +1784,9 @@ mod tests {
             );
             r.interpolation = Interpolation::Flow(FlowParams {
                 half_resolution: true,
-                input_fps: fps,
+                input_fps: fps
+                    .map(lumit_core::anim::Property::fixed)
+                    .unwrap_or_else(lumit_core::anim::Property::zero),
                 extra: serde_json::Map::new(),
             });
             l.kind = LayerKind::Footage {

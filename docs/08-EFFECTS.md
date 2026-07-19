@@ -231,13 +231,17 @@ group beside Transform and Effects carrying these parameters, engaging only when
 footage's rate (through any retime) undershoots the composition's — when a source frame
 would otherwise hold across two or more comp frames.
 
-**Input rate (conform, K-095).** The Flow group carries an **Input rate** control: the fps
-the clip is *interpreted* at for flow. Native (the default) interpolates between adjacent
-source frames; a rate below native conforms the clip to that rate, so flow brackets the
-source frames spaced `1/rate` apart and interpolates between those — the standard way to get
-real slow-motion out of high-framerate footage (whose adjacent frames barely move). It keys
-the frame cache (the same source time synthesises from different frames under it) and applies
-identically in preview and export.
+**Input rate (conform, K-095; keyframeable, K-160).** The Flow group carries an **Input
+rate** control: the fps the clip is *interpreted* at for flow. It is a keyframeable value the
+user types any rate into (a numeric field with the usual stopwatch and keyframe navigator,
+not a preset dropdown), so the conform rate can ramp over the clip. `0` reads as Native (the
+default) and interpolates between adjacent source frames; a positive rate below native
+conforms the clip to that rate, so flow brackets the source frames spaced `1/rate` apart and
+interpolates between those — the standard way to get real slow-motion out of high-framerate
+footage (whose adjacent frames barely move). The rate is read at frame time (`FlowParams::
+input_fps_at`) and keys the frame cache — the value it reads at each local time is hashed, so
+the same source time synthesises from different frames under it — and applies identically in
+preview and export.
 
 Not a stack effect: the flow engine is the shared module behind the **flow** frame
 interpolation mode of Retime ([04-RETIMING.md](04-RETIMING.md)) and the Motion blur effect

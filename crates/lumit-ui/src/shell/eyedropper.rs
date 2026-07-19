@@ -467,15 +467,16 @@ fn draw_magnifier(
     let panel = egui::Rect::from_min_size(min, egui::vec2(panel_w, panel_h));
 
     // Corner rounding follows the theme's card corner token: a sharp square
-    // under the Sharp shape, rounded under Round (no hardcoded shape flag).
+    // under the Sharp shape, rounded under Round (no hardcoded shape flag). The
+    // fill goes down first; the hairline border is drawn LAST, over the preview,
+    // so the zoomed pixels sit BEHIND it instead of spilling over the rounded
+    // edge (owner UI-15).
     let round = f32::from(theme.tokens.card_radius);
     painter.rect_filled(panel, round, theme.surface_3);
-    painter.rect_stroke(
-        panel,
-        round,
-        egui::Stroke::new(1.0_f32, theme.hairline_strong),
-        egui::StrokeKind::Inside,
-    );
+
+    // Everything inside the viewfinder paints through a painter clipped to just
+    // inside the border, so the preview can never cross it (owner UI-15).
+    let inner = painter.with_clip_rect(panel.shrink(1.0));
 
     let grid_min = panel.min + egui::vec2(pad, pad);
     // Round the grid's four outer corner cells to match the panel's corner (owner
@@ -507,7 +508,7 @@ fn draw_magnifier(
             if gx == N - 1 && gy == N - 1 {
                 round.se = corner;
             }
-            painter.rect_filled(cell, round, col);
+            inner.rect_filled(cell, round, col);
         }
     }
 
@@ -515,14 +516,14 @@ fn draw_magnifier(
     for k in 1..N {
         let x = grid_min.x + k as f32 * CELL;
         dotted_segment(
-            painter,
+            &inner,
             egui::pos2(x, grid_min.y),
             egui::pos2(x, grid_min.y + grid),
             theme.hairline,
         );
         let y = grid_min.y + k as f32 * CELL;
         dotted_segment(
-            painter,
+            &inner,
             egui::pos2(grid_min.x, y),
             egui::pos2(grid_min.x + grid, y),
             theme.hairline,
@@ -538,17 +539,28 @@ fn draw_magnifier(
         egui::vec2(r as f32 * CELL, r as f32 * CELL),
     );
     let cell_round = f32::from(theme.tokens.control_radius);
-    painter.rect_stroke(
+    inner.rect_stroke(
         block,
         cell_round,
         egui::Stroke::new(1.6_f32, theme.accent),
         egui::StrokeKind::Inside,
     );
 
-    // Caption: a swatch of the value that would be committed, then the size.
-    let cap_y = grid_min.y + grid + cap_h * 0.5 + 1.0;
+    // The bottom info bar: a strip under the grid carrying the swatch and the
+    // region size. It takes the card-corner token, which egui clamps to a pill at
+    // the Round radius (a rounded strip spanning the bottom) and leaves a square
+    // bar under Sharp — no hardcoded shape flag (owner UI-15).
+    let bar = egui::Rect::from_min_max(
+        egui::pos2(grid_min.x, grid_min.y + grid + pad * 0.5),
+        egui::pos2(grid_min.x + grid, panel.bottom() - pad * 0.5),
+    );
+    inner.rect_filled(bar, round, theme.surface_2);
+
+    // Caption: a swatch of the value that would be committed, then the size. It
+    // starts far enough in to clear the pill's rounded left end.
+    let cap_y = bar.center().y;
     let sw =
-        egui::Rect::from_center_size(egui::pos2(grid_min.x + 6.0, cap_y), egui::vec2(10.0, 10.0));
+        egui::Rect::from_center_size(egui::pos2(bar.left() + 10.0, cap_y), egui::vec2(10.0, 10.0));
     let swatch_col = match mode {
         crate::app_state::EyedropperMode::Colour => {
             let avg = average_colour(rgba, w, h, cx, cy, region);
@@ -565,13 +577,22 @@ fn draw_magnifier(
             crate::theme::document_colour([g, g, g, 255])
         }
     };
-    painter.rect_filled(sw, cell_round, swatch_col);
-    painter.text(
+    inner.rect_filled(sw, cell_round, swatch_col);
+    inner.text(
         egui::pos2(sw.right() + 6.0, cap_y),
         egui::Align2::LEFT_CENTER,
         format!("{r}×{r}"),
         egui::FontId::proportional(11.0),
         theme.text_secondary,
+    );
+
+    // The hairline border LAST, on top of the preview and info bar, so the
+    // zoomed pixels sit behind it at the rounded edge (owner UI-15).
+    painter.rect_stroke(
+        panel,
+        round,
+        egui::Stroke::new(1.0_f32, theme.hairline_strong),
+        egui::StrokeKind::Inside,
     );
 }
 

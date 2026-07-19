@@ -910,8 +910,10 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   time (under two thousandths of a second apart) that there's essentially no motion between
   neighbours to interpolate; flow slow-mo of it looks frozen. Input rate fixes that: tell
   flow to *treat* the clip as, say, 24fps, and it interpolates between frames a real
-  twenty-fourth of a second apart instead — actual motion, actual slow-motion. Native (the
-  default) uses the clip's own rate. It's the same "conform to N fps" idea editors know from
+  twenty-fourth of a second apart instead — actual motion, actual slow-motion. You type the
+  rate straight into the box (0 means Native — the clip's own rate), and it's keyframeable
+  like any other property: it has a stopwatch, so the conform rate can ramp over the clip if
+  you want the slow-motion to ease in. It's the same "conform to N fps" idea editors know from
   interpreting footage in other tools, and because it changes which frames get blended, it's
   folded into the picture cache's identity so you never see a frame flowed at the wrong rate.
   **This is wired up for

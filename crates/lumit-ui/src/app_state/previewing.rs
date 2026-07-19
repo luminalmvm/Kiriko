@@ -470,7 +470,7 @@ impl AppState {
                                     Some(Interpolation::Flow(p)) if !p.half_resolution
                                 );
                                 let sample_fps = match &interp {
-                                    Some(Interpolation::Flow(p)) => p.input_fps,
+                                    Some(Interpolation::Flow(p)) => p.input_fps_at(lt),
                                     _ => None,
                                 };
                                 let (source_frame, blend) = crate::pixels::frame_pick(
@@ -537,7 +537,7 @@ impl AppState {
                     let flow_full =
                         matches!(interp, Some(Interpolation::Flow(p)) if !p.half_resolution);
                     let sample_fps = match interp {
-                        Some(Interpolation::Flow(p)) => p.input_fps,
+                        Some(Interpolation::Flow(p)) => p.input_fps_at(lt),
                         _ => None,
                     };
                     let (source_frame, blend) = crate::pixels::frame_pick(

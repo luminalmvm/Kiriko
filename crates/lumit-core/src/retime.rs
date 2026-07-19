@@ -139,15 +139,21 @@ pub struct FlowParams {
     /// docs/08 §3.1 quality knob); false = full resolution.
     #[serde(default = "default_true")]
     pub half_resolution: bool,
-    /// Override rate the footage is sampled at for flow, in fps (K-095).
-    /// `None` = the source's native rate (interpolate between adjacent
-    /// source frames). `Some(r)` conforms the clip to `r` fps: flow brackets
-    /// the source frames spaced `1/r` apart and interpolates between *those*,
-    /// so high-framerate footage (whose adjacent frames are near-identical)
-    /// gets real slow-motion — the standard "interpret footage as N fps"
-    /// trick. Ignored when it is None or ≥ the native rate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_fps: Option<f64>,
+    /// The rate the footage is *interpreted* at for flow, in fps — a
+    /// keyframeable value (K-095, K-160). `0` (the default) means Native:
+    /// interpolate between adjacent source frames, unchanged behaviour. A
+    /// positive rate below the native one conforms the clip: flow brackets the
+    /// source frames spaced `1/rate` apart and interpolates between *those*, so
+    /// high-framerate footage (whose adjacent frames are near-identical) gets
+    /// real slow-motion — the standard "interpret footage as N fps" trick.
+    /// Animatable so the conform rate can ramp over the clip; read at frame
+    /// time through [`FlowParams::input_fps_at`]. Ignored when it reads Native
+    /// or a rate at/above the source's own.
+    #[serde(
+        default = "crate::anim::Property::zero",
+        skip_serializing_if = "input_fps_is_native"
+    )]
+    pub input_fps: crate::anim::Property,
     /// Unknown fields from newer Lumit versions (docs/10-FILE-FORMAT.md §1.1).
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -157,10 +163,30 @@ impl Default for FlowParams {
     fn default() -> Self {
         Self {
             half_resolution: true,
-            input_fps: None,
+            input_fps: crate::anim::Property::zero(),
             extra: serde_json::Map::new(),
         }
     }
+}
+
+impl FlowParams {
+    /// The conform rate the footage is interpreted at for flow at layer-local
+    /// time `lt`, or `None` for the source's native rate (K-095, K-160). The
+    /// rate is a keyframeable [`crate::anim::Property`]; a value below `0.5`
+    /// (i.e. one that rounds to 0 fps) reads as Native, so a keyframe ramp from
+    /// Native to a real rate resolves cleanly. Callers pass the result straight
+    /// to the frame picker, which itself ignores a rate at/above native.
+    pub fn input_fps_at(&self, lt: f64) -> Option<f64> {
+        let v = self.input_fps.value_at(lt);
+        (v >= 0.5).then_some(v)
+    }
+}
+
+/// True when a flow input rate is a plain, un-keyframed Native (0 fps): the
+/// common case, kept out of the serialised file so a Native flow clip writes
+/// exactly as it did before the rate became keyframeable.
+fn input_fps_is_native(p: &crate::anim::Property) -> bool {
+    matches!(&p.animation, crate::anim::Animation::Static(v) if *v < 0.5) && p.extra.is_empty()
 }
 
 fn default_true() -> bool {
@@ -2348,6 +2374,71 @@ mod tests {
         let json = serde_json::to_value(&r).unwrap();
         let back: Retime = serde_json::from_value(json).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn flow_input_rate_reads_native_static_and_keyframed() {
+        use crate::anim::{Animation, Keyframe, Property, SideInterp};
+        let key = |t: Rational, v: f64| Keyframe {
+            time: t,
+            value: v,
+            interp_in: SideInterp::Linear,
+            interp_out: SideInterp::Linear,
+        };
+
+        // Default is Native: no conform rate at any time (K-160).
+        let native = FlowParams::default();
+        assert_eq!(native.input_fps_at(0.0), None);
+        assert_eq!(native.input_fps_at(5.0), None);
+
+        // A static positive rate reads that same rate everywhere.
+        let fixed = FlowParams {
+            input_fps: Property::fixed(24.0),
+            ..FlowParams::default()
+        };
+        assert_eq!(fixed.input_fps_at(0.0), Some(24.0));
+        assert_eq!(fixed.input_fps_at(9.0), Some(24.0));
+
+        // A keyframed rate ramps 12 → 24 fps across [0, 2]; the frame-time read
+        // follows the animation, so the middle reads the interpolated 18 fps.
+        let ramp = FlowParams {
+            input_fps: Property {
+                animation: Animation::Keyframed(vec![key(rat(0, 1), 12.0), key(rat(2, 1), 24.0)]),
+                extra: serde_json::Map::new(),
+            },
+            ..FlowParams::default()
+        };
+        assert_eq!(ramp.input_fps_at(0.0), Some(12.0));
+        assert_eq!(ramp.input_fps_at(2.0), Some(24.0));
+        assert!((ramp.input_fps_at(1.0).unwrap() - 18.0).abs() < 1e-9);
+
+        // A key that sits exactly at 0 fps reads as Native there, then picks up
+        // the rate as the animation rises above the half-fps threshold.
+        let dip = FlowParams {
+            input_fps: Property {
+                animation: Animation::Keyframed(vec![key(rat(0, 1), 0.0), key(rat(2, 1), 24.0)]),
+                extra: serde_json::Map::new(),
+            },
+            ..FlowParams::default()
+        };
+        assert_eq!(dip.input_fps_at(0.0), None);
+        assert_eq!(dip.input_fps_at(2.0), Some(24.0));
+    }
+
+    #[test]
+    fn flow_input_rate_native_stays_out_of_the_file() {
+        // A plain Native rate serialises exactly as before it became
+        // keyframeable — no `input_fps` field in the JSON (K-160 clean storage).
+        let native = FlowParams::default();
+        let json = serde_json::to_value(&native).unwrap();
+        assert!(json.get("input_fps").is_none(), "{json}");
+        // A set rate does round-trip through the field.
+        let set = FlowParams {
+            input_fps: crate::anim::Property::fixed(12.0),
+            ..FlowParams::default()
+        };
+        let back: FlowParams = serde_json::from_value(serde_json::to_value(&set).unwrap()).unwrap();
+        assert_eq!(back, set);
     }
 
     #[test]
