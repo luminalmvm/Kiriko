@@ -156,3 +156,56 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
 - [x] **Retime "Time" keyframes drag in time in the graph editor** — the domain-start (first)
   key is pinned at 0 (retime invariant) so its edit commits instead of the rebuild returning
   None and dropping the whole edit; interior/trailing keys drag freely.
+
+---
+
+# Pass 3 — 2026-07 (main session, one at a time)
+
+Owner directive: work these in the MAIN session, one at a time, for correctness (the
+parallel pass left several not-quite-right). No migration burden (pre-release).
+
+## Testing notes (T)
+- [ ] T1 Linked value boxes still clip at the BOTTOM (vertical).
+- [ ] T2 Effect prop-name click still doesn't highlight the layer in the layer area.
+- [ ] T3 Can't shift/ctrl-click to multi-select property rows in the LAYER area (regressed/missing).
+- [ ] T4 Copying a keyframe doesn't work in GRAPH view (works in lane); paste works in both.
+- [ ] T5 Copy/paste of a bezier key: handle LENGTH must be preserved regardless of neighbour distance, except clamped to the gap when the next/prev key is closer than the handle length (value-graph semantics).
+- [ ] T6 In Effect Controls, selecting a property highlights the effect-name row, but clicking the effect name directly doesn't — fix.
+- [ ] T7 Effect Controls shift-click across effects: selecting a prop in effect A then shift-click a prop in effect B should act like ctrl (select just that new one); shift-click WITHIN the same effect acts like shift (range).
+- [ ] T8 Flow input rate still shows "Native"; should hold a float defaulting to the layer's framerate.
+- [ ] T9 Per-layer MB toggle appears to do nothing (should blur the layer's transform motion).
+- [ ] T10 Bottom-bar graph icons still ~1-2px clipped; match the magnet icon's placement.
+- [ ] T11 Viewfinder still spills over the inner border; round-mode bottom bar not rounded.
+- [ ] T12 Posterize time still does nothing at any frame rate.
+- [ ] T13 Radial blur Type combobox: moving down to pick opens the Edges menu below instead (menu overlap/UI bug).
+- [ ] T14 New x/y param type: combine Centre X/Y into one row (two float boxes + a viewfinder pixel picker like the dropper). Apply to all x/y-position params.
+- [ ] T15 Sharpen: add an adjustable kernel size.
+- [ ] T16 Vignette: add a ramp/curve control shaping the black↔nothing alpha falloff.
+- [ ] T17 RGB split: remove the Radial option (that's chromatic aberration); add the 3-colour picker from chromatic aberration.
+- [ ] T18 Shake: add its own motion-blur twirl (toggle + amount), computed from inter-frame movement, applying only to this effect.
+- [ ] T19 Datamosh: reimplement referencing https://github.com/tiberiuiancu/datamoshing; adjust params as needed.
+- [ ] T20 Flash still broken — likely because beat detection isn't working (beats grid shows nothing) with the audio.
+- [ ] T21 Mode param must have exact parity with the layer Blend dropdown (shared tool, auto-updates when blend modes change); Max becomes a normal blend mode; add an In-front to match Behind; effect-only extras (Behind/In-front) go at the TOP with a divider.
+- [ ] T22 Motion blur (accumulation) still does nothing even with Force-on-all (layer + adjustment). PROPOSAL from owner: make it a COMPOSITION option (not an effect) that forces MB on all comps/layers below per the DAG, keeping the params. (Give thoughts + do.)
+- [ ] T23 Transform anchor/position centre never happened (still 0,0; rotation pivots top-left). Use the T14 x/y tool for anchor/position.
+- [ ] T24 Add ALL After Effects blend modes (Subtract is a start).
+- [ ] T25 The top audio-preview bar doesn't move when moving an audio layer; make the bar optional (right-click to hide).
+
+## Also (A)
+- [ ] A1 Chromatic aberration: colours don't change in wavelength mode — fix (and in the updated RGB split).
+- [ ] A2 Fast motion blur: still blocky sometimes; want better sampling / a quality selector, and optionally a depth-map or motion-vector-map input to help. (3 reference shots: base, confidence, motion vectors.)
+- [ ] A3 Project tab: shift/ctrl-click to multi-select items (drag several into a comp at once).
+- [ ] A4 Lane view: dragging the selection box (marquee) over a Time keyframe still doesn't select it.
+- [ ] A5 When a layer's last keyframe is removed, the stopwatch should switch off and the ◄ ◆ ► buttons disappear.
+
+## Effect Controls layout (EC — ref screenshot 144)
+- [ ] EC1 Divider line below each property row (not header rows) to separate props/values.
+- [ ] EC2 The × (remove effect) moves to the right side of the panel.
+- [ ] EC3 Value boxes vertically aligned on the right of the panel's middle (truncate text when narrow).
+- [ ] EC4 A reset icon left of the × on the right side.
+
+## Timeline layout (TL — ref screenshot 145, AE-style columns)
+- [ ] TL1 Similar row treatment to Effect Controls (dividers, aligned values).
+- [ ] TL2 AE-style switch/column groups that move together: (1) visibility/volume-mute/solo/lock; (2) label + twirl + layer colour + number + name; (3) hide/collapse/quality(bilinear|bicubic)/fx/motion-blur/adjustment/3D; (4) blend + preserve-underlying-transparency(T) + track matte; (5) parent whip + combobox.
+- [ ] TL3 Clicking empty timeline/lane space or a comp title opens that comp's settings + "reveal in project" (currently nothing).
+- [ ] TL4 Time bar twice as tall (extra top row): current time/frame top-left, graph-view + hide-layer icons top-right (move from bottom bar), a layer search box in the middle.
