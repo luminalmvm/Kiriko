@@ -321,6 +321,37 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   §3.8, alongside the other numbers the spec didn't pin down itself (the exact ranges and
   defaults for Centre and Amount). Old projects saved before Radial existed still read as
   Gaussian, byte for byte, and Amount 0 is an exact passthrough — both pinned by tests.
+- **Blur becomes three separate effects** (the house rule: one effect, one job). Until now
+  "Blur" was a single effect with a Mode dropdown — Gaussian, Directional or Radial — and all
+  three modes' controls sat on it at once, most of them greyed-out and irrelevant depending on
+  the mode. Now there are three effects you pick from the Add-effect menu directly — **Gaussian
+  blur**, **Directional blur** and **Radial blur** — each showing only its own controls. Nothing
+  about *how* each blur looks changed: the actual blur programs and their reference twins are
+  the exact same code, only the menu and the little bit of glue that reads the controls moved.
+  A few knock-on tidyings came with the split. The old effect had one **Edges** control
+  (Transparent / Repeat / Mirror — what to pretend is beyond the frame's edge) shared by all
+  three modes; it now lives **only on Radial blur**, where a spin or zoom most often sweeps past
+  the border and you might want it to mirror or fade. Gaussian and Directional just use the old
+  default (Repeat, which keeps full-frame footage from darkening at the edges), so they look
+  identical. Directional's **Length** and Radial's **Amount** can now go past their old ceilings
+  (bigger sliders, and you can type further still) since each is its own effect and no longer
+  has to share one budget — the programs already cap how much work a huge value can ask for, so
+  there's no runaway cost. And projects saved with the old combined Blur still open fine:
+  whatever mode they were on, they come back as a Gaussian blur at the same radius (the effect
+  kept its internal name, `blur`), which is the sensible common case.
+- **Sharpen splits into "Unsharp mask" and a plain "Sharpen".** The effect that was called
+  Sharpen was, under the hood, an *unsharp mask* — the photographer's technique of blurring a
+  copy, subtracting it to find the fine detail, and adding that detail back, with knobs for how
+  wide the detail is (Radius), how strong (Amount), a Threshold to leave flat areas alone, and a
+  luminance-only option. That is still here, just honestly relabelled **Unsharp mask** (its
+  internal name is unchanged, so nothing saved breaks). Sitting beside it is now a brand-new,
+  much simpler **Sharpen**: a plain 3×3 sharpen — the classic one every image editor has — that
+  looks at each pixel and its four immediate neighbours and pushes the pixel away from their
+  average, with a single **Amount** dial for how hard (1 is the textbook strength, 0 does
+  nothing). No radius, no threshold — just "sharpen it a bit". It works on the true colour
+  (dividing out transparency first, like the other colour effects, so edges of a cut-out don't
+  fringe), and turning Amount or Mix to zero leaves the picture untouched to the last bit. As
+  always, the graphics-card version and a plain-Rust copy were checked to agree pixel-for-pixel.
 - **Flash fires on the beat.** The Flash effect's Mode switch now has three positions.
   *Manual* is exactly the old behaviour — keyframed hits with an exponential fade — and
   stays the default, so nothing saved earlier changes by a single byte. *Trigger* lights

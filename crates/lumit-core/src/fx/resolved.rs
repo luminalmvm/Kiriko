@@ -57,6 +57,19 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
+    /// Sharpen (docs/08 §3.9, K-138): a plain 3×3 high-pass convolution scaled
+    /// by `amount`, on unpremultiplied colour (§2.2), alpha untouched — the
+    /// radius-free sibling of [`Resolved::Sharpen`] (the Unsharp mask). `out =
+    /// u + amount·(4·u − up − down − left − right)` per RGB channel with
+    /// clamp-addressed neighbours, clamped ≥ 0 and re-premultiplied. `amount`
+    /// 0 (or `mix` 0) is the bit-exact passthrough.
+    SharpenSimple {
+        /// High-pass strength; 0 is the neutral point (1 = the classic 5/−1
+        /// kernel).
+        amount: f32,
+        /// 0..1.
+        mix: f32,
+    },
     RgbSplit {
         /// Peak channel offset in raster pixels.
         amount_px: f32,
@@ -467,46 +480,52 @@ fn resolve_one(
 ) -> Option<Resolved> {
     match e.effect.match_name.as_str() {
         "blur" => {
+            // Gaussian blur (docs/08 §3.8, K-137). match_name "blur" is kept,
+            // so a project saved with the old mode-driven blur — whatever mode
+            // it stored — loads here as Gaussian at its Radius, byte-identically
+            // (its now-unread mode/length/centre params are simply ignored).
+            // Fixed Repeat edge (K-137 dropped the Gaussian Edges control; 1 was
+            // its default).
+            let radius_pct = e.float_at("radius", lt)? as f32;
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Blur {
+                radius_px: (radius_pct / 100.0 * diag_px).max(0.0),
+                edge: 1,
+                mix,
+            })
+        }
+        "directional_blur" => {
+            // Directional blur (docs/08 §3.8, K-137): Length/Angle only, fixed
+            // Repeat edge (the Edges control is Radial's alone now).
+            let length_pct = e.float_at("length", lt).unwrap_or(0.0) as f32;
+            let angle_deg = e.float_at("angle", lt).unwrap_or(0.0) as f32;
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::DirBlur {
+                length_px: (length_pct / 100.0 * diag_px).max(0.0),
+                angle_deg,
+                edge: 1,
+                mix,
+            })
+        }
+        "radial_blur" => {
+            // Radial blur (docs/08 §3.8, K-137): Centre/Amount/Type, plus the
+            // family's own Edges control (kept only here).
+            let cx = (e.float_at("centre_x", lt).unwrap_or(50.0) / 100.0) as f32;
+            let cy = (e.float_at("centre_y", lt).unwrap_or(50.0) / 100.0) as f32;
+            let amount_pct = e.float_at("amount", lt).unwrap_or(0.0) as f32;
+            let spin = !matches!(e.param("radial_type"), Some(EffectValue::Choice(1)));
             let edge = match e.param("edge") {
                 Some(EffectValue::Choice(c)) => (*c).min(2),
                 _ => 1,
             };
             let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-            // Instances saved before a mode existed carry no "mode"
-            // parameter and resolve as Gaussian.
-            let mode = match e.param("mode") {
-                Some(EffectValue::Choice(c)) => *c,
-                _ => 0,
-            };
-            if mode == 1 {
-                let length_pct = e.float_at("length", lt).unwrap_or(0.0) as f32;
-                let angle_deg = e.float_at("angle", lt).unwrap_or(0.0) as f32;
-                Some(Resolved::DirBlur {
-                    length_px: (length_pct / 100.0 * diag_px).max(0.0),
-                    angle_deg,
-                    edge,
-                    mix,
-                })
-            } else if mode == 2 {
-                let cx = (e.float_at("centre_x", lt).unwrap_or(50.0) / 100.0) as f32;
-                let cy = (e.float_at("centre_y", lt).unwrap_or(50.0) / 100.0) as f32;
-                let amount_pct = e.float_at("amount", lt).unwrap_or(0.0) as f32;
-                let spin = !matches!(e.param("radial_type"), Some(EffectValue::Choice(1)));
-                Some(Resolved::RadialBlur {
-                    centre_frac: [cx, cy],
-                    amount_px: (amount_pct / 100.0 * diag_px).max(0.0),
-                    spin,
-                    edge,
-                    mix,
-                })
-            } else {
-                let radius_pct = e.float_at("radius", lt)? as f32;
-                Some(Resolved::Blur {
-                    radius_px: (radius_pct / 100.0 * diag_px).max(0.0),
-                    edge,
-                    mix,
-                })
-            }
+            Some(Resolved::RadialBlur {
+                centre_frac: [cx, cy],
+                amount_px: (amount_pct / 100.0 * diag_px).max(0.0),
+                spin,
+                edge,
+                mix,
+            })
         }
         "sharpen" => {
             let amount = (e.float_at("amount", lt)? as f32 / 100.0).clamp(0.0, 3.0);
@@ -524,6 +543,13 @@ fn resolve_one(
                 luma_only,
                 mix,
             })
+        }
+        "sharpen_simple" => {
+            // The plain 3×3 sharpen (docs/08 §3.9, K-138): Amount is a raw
+            // high-pass strength (not a per-cent), clamped ≥ 0.
+            let amount = (e.float_at("amount", lt)? as f32).max(0.0);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::SharpenSimple { amount, mix })
         }
         "rgb_split" => {
             let amount_pct = e.float_at("amount", lt)? as f32;

@@ -31,6 +31,7 @@ pub fn apply(rgba: &mut [f32], w: u32, h: u32, fx: &Resolved) {
         } => sharpen(
             rgba, w, h, *amount, *radius_px, *threshold, *luma_only, *mix,
         ),
+        Resolved::SharpenSimple { amount, mix } => sharpen_simple(rgba, w, h, *amount, *mix),
         Resolved::RgbSplit {
             amount_px,
             angle_deg,
@@ -1010,6 +1011,48 @@ pub fn sharpen(
             rgba[i + c] = o[c] * (1.0 - mix) + s * mix;
         }
         rgba[i + 3] = o[3];
+    }
+}
+
+/// Sharpen (docs/08 §3.9, K-138): the plain, radius-free sibling of the
+/// [`sharpen`] Unsharp mask — a fixed 3×3 high-pass convolution scaled by
+/// `amount`, in linear light on unpremultiplied colour (§2.2). For each pixel
+/// `out.rgb = u + amount · (4·u − up − down − left − right)`, where `u` and
+/// its four axis neighbours are the unpremultiplied colours; the neighbours
+/// clamp to the edge pixel, so a border never invents dark detail. Undershoot
+/// clamps at zero (no negative light), the result is re-premultiplied by the
+/// centre alpha, and alpha passes through. `amount == 0.0` short-circuits to
+/// the bit-exact input (the `× (1 − mix) + · × mix` blend, and the
+/// unpremultiply → re-premultiply round trip, cannot both be relied on to be
+/// bit-exact, so the neutral case returns early — the WGSL twin matches with
+/// its own early store). Mix 0 is likewise the identity.
+pub fn sharpen_simple(rgba: &mut [f32], w: u32, h: u32, amount: f32, mix: f32) {
+    if amount == 0.0 {
+        return; // neutral: bit-exact identity (the WGSL twin matches)
+    }
+    let original = rgba.to_vec();
+    let (wi, hi) = (w as i64, h as i64);
+    // Unpremultiplied colour at a clamp-addressed integer pixel.
+    let at = |x: i64, y: i64| -> [f32; 3] {
+        let s = ((y.clamp(0, hi - 1) * wi + x.clamp(0, wi - 1)) * 4) as usize;
+        unpremult(&original[s..s + 4])
+    };
+    for y in 0..hi {
+        for x in 0..wi {
+            let i = ((y * wi + x) * 4) as usize;
+            let a = original[i + 3];
+            let c = at(x, y);
+            let up = at(x, y - 1);
+            let down = at(x, y + 1);
+            let left = at(x - 1, y);
+            let right = at(x + 1, y);
+            for ch in 0..3 {
+                let hp = 4.0 * c[ch] - up[ch] - down[ch] - left[ch] - right[ch];
+                let sharpened = (c[ch] + amount * hp).max(0.0) * a;
+                rgba[i + ch] = original[i + ch] * (1.0 - mix) + sharpened * mix;
+            }
+            rgba[i + 3] = original[i + 3];
+        }
     }
 }
 

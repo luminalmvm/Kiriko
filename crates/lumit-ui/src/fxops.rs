@@ -203,6 +203,18 @@ pub fn run_ops(
                     },
                 );
             }
+            Resolved::SharpenSimple { amount, mix } => {
+                tex = fx.sharpen_simple(
+                    ctx,
+                    &tex,
+                    w,
+                    h,
+                    &lumit_gpu::fx::SharpenSimpleOp {
+                        amount: *amount,
+                        mix: *mix,
+                    },
+                );
+            }
             Resolved::RgbSplit {
                 amount_px,
                 angle_deg,

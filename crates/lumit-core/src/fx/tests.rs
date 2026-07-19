@@ -155,13 +155,21 @@ fn posterize_resolves_to_no_op() {
 
 #[test]
 fn instantiate_carries_declared_defaults() {
+    // Gaussian blur (match_name "blur", K-137): Radius + Mix only, no Edges
+    // control (that stayed on Radial alone).
     let e = instantiate("blur").unwrap();
     assert_eq!(e.effect.match_name, "blur");
     assert_eq!(e.effect.version, 1);
     assert!(e.enabled);
     assert_eq!(e.float_at("radius", 0.0), Some(1.5));
     assert_eq!(e.float_at("mix", 0.0), Some(100.0));
-    assert!(matches!(e.param("edge"), Some(EffectValue::Choice(1))));
+    assert!(
+        e.param("edge").is_none(),
+        "Gaussian dropped the Edges control"
+    );
+    // Radial blur keeps the Edges control, defaulting to Repeat (1).
+    let radial = instantiate("radial_blur").unwrap();
+    assert!(matches!(radial.param("edge"), Some(EffectValue::Choice(1))));
     assert!(instantiate("nonsense").is_none());
 }
 
@@ -1833,14 +1841,16 @@ fn cpu_matte_key_behaves() {
 }
 
 #[test]
-fn blur_mode_resolves_gaussian_directional_and_legacy() {
-    // A fresh instance defaults to Gaussian and resolves exactly as the
-    // pre-mode blur did.
-    let mut e = instantiate("blur").unwrap();
-    assert!(matches!(e.param("mode"), Some(EffectValue::Choice(0))));
-    assert_eq!(e.float_at("length", 0.0), Some(10.0));
+fn blur_family_split_resolves_each_effect_and_loads_legacy_as_gaussian() {
+    // K-137: the old mode-driven blur is now three single-purpose effects.
+    // Gaussian (match_name "blur") resolves at its Radius, fixed Repeat edge.
+    let gaussian = instantiate("blur").unwrap();
+    assert!(
+        gaussian.param("mode").is_none(),
+        "the mode control is gone (K-137)"
+    );
     let r = resolve_stack(
-        std::slice::from_ref(&e),
+        std::slice::from_ref(&gaussian),
         0.0,
         1000.0,
         1.0,
@@ -1849,20 +1859,17 @@ fn blur_mode_resolves_gaussian_directional_and_legacy() {
     assert_eq!(
         r,
         vec![Resolved::Blur {
-            radius_px: 15.0,
+            radius_px: 15.0, // 1.5% of a 1000px diagonal
             edge: 1,
             mix: 1.0
         }]
     );
 
-    // Directional mode reads Length/Angle instead (10% of 1000 = 100px).
-    for p in &mut e.params {
-        if p.id == "mode" {
-            p.value = EffectValue::Choice(1);
-        }
-    }
+    // Directional blur reads Length/Angle (10% of 1000 = 100px), fixed Repeat.
+    let dir = instantiate("directional_blur").unwrap();
+    assert_eq!(dir.float_at("length", 0.0), Some(10.0));
     let r = resolve_stack(
-        std::slice::from_ref(&e),
+        std::slice::from_ref(&dir),
         0.0,
         1000.0,
         1.0,
@@ -1878,21 +1885,20 @@ fn blur_mode_resolves_gaussian_directional_and_legacy() {
         }]
     );
 
-    // Radial mode reads Centre/Amount/Type instead: Centre resolves to
-    // a *fraction* (30/70%, unconverted — resolve_stack has no width/
-    // height to scale it by), Amount 8% of 1000 = 80px, Type defaults
-    // to Spin.
-    for p in &mut e.params {
+    // Radial blur reads Centre/Amount/Type/Edges: Centre resolves to a
+    // *fraction* (30/70%, unconverted — resolve_stack has no width/height to
+    // scale it by), Amount 8% of 1000 = 80px, Type defaults to Spin, Edges
+    // to Repeat.
+    let mut radial = instantiate("radial_blur").unwrap();
+    for p in &mut radial.params {
         match p.id.as_str() {
-            "mode" => p.value = EffectValue::Choice(2),
             "centre_x" => p.value = EffectValue::Float(Property::fixed(30.0)),
             "centre_y" => p.value = EffectValue::Float(Property::fixed(70.0)),
-            "amount" => p.value = EffectValue::Float(Property::fixed(8.0)),
             _ => {}
         }
     }
     let r = resolve_stack(
-        std::slice::from_ref(&e),
+        std::slice::from_ref(&radial),
         0.0,
         1000.0,
         1.0,
@@ -1909,33 +1915,118 @@ fn blur_mode_resolves_gaussian_directional_and_legacy() {
         }]
     );
 
-    // The Type choice flips Spin/Zoom.
-    for p in &mut e.params {
-        if p.id == "radial_type" {
-            p.value = EffectValue::Choice(1);
+    // The Type choice flips Spin/Zoom; Edges is honoured (Mirror = 2).
+    for p in &mut radial.params {
+        match p.id.as_str() {
+            "radial_type" => p.value = EffectValue::Choice(1),
+            "edge" => p.value = EffectValue::Choice(2),
+            _ => {}
         }
     }
     let r = resolve_stack(
-        std::slice::from_ref(&e),
+        std::slice::from_ref(&radial),
         0.0,
         1000.0,
         1.0,
         &MarkerContext::NONE,
     );
-    assert!(matches!(r[..], [Resolved::RadialBlur { spin: false, .. }]));
+    assert!(matches!(
+        r[..],
+        [Resolved::RadialBlur {
+            spin: false,
+            edge: 2,
+            ..
+        }]
+    ));
 
-    // A legacy instance (saved before the mode existed) has no mode
-    // parameter and still resolves as Gaussian.
-    e.params
-        .retain(|p| !matches!(p.id.as_str(), "mode" | "length" | "angle"));
+    // A project saved with the old combined blur (a "blur" instance carrying
+    // mode/length/angle/edge) loads as Gaussian at its Radius — the leftover
+    // params are simply ignored (K-137's "existing projects load as Gaussian").
+    let mut legacy = instantiate("blur").unwrap();
+    legacy.params.push(crate::model::EffectParam {
+        id: "mode".into(),
+        value: EffectValue::Choice(2), // was Radial
+        extra: serde_json::Map::new(),
+    });
+    legacy.params.push(crate::model::EffectParam {
+        id: "edge".into(),
+        value: EffectValue::Choice(0),
+        extra: serde_json::Map::new(),
+    });
     let r = resolve_stack(
-        std::slice::from_ref(&e),
+        std::slice::from_ref(&legacy),
         0.0,
         1000.0,
         1.0,
         &MarkerContext::NONE,
     );
-    assert!(matches!(r[..], [Resolved::Blur { .. }]));
+    assert_eq!(
+        r,
+        vec![Resolved::Blur {
+            radius_px: 15.0,
+            edge: 1, // fixed Repeat, not the stored edge
+            mix: 1.0
+        }]
+    );
+}
+
+#[test]
+fn sharpen_simple_instantiates_and_resolves() {
+    // K-138: the plain 3×3 sharpen (match_name "sharpen_simple"), separate
+    // from the Unsharp mask ("sharpen").
+    let e = instantiate("sharpen_simple").unwrap();
+    assert_eq!(e.effect.match_name, "sharpen_simple");
+    assert_eq!(e.float_at("amount", 0.0), Some(1.0));
+    assert_eq!(e.float_at("mix", 0.0), Some(100.0));
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::SharpenSimple {
+            amount: 1.0,
+            mix: 1.0
+        }]
+    );
+
+    // The Unsharp mask keeps its own match_name and resolves as before.
+    let unsharp = instantiate("sharpen").unwrap();
+    assert_eq!(unsharp.effect.match_name, "sharpen");
+    assert!(matches!(
+        resolve_stack(&[unsharp], 0.0, 1000.0, 1.0, &MarkerContext::NONE)[..],
+        [Resolved::Sharpen { .. }]
+    ));
+}
+
+#[test]
+fn cpu_sharpen_simple_identity_edge_overshoot_and_alpha() {
+    let (w, h) = (16u32, 8u32);
+    let img = step_image(w, h);
+
+    // Amount 0 is the bit-exact identity, whatever the Mix.
+    let mut a0 = img.clone();
+    cpu::sharpen_simple(&mut a0, w, h, 0.0, 1.0);
+    assert_eq!(a0, img);
+
+    // Mix 0 is the exact identity, whatever the Amount.
+    let mut m0 = img.clone();
+    cpu::sharpen_simple(&mut m0, w, h, 2.0, 0.0);
+    assert_eq!(m0, img);
+
+    // A flat region is untouched (the high-pass of constant colour is zero);
+    // the step edge overshoots both ways.
+    let mut s = img.clone();
+    cpu::sharpen_simple(&mut s, w, h, 1.0, 1.0);
+    let px = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+    let far = px(1, 4);
+    assert!((s[far] - img[far]).abs() < 1e-5, "flat area stays put");
+    let dark_side = px(w / 2 - 1, 4);
+    let bright_side = px(w / 2, 4);
+    assert!(s[dark_side] < img[dark_side], "dark side of edge dips");
+    assert!(s[bright_side] > img[bright_side], "bright side lifts");
+
+    // Fully transparent input stays fully transparent (no invented light).
+    let mut clear = vec![0.0f32; (w * h * 4) as usize];
+    cpu::sharpen_simple(&mut clear, w, h, 3.0, 1.0);
+    assert!(clear.iter().all(|v| *v == 0.0));
 }
 
 #[test]

@@ -193,6 +193,10 @@ impl FxEngine {
         let dir_blur_mod = module(include_str!("../fx_dirblur.wgsl"), "fx-dir-blur");
         let radial_blur_mod = module(include_str!("../fx_radialblur.wgsl"), "fx-radial-blur");
         let sharpen_mod = module(include_str!("../fx_sharpen.wgsl"), "fx-sharpen");
+        let sharpen_simple_mod = module(
+            include_str!("../fx_sharpen_simple.wgsl"),
+            "fx-sharpen-simple",
+        );
         let rgb_split_mod = module(include_str!("../fx_rgbsplit.wgsl"), "fx-rgb-split");
         let spectral_mod = module(include_str!("../fx_spectral.wgsl"), "fx-spectral-split");
         let chromatic_mod = module(
@@ -229,6 +233,7 @@ impl FxEngine {
         let radial_blur = pipeline(&radial_blur_mod, "fx-radial-blur", "radial_blur");
         let sharpen_unpremultiply = pipeline(&sharpen_mod, "fx-sharpen-un", "unpremultiply");
         let sharpen_combine = pipeline(&sharpen_mod, "fx-sharpen", "sharpen_combine");
+        let sharpen_simple = pipeline(&sharpen_simple_mod, "fx-sharpen-simple", "sharpen_simple");
         let rgb_split = pipeline(&rgb_split_mod, "fx-rgb-split", "rgb_split");
         let spectral_split = pipeline(&spectral_mod, "fx-spectral-split", "spectral_split");
         let chromatic_aberration = pipeline(
@@ -311,6 +316,7 @@ impl FxEngine {
             radial_blur,
             sharpen_unpremultiply,
             sharpen_combine,
+            sharpen_simple,
             rgb_split,
             spectral_split,
             chromatic_aberration,

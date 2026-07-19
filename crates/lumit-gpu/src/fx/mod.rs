@@ -38,6 +38,10 @@ pub struct FxEngine {
     radial_blur: wgpu::ComputePipeline,
     sharpen_unpremultiply: wgpu::ComputePipeline,
     sharpen_combine: wgpu::ComputePipeline,
+    /// Plain 3×3 sharpen (docs/08 §3.9, K-138): a single-pass high-pass
+    /// convolution, the radius-free sibling of the Unsharp mask's two-entry
+    /// kernel above.
+    sharpen_simple: wgpu::ComputePipeline,
     rgb_split: wgpu::ComputePipeline,
     spectral_split: wgpu::ComputePipeline,
     chromatic_aberration: wgpu::ComputePipeline,

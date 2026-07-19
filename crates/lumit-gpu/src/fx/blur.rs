@@ -118,6 +118,25 @@ struct SharpenParams {
     mix_amt: f32,
 }
 
+/// One resolved simple 3×3 sharpen (docs/08 §3.9, K-138): a high-pass
+/// convolution scaled by `amount`, the radius-free sibling of the Unsharp
+/// mask above. Amount 0 is the bit-exact passthrough.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SharpenSimpleOp {
+    /// High-pass strength (1 = the classic 5/−1 kernel); 0 is a passthrough.
+    pub amount: f32,
+    /// 0..1, blended against the unprocessed input.
+    pub mix: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SharpenSimpleParams {
+    amount: f32,
+    mix_amt: f32,
+    _pad: [f32; 2],
+}
+
 /// One resolved glow (docs/08 §3.3, v1 core): bright-pass with a soft knee,
 /// the shared gaussian on the leftover light, additive recombine. The
 /// radius is already in raster pixels; intensity 0 is the neutral point
@@ -332,6 +351,38 @@ impl FxEngine {
             w,
             h,
             bytemuck::bytes_of(&params),
+        );
+        out
+    }
+
+    /// Apply one simple 3×3 sharpen (docs/08 §3.9, K-138) to a linear working
+    /// texture, returning a new texture of the same size. One pass: the
+    /// high-pass convolution over the pixel and its four clamp-addressed axis
+    /// neighbours, the §2.2 unpremultiply wrap fused into the kernel. Amount 0
+    /// is the bit-exact passthrough (the kernel short-circuits, matching the
+    /// CPU reference); Mix 0 is the identity.
+    pub fn sharpen_simple(
+        &self,
+        ctx: &GpuContext,
+        src: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        op: &SharpenSimpleOp,
+    ) -> wgpu::Texture {
+        let out = work_texture(ctx, w, h, "fx-sharpen-simple-out");
+        self.dispatch(
+            ctx,
+            &self.sharpen_simple,
+            src,
+            src,
+            &out,
+            w,
+            h,
+            bytemuck::bytes_of(&SharpenSimpleParams {
+                amount: op.amount,
+                mix_amt: op.mix,
+                _pad: [0.0; 2],
+            }),
         );
         out
     }

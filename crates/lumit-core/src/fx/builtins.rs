@@ -22,61 +22,38 @@ const MIX_PARAM: ParamSchema = ParamSchema {
 /// The catalogue. Grows one entry per landed effect; the schema is the single
 /// source of truth the UI menu, instantiation and resolution all read.
 pub const BUILTINS: &[EffectSchema] = &[
-    // One blur, three modes (docs/08 §3.8): Gaussian (separable two-pass),
-    // Directional (line-integral streak along an angle) and Radial (arcs or
-    // rays about a centre). Mode selects which extra parameters matter —
-    // Radius drives Gaussian, Length/Angle drive Directional, Centre/
-    // Amount/Type drive Radial. Instances saved before a mode existed
-    // resolve as Gaussian, and each mode's maths are untouched by the
-    // others (same kernel per mode, same version).
+    // The blur family, three single-purpose effects (docs/08 §3.8, K-137):
+    // Gaussian (separable two-pass), Directional (a line-integral streak
+    // along an angle) and Radial (arcs or rays about a centre). This was one
+    // mode-driven "Blur" effect until K-137 split it, one job per effect
+    // (K-090): each keeps its own maths, kernel and version unchanged — only
+    // the schema (and the resolve arms that read it) changed. Gaussian keeps
+    // match_name "blur", so a project saved with the old combined effect
+    // loads as Gaussian (whatever mode it stored), byte-identically at its
+    // Radius. Directional and Radial are new match names, reached from the
+    // Add-effect menu.
     //
-    // Status (Radial, shipped): the spec text (§3.8) names Centre, Amount
-    // and Type without giving ranges — pinned here. Centre is Centre X /
-    // Centre Y, two Float params in % of comp width/height (50/50 default):
-    // the schema has no Point-shaped ParamKind (checked — Transform's own
-    // Anchor/Position use the identical anchor_x/anchor_y split, so this
-    // follows established precedent rather than adding a new kind). Amount
-    // is % diag (default 8, slider 0–20, hard 0–100), matching the Radius/
-    // Length unit family so all three modes read in the same currency —
-    // it is the peak per-pixel tap spread, reached at the frame's farthest
-    // corner (half the comp diagonal from Centre). Type is Spin / Zoom.
-    // Both modes reduce to a pure linear scale of the pixel's own
-    // (position − centre) vector — Zoom along that vector (an exact ray
-    // sample), Spin along its perpendicular (the first-order/tangent
-    // approximation to the true arc about Centre) — so neither needs a
-    // division or a runtime trig call: no host trig table was needed
-    // either, since the only scale factor (amount ÷ half diagonal) is a
-    // plain division done once, not per pixel. The approximation is exact
-    // for Zoom and holds closely for Spin across the shipped Amount range
-    // (worst-case sweep well under a radian); it also means every tap
-    // vanishes to zero exactly at Centre with no epsilon guard. The shared
-    // Edge parameter (Transparent/Repeat/Mirror) applies unchanged — taps
-    // run through the same bilinear_edge every mode already uses, so
-    // Radial clamps/mirrors/clears at the frame border exactly like
-    // Gaussian and Directional.
+    // Edges: the old effect carried one shared Transparent/Repeat/Mirror
+    // control across every mode; K-137 keeps it only on Radial (the mode
+    // whose sweep most often wants Mirror or Transparent). Gaussian and
+    // Directional resolve at the old default, Repeat (full-frame game
+    // footage never darkens along the border), so their look is unchanged.
     EffectSchema {
         match_name: "blur",
-        label: "Blur",
+        label: "Gaussian blur",
         version: 1,
         category: FxCategory::BlurSharpen,
         traits: EffectTraits {
             cost: CostClass::Moderate,
-            // The largest slider across modes (Directional length, 50).
-            roi: Roi::PaddedPctDiag(50.0),
+            // The Radius slider's own maximum (its own effect now, no longer
+            // sharing the family's largest reach).
+            roi: Roi::PaddedPctDiag(25.0),
             temporal: &[0],
             premultiplied: true,
             seeded: false,
             beat_input: false,
         },
         params: &[
-            ParamSchema {
-                id: "mode",
-                label: "Mode",
-                kind: ParamKind::Choice {
-                    options: &["Gaussian", "Directional", "Radial"],
-                    default: 0,
-                },
-            },
             ParamSchema {
                 id: "radius",
                 label: "Radius",
@@ -88,34 +65,101 @@ pub const BUILTINS: &[EffectSchema] = &[
                     hard: (Some(0.0), Some(100.0)),
                 },
             },
+            MIX_PARAM,
+        ],
+    },
+    // Directional blur (docs/08 §3.8, K-137): a line-integral streak along
+    // an angle. Full streak Length in % diag and the streak Angle. Length
+    // may exceed 100 % of the diagonal now it is its own effect (slider to
+    // 200, hard-unbounded above per K-090); the kernel's tap count still
+    // clamps (cpu::dir_blur_taps), so a long streak stays bounded in cost.
+    // Repeat-edged (see the family note above). ROI is full-frame: an
+    // unbounded Length cannot be padded statically.
+    EffectSchema {
+        match_name: "directional_blur",
+        label: "Directional blur",
+        version: 1,
+        category: FxCategory::BlurSharpen,
+        traits: EffectTraits {
+            cost: CostClass::Moderate,
+            roi: Roi::FullFrame,
+            temporal: &[0],
+            premultiplied: true,
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
             ParamSchema {
                 id: "length",
                 label: "Length",
-                // Directional mode: the full streak length, % diag (§2.3).
+                // The full streak length, % diag (§2.3). Unbounded above
+                // (K-090); the slider reaches 200 and typing goes further.
                 kind: ParamKind::Float {
                     default: 10.0,
-                    slider: (0.0, 50.0),
-                    hard: (Some(0.0), Some(100.0)),
+                    slider: (0.0, 200.0),
+                    hard: (Some(0.0), None),
                 },
             },
             ParamSchema {
                 id: "angle",
                 label: "Angle",
-                // Directional mode: streak direction, degrees (0° = +x).
+                // Streak direction, degrees (0° = +x).
                 kind: ParamKind::Float {
                     default: 0.0,
                     slider: (-180.0, 180.0),
                     hard: (Some(-3600.0), Some(3600.0)),
                 },
             },
+            MIX_PARAM,
+        ],
+    },
+    // Radial blur (docs/08 §3.8, K-137): arcs (Spin) or rays (Zoom) about a
+    // centre. Amount is the peak per-pixel tap spread in % diag, reached at
+    // the frame's farthest corner from Centre; it may exceed 100 now it is
+    // its own effect (slider to 100, hard-unbounded per K-090; the tap count
+    // clamps in cpu::radial_blur_taps, so cost stays bounded). Centre is
+    // Centre X / Centre Y, two Float params in % of comp width/height (the
+    // schema has no Point-shaped ParamKind — Transform's Anchor/Position use
+    // the same split). Type is Spin / Zoom; both reduce to one linear scale
+    // of the pixel's own (position − centre) vector — Zoom along it (an exact
+    // ray sample), Spin along its perpendicular (the tangent approximation to
+    // the true arc) — so neither needs a division or a runtime trig call, and
+    // every tap collapses to exactly the pixel at Centre with no epsilon
+    // guard. This is the one blur to keep the shared Edges control
+    // (Transparent/Repeat/Mirror); its taps run through the same
+    // bilinear_edge sampler the others use.
+    EffectSchema {
+        match_name: "radial_blur",
+        label: "Radial blur",
+        version: 1,
+        category: FxCategory::BlurSharpen,
+        traits: EffectTraits {
+            cost: CostClass::Moderate,
+            roi: Roi::FullFrame,
+            temporal: &[0],
+            premultiplied: true,
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "amount",
+                label: "Amount",
+                // Peak tap spread, % diag (§2.3), reached at the farthest
+                // corner from Centre. Unbounded above (K-090).
+                kind: ParamKind::Float {
+                    default: 8.0,
+                    slider: (0.0, 100.0),
+                    hard: (Some(0.0), None),
+                },
+            },
             ParamSchema {
                 id: "centre_x",
                 label: "Centre X",
-                // Radial mode: % of comp width. resolve_stack only carries
-                // diag_px (no separate width/height), so this resolves to a
-                // *fraction* of the raster and the CPU/GPU function scales
-                // it by its own w — exactly how RGB split's radial mode
-                // already derives the frame centre from w/h it already has.
+                // % of comp width. resolve_stack only carries diag_px (no
+                // separate width/height), so this resolves to a *fraction* of
+                // the raster and the CPU/GPU function scales it by its own w —
+                // exactly how RGB split's radial mode derives the frame centre.
                 kind: ParamKind::Float {
                     default: 50.0,
                     slider: (0.0, 100.0),
@@ -125,23 +169,11 @@ pub const BUILTINS: &[EffectSchema] = &[
             ParamSchema {
                 id: "centre_y",
                 label: "Centre Y",
-                // Radial mode: % of comp height (see centre_x).
+                // % of comp height (see centre_x).
                 kind: ParamKind::Float {
                     default: 50.0,
                     slider: (0.0, 100.0),
                     hard: (None, None),
-                },
-            },
-            ParamSchema {
-                id: "amount",
-                label: "Amount",
-                // Radial mode: peak tap spread, % diag (§2.3), reached at
-                // the farthest corner from Centre — the same currency as
-                // Radius/Length above.
-                kind: ParamKind::Float {
-                    default: 8.0,
-                    slider: (0.0, 20.0),
-                    hard: (Some(0.0), Some(100.0)),
                 },
             },
             ParamSchema {
@@ -166,9 +198,11 @@ pub const BUILTINS: &[EffectSchema] = &[
     // Unsharp mask in linear light (docs/08 §3.9), on unpremultiplied colour
     // (§2.2: sharpening premultiplied values haloes matte edges). The
     // unpremultiply → sharpen → re-premultiply wrap is fused into the kernel.
+    // Labelled "Unsharp mask" since K-138 split the plain 3×3 Sharpen out
+    // below; the match_name stays "sharpen" so saved projects are unchanged.
     EffectSchema {
         match_name: "sharpen",
-        label: "Sharpen",
+        label: "Unsharp mask",
         version: 1,
         category: FxCategory::BlurSharpen,
         traits: EffectTraits {
@@ -218,6 +252,46 @@ pub const BUILTINS: &[EffectSchema] = &[
                 // Sharpen the luma signal only — avoids chroma fringing on
                 // compressed game capture (§3.9).
                 kind: ParamKind::Bool { default: true },
+            },
+            MIX_PARAM,
+        ],
+    },
+    // Sharpen (docs/08 §3.9, K-138): the plain, radius-free sibling of the
+    // Unsharp mask above — a fixed 3×3 high-pass convolution scaled by Amount,
+    // `out = u + amount·(4·u − up − down − left − right)` per RGB channel with
+    // clamp-addressed neighbours. On unpremultiplied colour (§2.2, the wrap
+    // fused into the kernel), alpha untouched; the neighbours read the edge
+    // pixel (clamp/Repeat) so a border never invents dark detail. Amount 0 is
+    // the bit-exact passthrough (pinned by test). One job, cheap, one pixel of
+    // reach — the honest "just sharpen it" control next to the Unsharp mask's
+    // radius/threshold/luma knobs.
+    EffectSchema {
+        match_name: "sharpen_simple",
+        label: "Sharpen",
+        version: 1,
+        category: FxCategory::BlurSharpen,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            // A fixed 3×3 kernel reads one pixel out; % diag of one raster
+            // pixel is tiny, so 1 % over-covers at any sensible resolution.
+            roi: Roi::PaddedPctDiag(1.0),
+            temporal: &[0],
+            premultiplied: false, // §2.2: sharpening premultiplied haloes matte edges
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "amount",
+                label: "Amount",
+                // High-pass strength: 1 is the classic 5/−1 sharpen kernel, 0
+                // a no-op. Clamped at zero below (a negative amount would
+                // blur, out of scope), unbounded above (K-090).
+                kind: ParamKind::Float {
+                    default: 1.0,
+                    slider: (0.0, 5.0),
+                    hard: (Some(0.0), None),
+                },
             },
             MIX_PARAM,
         ],

@@ -1419,3 +1419,36 @@ no-op (its sampled draws are sized for the nested comp); it takes precedence ove
 an adjustment somehow carries both; sub-frame sample-count reduction under draft/scrub is a
 tracked follow-up (full N always on export). Concurrent-worktree risk: another agent may also
 claim K-134 — renumber on merge if so. Built in an isolated worktree; not pushed.
+
+**K-137 · DECIDED · The Blur effect splits into three: Gaussian, Directional, Radial.** Applies
+K-090's "one effect, one job" to the blur family: the single mode-driven "Blur" effect (a Mode
+dropdown selecting Gaussian / Directional / Radial, with every mode's parameters present at
+once) becomes three separate effects in the **Blur & sharpen** category — **Gaussian blur**,
+**Directional blur** and **Radial blur**. The maths, WGSL kernels and CPU oracles are untouched
+(the `Resolved::Blur` / `DirBlur` / `RadialBlur` variants and their `blur` / `dir_blur` /
+`radial_blur` kernels stand); only the schema and the resolve arms that read it changed.
+Consequences: **Gaussian keeps match_name `blur`**, so a project saved with the old combined
+effect loads as Gaussian at its stored Radius (whatever Mode it saved — the now-unread
+mode/length/centre params are ignored); Directional (`directional_blur`) and Radial
+(`radial_blur`) are new match names. The Mode parameter is gone. **Length** (Directional) and
+**Amount** (Radial) become **hard-unbounded above** (sliders to 200 and 100 respectively) now
+each is its own effect rather than sharing the family's reach — cost stays bounded because the
+tap counts clamp (`cpu::dir_blur_taps` / `radial_blur_taps`). The shared **Edges** control
+(Transparent / Repeat / Mirror) is kept **only on Radial**; Gaussian and Directional resolve at
+the old default, Repeat, so their look is byte-unchanged. Add-effect menu, command palette and
+preset paths are all BUILTINS-driven, so the three appear automatically. Spec:
+[08-EFFECTS.md](08-EFFECTS.md) §3.8. Built in an isolated worktree; not pushed.
+
+**K-138 · DECIDED · The Sharpen effect is really an unsharp mask; a plain Sharpen joins it.**
+The v1 "Sharpen" effect (§3.9) was an unsharp mask (gaussian-based detail lift with Radius /
+Threshold / luminance-only). K-138 renames its **label** to **Unsharp mask** — match_name stays
+`sharpen`, so saved projects are unchanged — and adds a separate, single-purpose **Sharpen**
+(match_name `sharpen_simple`): a fixed 3×3 high-pass convolution scaled by one **Amount**
+(`out = u + amount·(4·u − up − down − left − right)` per RGB channel, clamp-addressed
+neighbours), on unpremultiplied colour (§2.2), alpha kept. Amount 0 (whatever the Mix) and Mix 0
+are the bit-exact passthrough (the kernel and CPU reference both short-circuit). Full 4-site
+build: schema (`builtins.rs`), `Resolved::SharpenSimple` + resolve arm (`resolved.rs`), CPU
+reference `cpu::sharpen_simple` (the oracle), the `fx_sharpen_simple.wgsl` kernel dispatched
+from `run_ops`, and the `wgsl_sharpen_simple_matches_the_cpu_oracle` parity test (cheap class,
+≤ 2 fp16 ULP). Both effects sit in **Blur & sharpen**. Spec: [08-EFFECTS.md](08-EFFECTS.md)
+§3.9. Built in an isolated worktree; not pushed.

@@ -172,6 +172,51 @@ fn wgsl_sharpen_matches_the_cpu_oracle() {
     }
 }
 
+/// The §1.6 oracle for the plain 3×3 sharpen (docs/08 §3.9, K-138): a cheap
+/// kernel reading only the pixel and its four integer neighbours directly
+/// (no intermediate fp16 texture, unlike the Unsharp mask's internal
+/// gaussian), so the CPU and GPU must agree to ≤ 2 fp16 ULP and the GPU is
+/// bit-stable (§2.4). Amount 0 (whatever the Mix) and Mix 0 are the bit-exact
+/// passthrough on both paths. The corpus carries partial-alpha pixels — the
+/// convolution runs on unpremultiplied colour (§2.2), so the premultiply
+/// round trip is load-bearing.
+#[test]
+fn wgsl_sharpen_simple_matches_the_cpu_oracle() {
+    let Ok(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping WGSL parity test");
+        return;
+    };
+    let fx = FxEngine::new(&ctx);
+    let (w, h) = (32u32, 24u32);
+    let img = corpus_with_partials(w, h);
+    for (name, amount, mix) in [
+        ("classic", 1.0f32, 1.0f32),
+        ("strong", 3.0, 1.0),
+        ("mixed", 2.0, 0.6),
+        ("amount-zero", 0.0, 1.0),
+        ("mix-zero", 2.5, 0.0),
+    ] {
+        let mut cpu = img.clone();
+        lumit_core::fx::cpu::sharpen_simple(&mut cpu, w, h, amount, mix);
+
+        let tex = upload_linear_f32(&ctx, &img, w, h);
+        let op = SharpenSimpleOp { amount, mix };
+        let out = fx.sharpen_simple(&ctx, &tex, w, h, &op);
+        let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+
+        let worst = worst_f16_ulp(&cpu, &gpu);
+        eprintln!("sharpen_simple {name}: worst {worst} ulp");
+        assert!(worst <= 2, "{name}: worst {worst} fp16 ULP");
+        if name == "amount-zero" || name == "mix-zero" {
+            assert_eq!(gpu, img, "{name}: must be the bit-exact passthrough");
+        }
+
+        let out2 = fx.sharpen_simple(&ctx, &tex, w, h, &op);
+        let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
+        assert_eq!(gpu, gpu2, "GPU sharpen_simple must be bit-stable");
+    }
+}
+
 /// The §1.6 oracle for RGB split: a cheap pointwise effect, so the CPU
 /// and GPU must agree to ≤ 2 fp16 ULP, and the GPU is bit-stable (§2.4).
 #[test]

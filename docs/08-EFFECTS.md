@@ -194,8 +194,8 @@ specified in §3.1's original text but surfaced as layer UI, not an effect. Summ
 | 3.5 | Transform | AE's Transform effect | trivial | `{0}` |
 | 3.6 | RGB split | stock CC pack fillers | cheap | `{0}` |
 | 3.7 | Flash | strobe presets | trivial | `{0}` |
-| 3.8 | Blur (gaussian / directional / radial) | stock AE trio | moderate | `{0}` |
-| 3.9 | Sharpen | stock | cheap | `{0}` |
+| 3.8 | Gaussian blur / Directional blur / Radial blur | stock AE trio | moderate | `{0}` |
+| 3.9 | Unsharp mask, Sharpen | stock | cheap | `{0}` |
 | 3.10 | Colour balance, Saturation + preset browser | Magic Bullet Looks | cheap | `{0}` |
 | 3.11 | LUT | stock + Looks | trivial | `{0}` |
 | 3.12 | Block glitch | Universe / glitch packs | cheap | `{0}` |
@@ -469,50 +469,66 @@ sub-param (Add / Screen / Solid) is deferred — the kernel keeps its current
 blend-toward-colour compositing — and Intensity stays the shipped percentage scale on
 the envelope. Shipped parameters are stable when these follow.
 
-### 3.8 Blur — gaussian, directional, radial
+### 3.8 Blur — Gaussian, Directional, Radial (three effects)
 
-One effect, three modes (shared parameters where sensible, per-mode extras):
+**Three single-purpose effects (K-137).** This began as one mode-driven "Blur" effect;
+K-137 split it into **Gaussian blur**, **Directional blur** and **Radial blur** — one job per
+effect (K-090), each in the **Blur & sharpen** category. The maths, kernels and CPU oracles
+are unchanged by the split; only the schema and the resolve arms that read it changed. All
+three are premultiplied (blurring unpremultiplied colour bleeds haloes) and declare `per-tile`
+cancellation.
 
-- **Gaussian:** Radius (0–25 % diag). Separable two-pass; large radii switch to
-  mip-assisted sampling. ROI `padded(radius)`.
-- **Directional:** Length (0–50 % diag), Angle. Line-integral sampling along the angle.
-- **Radial:** Centre, Amount, Type (Spin / Zoom). Sampling along arcs (spin) or rays
-  (zoom), strength growing from centre.
+- **Gaussian blur** (match_name `blur`): Radius (% diag, default 1.5, slider 0–25, hard
+  0–100). Separable two-pass; large radii switch to mip-assisted sampling. ROI
+  `padded(radius)`. **Keeps match_name `blur`, so a project saved with the old combined effect
+  loads here as Gaussian at its stored Radius, byte-identically** — whatever mode it had saved,
+  its now-unread mode/length/centre parameters are simply ignored.
+- **Directional blur** (match_name `directional_blur`): Length (% diag, default 10, slider
+  0–200, **hard-unbounded above** per K-090) and Angle. Line-integral sampling along the
+  angle. Length may now exceed 100 % of the diagonal, since it is its own effect rather than
+  sharing the family's reach; the tap count still clamps (`cpu::dir_blur_taps`), so a long
+  streak stays bounded in cost. ROI `full-frame` (an unbounded Length cannot be padded
+  statically).
+- **Radial blur** (match_name `radial_blur`): Centre X / Centre Y (% of comp width/height,
+  50/50 default — the schema has no Point-shaped `ParamKind`, so this follows Transform's own
+  `anchor_x`/`anchor_y` split), Amount (% diag, default 8, slider 0–100, hard-unbounded above),
+  Type (Spin / Zoom, default Spin) and **Edges** (Transparent / Repeat / Mirror). Amount is the
+  peak per-pixel tap spread, reached at the frame's farthest corner from Centre, and may exceed
+  100 % now it is its own effect (the tap count clamps in `cpu::radial_blur_taps`). Both types
+  reduce to one linear scale of the pixel's own (position − centre) vector — Zoom along that
+  vector (an exact ray sample), Spin along its perpendicular (the first-order/tangent
+  approximation to the true arc about Centre) — so neither needs a division or a runtime trig
+  call: the one scale factor (Amount ÷ half the raster diagonal) is a plain host-side division,
+  not a per-pixel or per-tap one, and every tap collapses to exactly the pixel itself at Centre
+  with no epsilon guard. The tangent approximation is exact for Zoom and close for Spin across
+  the useful Amount range; the oracle holds to ≤ 2 fp16 ULP (measured worst 1 ULP). Amount 0 is
+  a bit-exact passthrough (pinned by test, mirroring Directional's zero-length case).
 
-All premultiplied (blurring unpremultiplied colour bleeds haloes); all declare `per-tile`
-cancellation. Repeat-edge policy parameter (Transparent / Repeat / Mirror).
+**Edges (K-137).** The old effect carried one shared Transparent / Repeat / Mirror control
+across every mode. The split keeps that control **only on Radial** (the sweep most often wants
+Mirror or Transparent); **Gaussian and Directional resolve at the old default, Repeat**
+(full-frame game footage never darkens along the border), so their look is unchanged. Radial's
+taps run through the same edge-policy bilinear sampler the others use, so it clamps, mirrors or
+clears exactly like them.
 
-**Status (Radial, shipped):** this text names Centre, Amount and Type without giving ranges
-or a parameter shape, unlike Gaussian's and Directional's explicit ones above — pinned here.
-Centre is **Centre X** / **Centre Y**, two Float parameters in % of comp width/height
-(50/50 default): the schema has no Point-shaped `ParamKind` (checked — Transform's own
-Anchor and Position use the identical `anchor_x`/`anchor_y` split for the same reason), so
-this follows that established precedent rather than adding a new kind. **Amount** is % diag
-(default 8, slider 0–25, hard 0–100 per K-090), the same currency as Radius and Length, so
-all three modes read in one unit family; it is the peak per-pixel tap spread, reached at the
-frame's farthest corner from Centre. **Type** is Spin / Zoom, default Spin. Both types reduce
-to one linear scale of the pixel's own (position − centre) vector — Zoom along that vector
-(an exact ray sample), Spin along its perpendicular (the first-order/tangent approximation to
-the true arc about Centre) — so neither needs a division or a runtime trig call: the one scale
-factor (Amount ÷ half the raster diagonal) is a plain host-side division, not a per-pixel or
-per-tap one, and every tap collapses to exactly the pixel itself at Centre with no epsilon
-guard. The tangent approximation is exact for Zoom and close for Spin across the shipped
-Amount range (the worst-case sweep stays well under a radian); the oracle held to the same
-≤ 2 fp16 ULP bound as Gaussian and Directional (measured worst: 1 ULP) rather than needing the
-looser "moderate" allowance, confirming the trig-free design was worth it. The shared Edge
-parameter (Transparent / Repeat / Mirror) applies unchanged — Radial's taps run through the
-same edge-policy bilinear sampler the other two modes already use, so it clamps, mirrors or
-clears at the frame border exactly like them; no radial-specific edge behaviour was needed.
-Instances saved before Radial existed carry none of these parameters and resolve as Gaussian,
-byte-identically (the existing legacy-fallback pattern); Amount 0 is a bit-exact passthrough
-(pinned by test, mirroring Directional's own zero-length case).
+### 3.9 Sharpen — Unsharp mask and plain Sharpen (two effects)
 
-### 3.9 Sharpen
+**Two effects (K-138).** The original §3.9 effect was really an unsharp mask; K-138 renamed
+its **label** to **Unsharp mask** (match_name stays `sharpen`, so saved projects are
+unchanged) and added a separate plain **Sharpen**. Both are in the **Blur & sharpen** category
+and run in linear light on unpremultiplied colour (§2.2).
 
-Unsharp mask in linear light on unpremultiplied colour: Amount (0–300%), Radius
-(0.05–2 % diag), Threshold (0–1, suppresses noise amplification). Algorithm: `input +
-amount · (input − gaussian(input, radius))` gated by threshold. A luminance-only option
-avoids chroma fringing on compressed game capture.
+- **Unsharp mask** (match_name `sharpen`): Amount (0–300 %), Radius (0.05–2 % diag), Threshold
+  (0–1, suppresses noise amplification), and a luminance-only option (avoids chroma fringing on
+  compressed game capture). Algorithm: `input + amount · (input − gaussian(input, radius))`
+  gated by threshold — a radius-controlled detail lift.
+- **Sharpen** (match_name `sharpen_simple`, K-138): the plain, radius-free sibling — a fixed
+  3×3 high-pass convolution scaled by **Amount** (default 1 = the classic 5/−1 kernel, slider
+  0–5, hard-clamped ≥ 0). `out = u + amount · (4·u − up − down − left − right)` per RGB channel,
+  with the four axis neighbours clamp-addressed (so a border never invents dark detail); the
+  result clamps ≥ 0, re-premultiplies by the centre alpha, and keeps alpha. Amount 0 (whatever
+  the Mix) and Mix 0 are the bit-exact passthrough. Cheap, one pixel of reach; the honest "just
+  sharpen it" control beside the Unsharp mask's knobs.
 
 ### 3.10 The colour effects — Colour balance, Saturation, and the preset browser (Magic Bullet-class)
 
