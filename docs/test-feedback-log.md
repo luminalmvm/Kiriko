@@ -66,9 +66,9 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
 
 ## Effects
 
-- [ ] **FX-1** Posterize time doesn't work (5 fps in a 24 fps comp looked normal). Also its
-  scope should be: only this layer's own effects, or the default (everything below in the
-  stack).
+- [x] **FX-1** Posterize time fixed: the decode planner still chose the frame-time source, so
+  footage-only motion never stepped; now `posterize_sample_times` snaps the decode/sample time
+  per scope (this-layer vs everything-below). Preview == export.
 - [x] **FX-2** Split Blur into three effects — **Gaussian** (Radius), **Directional**
   (Length, Angle), **Radial** (Amount, Centre X/Y, Type = Spin/Zoom, Edges). Directional
   length and radial amount should exceed 100. — done (K-137): three separate effects; old
@@ -98,12 +98,13 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
 - [x] **FX-16** Glow (K-135): default threshold 0.8, knee label → Softness, radius px 0..inf.
 - [ ] **FX-17** Echo: default mode Screen (needs adding), add the other blend modes, allow
   more than 8 echoes.
-- [ ] **FX-18** Accumulation motion blur → rename to **Motion Blur**; add the option to
-  force the flow settings on all layers at export time (without changing them in the comp);
-  currently appears to do nothing — fix.
-- [ ] **FX-19** Motion blur → rename **Fast Motion Blur**. Fix the blocky/cut-out
-  artefacts: scale blur by confidence rather than gating, or drop confidence entirely. Add
-  a debug view property: rendered output / motion vectors / per-pixel confidence.
+- [x] **FX-18** (K-139) Renamed **Motion blur**; added **Force on all layers** (forces per-layer
+  transform MB on every layer during the sample renders, comp unmutated). Note: it blurs
+  transform-animated motion; footage-playback motion is held by design (adjustment-scope), which
+  is why it read as "nothing" on a footage-only test.
+- [x] **FX-19** (K-140) Renamed **Fast motion blur**; blocky seams fixed by scaling each streak
+  by a smooth forward/backward-consistency confidence (no hard gate); added a **View** enum
+  (Rendered / Motion vectors / Confidence).
 - [ ] **FX-20** Transform: default anchor X/Y (and position) to the layer's centre, varying
   by the layer it's applied to — not 0,0.
 - [ ] **FX-21** Matte effect: extra controls per Screenshot_136 (Keylight-style keyer —
