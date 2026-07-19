@@ -43,9 +43,9 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
 - [ ] **UI-8** Graph view scroll also scrolls the layer area, and the scrollbar sits in the
   graph view. Move the scrollbar back to the right of the layer area so both scroll
   independently. (Layer view scroll is already correct.)
-- [ ] **UI-9** Dropper tool cursor should be the dropper the whole time the tool is active
-  (currently only over the viewfinder). The magnifier preview appearing only over the
-  viewfinder is correct.
+- [x] **UI-9** Dropper cursor now shows whenever the tool is armed (painted on a foreground
+  layer at the pointer, OS cursor hidden), not just over the image; magnifier stays
+  viewfinder-only. (Please eyeball the cursor across panels.)
 - [ ] **UI-10** "Save stack as preset" should save only the effects/keyframes the user has
   highlighted: all non-keyframed values as set, plus exactly the selected keyframes from
   the selected effects — nothing unselected.

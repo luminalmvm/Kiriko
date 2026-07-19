@@ -176,22 +176,21 @@ pub(crate) fn viewer_overlay(
         return;
     }
 
-    if over_image {
-        // Show a dropper cursor over the Viewer so the tool reads as active
-        // (owner request): hide the OS pointer and draw the eyedropper glyph with
-        // its tip at the sample point. egui has no dropper CursorIcon, so this is
-        // the closest to a real dropper cursor.
-        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+    // Show a dropper cursor the whole time the tool is armed, anywhere on screen
+    // (owner request UI-9: it used to appear only over the image). Hide the OS
+    // pointer and paint the eyedropper glyph, tip at the sample point, on a
+    // foreground layer so it reads over any panel — while the magnifier below
+    // stays viewfinder-only. egui has no dropper CursorIcon, so this stands in.
+    ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+    {
         let g = 18.0;
         let icon_rect =
             egui::Rect::from_min_size(cursor + egui::vec2(-1.0, 1.0 - g), egui::vec2(g, g));
-        crate::icons::paint(
-            ui.painter(),
-            icon_rect,
-            crate::icons::Icon::Eyedropper,
-            theme.accent,
-            1.4,
-        );
+        let fg = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("eyedropper-cursor"),
+        ));
+        crate::icons::paint(&fg, icon_rect, crate::icons::Icon::Eyedropper, theme.accent, 1.4);
     }
 
     let region = app.eyedropper_region;
