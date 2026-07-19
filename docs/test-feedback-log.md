@@ -40,7 +40,7 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
   (Shift now toggles like Ctrl); the drag-marquee deselect path still to do.
 - [ ] **UI-6** Layer area: selecting a property *name* (Transform, an effect, …) should
   support multi-select, so a user can key several at the same point at once.
-- [ ] **UI-7** Copy/paste keyframes doesn't work — fix.
+- [x] **UI-7** Copy/paste keyframes fixed: egui-winit emits Copy/Paste events (not Key C/V), so the old shortcut watch never fired; now reads the events. (Nuance: needs non-empty OS clipboard, which self-heals on first copy.)
 - [ ] **UI-8** Graph view scroll also scrolls the layer area, and the scrollbar sits in the
   graph view. Move the scrollbar back to the right of the layer area so both scroll
   independently. (Layer view scroll is already correct.)
@@ -52,8 +52,9 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
   the selected effects — nothing unselected.
 - [ ] **UI-11** Flow input rate: make it a textbox the user types into (not a dropdown),
   and keyframeable like any other property.
-- [ ] **UI-12** Per-layer motion-blur toggle not visible — space seems reserved on the
-  right of the layer area but the toggle isn't drawing.
+- [x] **UI-12** Per-layer motion-blur toggle now drawn: it was only ever in the right-click
+  menu, never the switch row. Shows as an "MB" text switch (no motion-blur glyph exists) in the
+  far-right slot; flips `switches.motion_blur`.
 - [x] **UI-13** Importing footage should auto-highlight it in the Project tab and switch to
   that tab if not already there. — done: import selects the new item and raises the Project
   tab (`focus_project_tab` flag consumed by the shell).
