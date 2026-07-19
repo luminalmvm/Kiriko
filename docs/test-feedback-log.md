@@ -207,5 +207,5 @@ parallel pass left several not-quite-right). No migration burden (pre-release).
 ## Timeline layout (TL — ref screenshot 145, AE-style columns)
 - [ ] TL1 Similar row treatment to Effect Controls (dividers, aligned values).
 - [ ] TL2 AE-style switch/column groups that move together: (1) visibility/volume-mute/solo/lock; (2) label + twirl + layer colour + number + name; (3) hide/collapse/quality(bilinear|bicubic)/fx/motion-blur/adjustment/3D; (4) blend + preserve-underlying-transparency(T) + track matte; (5) parent whip + combobox.
-- [ ] TL3 Clicking empty timeline/lane space or a comp title opens that comp's settings + "reveal in project" (currently nothing).
+- [~] TL3 Clicking empty timeline space now reveals the comp in the Project panel (selects it as the project item); a right-click there gives "Composition settings…" and "Reveal in project" (focuses the project tab). (Kept the settings behind a right-click rather than firing a dialog on every deselect-click; comp-title click still TODO.)
 - [ ] TL4 Time bar twice as tall (extra top row): current time/frame top-left, graph-view + hide-layer icons top-right (move from bottom bar), a layer search box in the middle.

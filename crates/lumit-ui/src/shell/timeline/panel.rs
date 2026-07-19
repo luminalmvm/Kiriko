@@ -376,6 +376,35 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                 );
                 if bg.clicked() {
                     app.lane_selection.clear();
+                    // Reveal this comp in the Project panel (TL3): a click on
+                    // empty timeline space deselects the keys and makes the comp
+                    // the selected project item, so its header shows and it
+                    // highlights in the tree.
+                    app.selected_item = Some(comp_id);
+                    app.selected_items.clear();
+                }
+                // Right-click empty space: the comp's settings, or reveal +
+                // focus it in the Project panel (TL3). Deferred via flags so the
+                // menu closure never double-borrows `app`.
+                let mut open_settings = false;
+                let mut reveal = false;
+                bg.context_menu(|ui| {
+                    if ui.button("Composition settings\u{2026}").clicked() {
+                        open_settings = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Reveal in project").clicked() {
+                        reveal = true;
+                        ui.close_menu();
+                    }
+                });
+                if open_settings {
+                    app.open_comp_settings(comp_id);
+                }
+                if reveal {
+                    app.selected_item = Some(comp_id);
+                    app.selected_items.clear();
+                    app.focus_project_tab = true;
                 }
                 if bg.drag_started() {
                     if let Some(p) = bg.interact_pointer_pos() {
