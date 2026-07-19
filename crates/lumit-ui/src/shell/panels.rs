@@ -877,7 +877,11 @@ pub(crate) fn accept_item_drop(ui: &egui::Ui, theme: &Theme, app: &mut AppState,
         Some(_) if !has_comp => {
             app.error = Some("create a composition first".into());
         }
-        Some(_) => app.add_item_to_comp(item),
+        Some(_) => {
+            // Dragging one of a multi-selection brings the whole set in (A3).
+            let items = app.drag_expansion(item);
+            app.add_items_to_comp(&items);
+        }
     }
 }
 
@@ -1027,12 +1031,8 @@ pub(crate) fn comp_tab_strip(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
         } else {
             // Dragging one of a multi-selection brings the whole set in at once
             // (A3); dragging an unselected item brings just it.
-            let sel = app.project_selection();
-            if sel.len() > 1 && sel.contains(&dropped) {
-                app.add_items_to_comp(&sel);
-            } else {
-                app.add_item_to_comp(dropped); // footage/solid → into the active comp
-            }
+            let items = app.drag_expansion(dropped);
+            app.add_items_to_comp(&items);
         }
     }
 }

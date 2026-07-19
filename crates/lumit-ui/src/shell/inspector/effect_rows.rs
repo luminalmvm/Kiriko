@@ -491,6 +491,12 @@ pub(crate) fn effects_rows(
     let mut fx_reorder_release: Option<(usize, f32)> = None;
     for (idx, e) in layer.effects.iter().enumerate() {
         let schema = fx::schema(&e.effect.match_name);
+        // Whether this effect's params are twirled open (owner): collapsed by
+        // default in the timeline, open by default in the Effect Controls panel.
+        let open_id = ui.id().with(("fx-open", layer.id, e.id));
+        let mut fx_open = ui
+            .data(|d| d.get_temp::<bool>(open_id))
+            .unwrap_or(ctx.effects_toolbar);
         // Title row: bypass, name (dimmed when bypassed), remove — sitting in a
         // subtle full-width bar so each effect's start is obvious (Mack). The name
         // is a drag handle: dragging it up or down reorders the stack (one
@@ -508,6 +514,15 @@ pub(crate) fn effects_rows(
             let (row_rect, mut c) = row_frame(ui, ctx, false);
             section_bar(ui, ctx, row_rect, title_hl);
             fx_title_rows.push(row_rect);
+            // Disclosure twirl (owner): each effect's params tuck behind its
+            // title.
+            let (tri_rect, tri_resp) =
+                c.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+            crate::icons::disclosure(c.painter(), tri_rect, fx_open, ctx.theme.text_muted);
+            if tri_resp.clicked() {
+                fx_open = !fx_open;
+                ui.data_mut(|d| d.insert_temp(open_id, fx_open));
+            }
             // The per-effect visibility toggle (K-090 confirmation of §1.5): the
             // same eye as layer visibility, and it swaps to a closed eye when the
             // effect is bypassed — the state-matching-icon parity a toggleable eye
@@ -603,8 +618,12 @@ pub(crate) fn effects_rows(
                 }
             });
         }
-        // One row per parameter, driven by the schema.
+        // One row per parameter, driven by the schema — only when the effect's
+        // twirl is open (owner).
         let Some(schema) = schema else { continue };
+        if !fx_open {
+            continue;
+        }
         // Collapsible parameter groups (P4, K-145): a group's params render
         // under a disclosure twirl and hide when it is closed. Members are a
         // contiguous run in the schema, so tracking the current group as the
@@ -1011,6 +1030,8 @@ pub(crate) fn effects_rows(
                         .and_then(|p| std::path::Path::new(p).file_name())
                         .and_then(|n| n.to_str())
                         .unwrap_or("No file");
+                    // Value cluster on the shared column (owner EC3).
+                    snap_to_value_column(&mut c);
                     c.label(
                         egui::RichText::new(shown)
                             .small()
@@ -1049,6 +1070,8 @@ pub(crate) fn effects_rows(
                     let cur_name = (*cur)
                         .and_then(|id| ctx.comp.layers.iter().find(|l| l.id == id))
                         .map_or("None", |l| l.name.as_str());
+                    // Value cluster on the shared column (owner EC3).
+                    snap_to_value_column(&mut c);
                     bare_dropdown(&mut c, egui::RichText::new(cur_name).small(), |ui| {
                         if ui.selectable_label(cur.is_none(), "None").clicked() {
                             let mut effects = layer.effects.clone();

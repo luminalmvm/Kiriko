@@ -481,6 +481,58 @@ impl AppState {
         };
         // (layer, row, absolute local time, key).
         let mut collected: Vec<(Uuid, PropRow, f64, Keyframe)> = Vec::new();
+        // In GRAPH mode the graph-editor selection is what the user sees, so it
+        // wins outright (owner T4 retest: a stale lane selection from the lane
+        // view was shadowing it, leaving the clipboard holding the old keys).
+        let graph_first = self.timeline_graph_mode;
+        if graph_first {
+            self.collect_graph_selection(comp, tol, &mut collected);
+        }
+        if !graph_first || collected.is_empty() {
+            self.collect_lane_selection(comp, tol, &tf_key, &fx_key, &mut collected);
+        }
+        if collected.is_empty() {
+            self.collect_graph_selection(comp, tol, &mut collected);
+        }
+        if collected.is_empty() {
+            return;
+        }
+        let anchor = collected
+            .iter()
+            .map(|(_, _, t, _)| *t)
+            .fold(f64::INFINITY, f64::min);
+        self.keyframe_clipboard = collected
+            .into_iter()
+            .map(|(layer, row, t, key)| ClipboardKey {
+                layer,
+                row,
+                offset: t - anchor,
+                key,
+            })
+            .collect();
+    }
+
+    /// The lane-selection half of [`Self::copy_selected_keyframes`]: resolve
+    /// every selected lane key against the document and push the found
+    /// keyframes.
+    #[allow(clippy::type_complexity)]
+    fn collect_lane_selection(
+        &self,
+        comp: &lumit_core::model::Composition,
+        _tol: f64,
+        tf_key: &dyn Fn(
+            &lumit_core::model::Layer,
+            lumit_core::model::TransformProp,
+            f64,
+        ) -> Option<lumit_core::anim::Keyframe>,
+        fx_key: &dyn Fn(
+            &lumit_core::model::Layer,
+            usize,
+            usize,
+            f64,
+        ) -> Option<lumit_core::anim::Keyframe>,
+        collected: &mut Vec<(Uuid, PropRow, f64, lumit_core::anim::Keyframe)>,
+    ) {
         for s in &self.lane_selection {
             let Some(layer) = comp.layers.iter().find(|l| l.id == s.layer) else {
                 continue;
@@ -514,49 +566,47 @@ impl AppState {
                 PropRow::Retime => {}
             }
         }
-        // Graph-editor selection (T4): when the marquee lives in the graph view,
-        // `lane_selection` is empty and the picked keys are pinned in
-        // `graph_selection` instead. Copy that channel's selected transform keys.
-        // (Retime's Time channel has no paste target, so it is skipped, matching
-        // the lane path.)
-        if collected.is_empty() {
-            if let Some(sel) = &self.graph_selection {
-                if !sel.retime {
-                    if let Some(layer) = comp.layers.iter().find(|l| l.id == sel.layer) {
-                        if let Animation::Keyframed(keys) = &layer.transform.get(sel.prop).animation
-                        {
-                            if let Some(indices) = sel.indices_for(keys) {
-                                for i in indices {
-                                    let k = keys[i];
-                                    collected.push((
-                                        sel.layer,
-                                        PropRow::Transform(sel.prop),
-                                        k.time.to_f64(),
-                                        k,
-                                    ));
-                                }
-                            }
-                        }
-                    }
+    }
+
+    /// The graph-editor half of [`Self::copy_selected_keyframes`] (T4): copy the
+    /// graphed channel's selected transform keys. The (index, time) pins resolve
+    /// exactly first; when they've gone stale (a drag re-timed keys since the
+    /// marquee), each pin falls back to the key nearest its remembered time
+    /// (within half a frame), so a copy straight after an edit still works.
+    /// Retime's Time channel is skipped — paste has no Retime target.
+    fn collect_graph_selection(
+        &self,
+        comp: &lumit_core::model::Composition,
+        tol: f64,
+        collected: &mut Vec<(Uuid, PropRow, f64, lumit_core::anim::Keyframe)>,
+    ) {
+        use lumit_core::anim::Animation;
+        let Some(sel) = &self.graph_selection else {
+            return;
+        };
+        if sel.retime {
+            return;
+        }
+        let Some(layer) = comp.layers.iter().find(|l| l.id == sel.layer) else {
+            return;
+        };
+        let Animation::Keyframed(keys) = &layer.transform.get(sel.prop).animation else {
+            return;
+        };
+        if let Some(indices) = sel.indices_for(keys) {
+            for i in indices {
+                let k = keys[i];
+                collected.push((sel.layer, PropRow::Transform(sel.prop), k.time.to_f64(), k));
+            }
+        } else {
+            // Stale pins: match by remembered time within tolerance instead.
+            for &(_, t) in &sel.keys {
+                let ts = t.to_f64();
+                if let Some(k) = keys.iter().find(|k| (k.time.to_f64() - ts).abs() < tol) {
+                    collected.push((sel.layer, PropRow::Transform(sel.prop), k.time.to_f64(), *k));
                 }
             }
         }
-        if collected.is_empty() {
-            return;
-        }
-        let anchor = collected
-            .iter()
-            .map(|(_, _, t, _)| *t)
-            .fold(f64::INFINITY, f64::min);
-        self.keyframe_clipboard = collected
-            .into_iter()
-            .map(|(layer, row, t, key)| ClipboardKey {
-                layer,
-                row,
-                offset: t - anchor,
-                key,
-            })
-            .collect();
     }
 
     /// Paste the clipboard keyframes at the playhead (note 2.2): each lands on

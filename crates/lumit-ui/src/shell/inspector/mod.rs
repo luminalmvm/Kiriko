@@ -94,8 +94,20 @@ pub(crate) fn snap_to_value_column(c: &mut egui::Ui) {
 /// row's controls still works them; this fires alongside so the row highlights
 /// wherever you click it. A drag (value scrub, key drag) is not a click, so it
 /// never trips selection.
+///
+/// The hit test deliberately does NOT intersect with the ui's clip x-range:
+/// in the timeline the drawing ui is clipped to the LANE area, which made the
+/// outline half of every row click-dead (the T2/T3 defect — effect rows never
+/// selected from the layer area). Only the clip's VERTICAL bounds apply, so a
+/// half-scrolled row still can't be clicked through the ruler; the layer-aware
+/// `rect_contains_pointer` keeps popups and overlays winning the pointer.
 pub(crate) fn row_click(ui: &egui::Ui, row_rect: egui::Rect) -> bool {
-    ui.rect_contains_pointer(row_rect) && ui.input(|i| i.pointer.primary_clicked())
+    let clip = ui.clip_rect();
+    let hit = egui::Rect::from_min_max(
+        egui::pos2(row_rect.left(), row_rect.top().max(clip.top())),
+        egui::pos2(row_rect.right(), row_rect.bottom().min(clip.bottom())),
+    );
+    ui.ctx().rect_contains_pointer(ui.layer_id(), hit) && ui.input(|i| i.pointer.primary_clicked())
 }
 
 /// The fill an effect-title bar paints. `surface_2` deliberately, not

@@ -273,7 +273,10 @@ impl AppState {
         // behind `selected_comp`, and there was no tab to switch back with.
         self.open_comp(id);
         if let Some(item) = dialog.pending_item {
-            self.add_item_to_comp(item);
+            // A pending drop that was part of a multi-selection brings the
+            // whole set into the fresh comp (A3).
+            let items = self.drag_expansion(item);
+            self.add_items_to_comp(&items);
         }
     }
 
@@ -353,6 +356,19 @@ impl AppState {
     pub fn add_items_to_comp(&mut self, ids: &[Uuid]) {
         for id in ids {
             self.add_item_to_comp(*id);
+        }
+    }
+
+    /// The items one dragged project item stands for (A3): the whole
+    /// multi-selection when the dragged item is part of it, else just itself.
+    /// Every drop-into-a-comp path expands through this, so dragging one of a
+    /// multi-selection brings the whole set in.
+    pub fn drag_expansion(&self, dropped: Uuid) -> Vec<Uuid> {
+        let sel = self.project_selection();
+        if sel.len() > 1 && sel.contains(&dropped) {
+            sel
+        } else {
+            vec![dropped]
         }
     }
 

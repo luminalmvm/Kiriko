@@ -1035,8 +1035,18 @@ impl Shell {
         if std::mem::take(&mut app.focus_project_tab) {
             activate_panel_tab(dock, Panel::Project);
         }
+        // The Effect Controls tab only exists while a layer is selected
+        // (owner): with nothing selected the tab hides from the dock entirely.
+        // A floating Effect Controls window is left alone — hiding the dock
+        // tile of a floated panel is the pop-out mechanism above.
+        if !floating.contains(&Panel::EffectControls) {
+            if let Some(tile) = tile_id_of(dock, Panel::EffectControls) {
+                dock.tiles.set_visible(tile, app.selected_layer.is_some());
+            }
+        }
         // Owner: after applying an effect, bring the Effect Controls tab to the
-        // front so the freshly added (and now selected) effect is visible.
+        // front so the freshly added (and now selected) effect is visible (the
+        // apply also selected the layer, so the tab is visible again by here).
         if std::mem::take(&mut app.focus_effects_tab) {
             activate_panel_tab(dock, Panel::EffectControls);
         }
