@@ -24,8 +24,8 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
 
 ## UI
 
-- [ ] **UI-1** Linked-property value boxes still clipped — specific to properties with the
-  link control (anchor, position, scale). The link icon steals width.
+- [x] **UI-1** Linked value boxes no longer clip: pair rows tightened (spacing/padding) and the
+  X/Y/Scale boxes fixed to 48 px so [X][link][Y] fits the outline column. (Eyeball.)
 - [x] **UI-2** Clicking an effect property's *name* in the layer area should highlight the
   layer; currently doesn't. — done: effect-row click now sets `selected_layer` in both the
   Timeline layer area and the docked effects panel.
@@ -35,8 +35,10 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
   clip while it decodes — same as the Viewer.)
 - [x] **UI-5** Lane keyframe selection: Shift and Ctrl both toggle now — click gesture and the
   drag-marquee (a Shift/Ctrl box deselects covered keys instead of only adding).
-- [ ] **UI-6** Layer area: selecting a property *name* (Transform, an effect, …) should
-  support multi-select, so a user can key several at the same point at once.
+- [x] **UI-6** (K-158) Effect rows and the Retime row now use the shared list-select gesture
+  (plain/Ctrl/Shift), so transform + effect + Retime names multi-select together; new **Key
+  selected properties** command keys them all at the playhead in one undo step. Added
+  `PropRow::Retime` (fixes the Retime "Time" row being unselectable).
 - [x] **UI-7** Copy/paste keyframes fixed: egui-winit emits Copy/Paste events (not Key C/V), so the old shortcut watch never fired; now reads the events. (Nuance: needs non-empty OS clipboard, which self-heals on first copy.)
 - [x] **UI-8** (K-159) Per-mode wheel router: LANE view keeps outline+lanes synced (one
   scrollbar, unchanged); GRAPH view decouples them — the layer list gets its own scrollbar at
@@ -144,3 +146,13 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
   engine running, so `is_playing` stayed true (play button stuck) and audio played on. Added
   `AppState::pause_playback` (pauses audio + clears the transport) and routed the timeline
   ruler and viewer scrub through it. Regression test added.
+
+- [x] **Keyframe navigator parity** — one shared `◄ ◆ ►` navigator now renders identically for
+  transform (incl. Position/Anchor/Scale pairs), the Retime Time/Velocity row, and effects
+  (K-158); Position/Time no longer use the older glyphs.
+- [x] **Retime "Time" value drag now updates the preview live** — new `retime_edit` live-edit
+  state overrides the layer's retime during the drag so the viewer shows the dragged source
+  frame (parity with transform/effect drags).
+- [x] **Retime "Time" keyframes drag in time in the graph editor** — the domain-start (first)
+  key is pinned at 0 (retime invariant) so its edit commits instead of the rebuild returning
+  None and dropping the whole edit; interior/trailing keys drag freely.
