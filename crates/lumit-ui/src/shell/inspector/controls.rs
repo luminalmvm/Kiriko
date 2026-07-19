@@ -1,0 +1,482 @@
+//! Sub-column switches on a layer's title line and the Flow group rows:
+//! visibility, matte, blend, 3D, collapse, flow and mute controls.
+
+use super::*;
+
+/// The layer's natural pixel space (mask coordinates live here).
+/// Compact matte / blend / 3D / mute controls for a layer's title line
+/// (left column). Sets `pending` on any change.
+/// Trim a layer title for display: people type what they like, but past a
+/// cap the shown value ends with "…" (Mack).
+pub(crate) fn trim_title(name: &str) -> String {
+    const MAX: usize = 48;
+    if name.chars().count() <= MAX {
+        name.to_owned()
+    } else {
+        let mut s: String = name.chars().take(MAX - 1).collect();
+        s.push('…');
+        s
+    }
+}
+
+/// Visibility (eye) toggle — its own left-column subcolumn.
+pub(crate) fn visible_control(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    comp_id: uuid::Uuid,
+    layer: &lumit_core::model::Layer,
+    pending: &mut Option<lumit_core::Op>,
+) {
+    let vis = layer.switches.visible;
+    // Swap the glyph to a closed eye when hidden, not just dim it (note 2.8.4:
+    // a toggle shows the state's matching icon, as Mute/Audio already do).
+    let (icon, col) = if vis {
+        (Icon::Eye, theme.text_secondary)
+    } else {
+        (Icon::EyeClosed, theme.text_disabled)
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+    crate::icons::paint(ui.painter(), rect, icon, col, 1.4);
+    if resp.on_hover_text("Show / hide this layer").clicked() {
+        *pending = Some(lumit_core::Op::SetLayerVisible {
+            comp: comp_id,
+            layer: layer.id,
+            visible: !vis,
+        });
+    }
+}
+
+/// Matte subcolumn: a labelled "Matte" dropdown (accent when a matte is set)
+/// with a drawn caret to show it opens a menu — source pick + luma/invert flags.
+pub(crate) fn matte_control(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    comp: &lumit_core::model::Composition,
+    comp_id: uuid::Uuid,
+    layer: &lumit_core::model::Layer,
+    pending: &mut Option<lumit_core::Op>,
+) {
+    use lumit_core::model::{MatteChannel, MatteRef};
+    let has_matte = layer.matte.is_some();
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::click());
+    let base = if has_matte {
+        theme.accent
+    } else {
+        theme.text_secondary
+    };
+    let colour = if resp.hovered() {
+        theme.text_primary
+    } else {
+        base
+    };
+    ui.painter().text(
+        rect.left_center() + egui::vec2(2.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        "Matte",
+        egui::FontId::proportional(11.0),
+        colour,
+    );
+    crate::icons::caret_down(
+        ui.painter(),
+        egui::pos2(rect.right() - 6.0, rect.center().y),
+        colour,
+    );
+    let popup_id = ui.make_persistent_id(("matte-popup", layer.id));
+    if resp.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup_id));
+    }
+    let mut set: Option<Option<MatteRef>> = None;
+    egui::popup::popup_below_widget(
+        ui,
+        popup_id,
+        &resp,
+        egui::PopupCloseBehavior::CloseOnClick,
+        |ui| {
+            ui.set_min_width(150.0);
+            if ui.selectable_label(layer.matte.is_none(), "None").clicked() {
+                set = Some(None);
+            }
+            for other in comp.layers.iter().filter(|l| l.id != layer.id) {
+                let selected = layer.matte.is_some_and(|m| m.layer == other.id);
+                if ui.selectable_label(selected, &other.name).clicked() {
+                    set = Some(Some(MatteRef {
+                        layer: other.id,
+                        channel: layer
+                            .matte
+                            .map(|m| m.channel)
+                            .unwrap_or(MatteChannel::Alpha),
+                        inverted: layer.matte.is_some_and(|m| m.inverted),
+                        after_effects: layer.matte.is_some_and(|m| m.after_effects),
+                    }));
+                }
+            }
+            if let Some(mut m) = layer.matte {
+                ui.separator();
+                let luma = matches!(m.channel, MatteChannel::Luma);
+                if ui.selectable_label(luma, "Luma matte").clicked() {
+                    m.channel = if luma {
+                        MatteChannel::Alpha
+                    } else {
+                        MatteChannel::Luma
+                    };
+                    set = Some(Some(m));
+                }
+                if ui.selectable_label(m.inverted, "Inverted").clicked() {
+                    m.inverted = !m.inverted;
+                    set = Some(Some(m));
+                }
+                if ui
+                    .selectable_label(m.after_effects, "After effects")
+                    .on_hover_text(
+                        "Gate with the matte layer's pixels after its own effects \
+                         (a keyed or blurred matte), not its raw source",
+                    )
+                    .clicked()
+                {
+                    m.after_effects = !m.after_effects;
+                    set = Some(Some(m));
+                }
+            }
+        },
+    );
+    if let Some(matte) = set {
+        *pending = Some(lumit_core::Op::SetLayerMatte {
+            comp: comp_id,
+            layer: layer.id,
+            matte,
+        });
+    }
+}
+
+pub(crate) fn blend_name(b: lumit_core::model::BlendMode) -> &'static str {
+    use lumit_core::model::BlendMode;
+    match b {
+        BlendMode::Normal => "Normal",
+        BlendMode::Add => "Add",
+        BlendMode::Multiply => "Multiply",
+        BlendMode::Screen => "Screen",
+        BlendMode::Overlay => "Overlay",
+        BlendMode::SoftLight => "Soft light",
+        BlendMode::HardLight => "Hard light",
+        BlendMode::Lighten => "Lighten",
+        BlendMode::Darken => "Darken",
+    }
+}
+
+/// Blend-mode subcolumn.
+pub(crate) fn blend_control(
+    ui: &mut egui::Ui,
+    comp_id: uuid::Uuid,
+    layer: &lumit_core::model::Layer,
+    pending: &mut Option<lumit_core::Op>,
+) {
+    use lumit_core::model::BlendMode;
+    bare_dropdown(
+        ui,
+        egui::RichText::new(blend_name(layer.blend)).small(),
+        |ui| {
+            for mode in [
+                BlendMode::Normal,
+                BlendMode::Add,
+                BlendMode::Multiply,
+                BlendMode::Screen,
+                BlendMode::Overlay,
+                BlendMode::SoftLight,
+                BlendMode::HardLight,
+                BlendMode::Lighten,
+                BlendMode::Darken,
+            ] {
+                if ui
+                    .selectable_label(layer.blend == mode, blend_name(mode))
+                    .clicked()
+                {
+                    if layer.blend != mode {
+                        *pending = Some(lumit_core::Op::SetLayerBlend {
+                            comp: comp_id,
+                            layer: layer.id,
+                            blend: mode,
+                        });
+                    }
+                    ui.close_menu();
+                }
+            }
+        },
+    );
+}
+
+/// 3D-switch subcolumn: a small square box, empty when flat and holding a
+/// centred dot when the layer is 3D (note 2.8.5) — a clearer state read than the
+/// old "3D" text toggle. The box corner follows the theme shape (crisp under
+/// Sharp, softened under Round).
+pub(crate) fn three_d_control(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    comp_id: uuid::Uuid,
+    layer: &lumit_core::model::Layer,
+    pending: &mut Option<lumit_core::Op>,
+) {
+    let on = layer.switches.three_d;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+    let hovered = resp.hovered();
+    let box_col = if on || hovered {
+        theme.accent
+    } else {
+        theme.text_secondary
+    };
+    let side = 11.0;
+    let sq = egui::Rect::from_center_size(rect.center(), egui::vec2(side, side));
+    let round = f32::from(theme.tokens.control_radius).min(side * 0.5);
+    ui.painter().rect_stroke(
+        sq,
+        round,
+        egui::Stroke::new(1.2_f32, box_col),
+        egui::StrokeKind::Inside,
+    );
+    if on {
+        ui.painter().circle_filled(rect.center(), 2.0, theme.accent);
+    }
+    if resp
+        .on_hover_text("Place this layer in z-space (needs a Camera layer)")
+        .clicked()
+    {
+        *pending = Some(lumit_core::Op::SetLayerThreeD {
+            comp: comp_id,
+            layer: layer.id,
+            three_d: !layer.switches.three_d,
+        });
+    }
+}
+
+/// Collapse-transformations subcolumn (Precomp layers only, docs/06 §1.4).
+/// Accent when active; dimmed when the switch is set but a mask, blend,
+/// opacity or matte use forces an intermediate anyway (the spec's required
+/// "dimmed collapse switch" indication).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn collapse_control(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    doc: &lumit_core::model::Document,
+    comp: &lumit_core::model::Composition,
+    comp_id: uuid::Uuid,
+    layer: &lumit_core::model::Layer,
+    lt: f64,
+    pending: &mut Option<lumit_core::Op>,
+) {
+    use lumit_core::model::CollapseState;
+    if !matches!(layer.kind, lumit_core::model::LayerKind::Precomp { .. }) {
+        return;
+    }
+    let state = lumit_core::model::collapse_state(doc, comp, layer, lt);
+    let col = match state {
+        CollapseState::Active => theme.accent,
+        CollapseState::Forced => theme.text_disabled,
+        CollapseState::Off => theme.text_secondary,
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+    crate::icons::paint(ui.painter(), rect, Icon::Collapse, col, 1.4);
+    let hover = match state {
+        CollapseState::Active => "Collapse transformations: on (inner layers composite directly)",
+        CollapseState::Forced => {
+            "Collapse is set, but a mask, blend, opacity or matte use forces an intermediate"
+        }
+        CollapseState::Off => "Collapse transformations: concatenate inner layers' transforms",
+    };
+    if resp.on_hover_text(hover).clicked() {
+        *pending = Some(lumit_core::Op::SetLayerCollapse {
+            comp: comp_id,
+            layer: layer.id,
+            collapse: !layer.switches.collapse,
+        });
+    }
+}
+
+/// The Flow option toggle (K-088), footage layers only: optical-flow frame
+/// interpolation as a property of how the layer samples its source. Accent
+/// while on. Turning it on keeps any existing retime and sets its
+/// interpolation policy to Flow (an identity retime is created when the
+/// layer has none — it renders identically, docs/04 §3); turning it off
+/// returns the policy to Nearest, and a pure identity store collapses back
+/// to no retime at all.
+pub(crate) fn flow_control(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    comp_id: uuid::Uuid,
+    layer: &lumit_core::model::Layer,
+    pending: &mut Option<lumit_core::Op>,
+) {
+    use lumit_core::retime::{FlowParams, Interpolation, Retime};
+    let lumit_core::model::LayerKind::Footage { retime, .. } = &layer.kind else {
+        return;
+    };
+    let on = matches!(
+        retime.as_ref().map(|r| &r.interpolation),
+        Some(Interpolation::Flow(_))
+    );
+    let col = if on {
+        theme.accent
+    } else {
+        theme.text_secondary
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+    crate::icons::paint(ui.painter(), rect, Icon::Flow, col, 1.4);
+    let hover = if on {
+        "Flow: synthesising in-between frames where the footage is slower than the comp"
+    } else {
+        "Flow: synthesise in-between frames (optical flow) when the footage's rate          undershoots the comp's"
+    };
+    if resp.on_hover_text(hover).clicked() {
+        let new_retime = if on {
+            let mut r = retime
+                .clone()
+                .unwrap_or_else(|| Retime::identity(layer.out_point.0, lumit_core::Rational::ZERO));
+            r.interpolation = Interpolation::Nearest;
+            // A pure identity store with the default policy is no retime.
+            if r == Retime::identity(layer.out_point.0, lumit_core::Rational::ZERO) {
+                None
+            } else {
+                Some(r)
+            }
+        } else {
+            let mut r = retime
+                .clone()
+                .unwrap_or_else(|| Retime::identity(layer.out_point.0, lumit_core::Rational::ZERO));
+            r.interpolation = Interpolation::Flow(FlowParams::default());
+            Some(r)
+        };
+        *pending = Some(lumit_core::Op::SetLayerRetime {
+            comp: comp_id,
+            layer: layer.id,
+            retime: new_retime,
+        });
+    }
+}
+
+/// The Flow group's rows (K-088): shown while the option is on, beside
+/// Transform and Effects, carrying the engine parameters.
+pub(crate) fn flow_group_rows(
+    ui: &mut egui::Ui,
+    ctx: &RowCtx,
+    pending: &mut Option<lumit_core::Op>,
+) {
+    use lumit_core::retime::Interpolation;
+    let lumit_core::model::LayerKind::Footage {
+        retime: Some(rt), ..
+    } = &ctx.layer.kind
+    else {
+        return;
+    };
+    let Interpolation::Flow(params) = &rt.interpolation else {
+        return;
+    };
+    let (_row, mut c) = row_frame(ui, ctx, false);
+    c.label(
+        egui::RichText::new("Quality")
+            .small()
+            .color(ctx.theme.text_muted),
+    );
+    let cur = if params.half_resolution {
+        "Half"
+    } else {
+        "Full"
+    };
+    bare_dropdown(&mut c, egui::RichText::new(cur).small(), |ui| {
+        for (label, half) in [("Half (fast)", true), ("Full", false)] {
+            if ui
+                .selectable_label(params.half_resolution == half, label)
+                .clicked()
+            {
+                let mut r = rt.clone();
+                let mut p = params.clone();
+                p.half_resolution = half;
+                r.interpolation = Interpolation::Flow(p);
+                *pending = Some(lumit_core::Op::SetLayerRetime {
+                    comp: ctx.comp_id,
+                    layer: ctx.layer.id,
+                    retime: Some(r),
+                });
+                ui.close_menu();
+            }
+        }
+    });
+
+    // Input rate (K-095): interpret the footage as this fps for flow, so
+    // high-framerate clips (whose adjacent frames barely move) interpolate
+    // across meaningful gaps. Native = the source's own rate.
+    let (_row, mut c) = row_frame(ui, ctx, false);
+    c.label(
+        egui::RichText::new("Input rate")
+            .small()
+            .color(ctx.theme.text_muted),
+    )
+    .on_hover_text(
+        "Treat the footage as this frame rate for flow — lower than the clip's own rate to \
+         flow-interpolate high-speed footage into real slow motion",
+    );
+    let cur = match params.input_fps {
+        None => "Native".to_string(),
+        Some(f) => format!("{} fps", f as i64),
+    };
+    let commit = |ctx: &RowCtx,
+                  rt: &lumit_core::retime::Retime,
+                  params: &lumit_core::retime::FlowParams,
+                  pending: &mut Option<lumit_core::Op>,
+                  input_fps: Option<f64>| {
+        let mut r = rt.clone();
+        let mut p = params.clone();
+        p.input_fps = input_fps;
+        r.interpolation = Interpolation::Flow(p);
+        *pending = Some(lumit_core::Op::SetLayerRetime {
+            comp: ctx.comp_id,
+            layer: ctx.layer.id,
+            retime: Some(r),
+        });
+    };
+    bare_dropdown(&mut c, egui::RichText::new(cur).small(), |ui| {
+        if ui
+            .selectable_label(params.input_fps.is_none(), "Native")
+            .clicked()
+        {
+            commit(ctx, rt, params, pending, None);
+            ui.close_menu();
+        }
+        for fps in [8.0, 12.0, 15.0, 24.0, 25.0, 30.0, 60.0] {
+            let sel = params.input_fps == Some(fps);
+            if ui
+                .selectable_label(sel, format!("{} fps", fps as i64))
+                .clicked()
+            {
+                commit(ctx, rt, params, pending, Some(fps));
+                ui.close_menu();
+            }
+        }
+    });
+}
+
+/// Mute subcolumn (footage layers).
+pub(crate) fn mute_control(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    comp_id: uuid::Uuid,
+    layer: &lumit_core::model::Layer,
+    pending: &mut Option<lumit_core::Op>,
+) {
+    let muted = !layer.switches.audible;
+    let (icon, col) = if muted {
+        (Icon::Mute, theme.text_muted)
+    } else {
+        (Icon::Audio, theme.text_secondary)
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+    crate::icons::paint(ui.painter(), rect, icon, col, 1.4);
+    if resp
+        .on_hover_text("Silence this layer in playback and export")
+        .clicked()
+    {
+        *pending = Some(lumit_core::Op::SetLayerAudible {
+            comp: comp_id,
+            layer: layer.id,
+            audible: muted,
+        });
+    }
+}

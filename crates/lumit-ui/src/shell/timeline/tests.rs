@@ -1,0 +1,338 @@
+use super::*;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod effect_drop_tests {
+    use super::*;
+    use lumit_core::model::LayerKind;
+
+    // Regression for K-101: the two layer kinds an effect stack is dropped
+    // onto from the Effects & Presets browser must keep accepting the drop.
+    #[test]
+    fn footage_and_adjustment_layers_accept_an_effect_drop() {
+        assert!(accepts_effect_drop(&LayerKind::Footage {
+            item: uuid::Uuid::nil(),
+            retime: None,
+        }));
+        assert!(accepts_effect_drop(&LayerKind::Adjustment));
+    }
+
+    // Other layer kinds still gain effects through the existing "Add effect"
+    // row (untouched by K-101); a drop on their Timeline row is a no-op.
+    #[test]
+    fn other_layer_kinds_do_not_accept_an_effect_drop() {
+        assert!(!accepts_effect_drop(&LayerKind::Solid {
+            def: uuid::Uuid::nil(),
+        }));
+        assert!(!accepts_effect_drop(&LayerKind::Precomp {
+            comp: uuid::Uuid::nil(),
+        }));
+        assert!(!accepts_effect_drop(&LayerKind::Sequence {
+            clips: Vec::new(),
+        }));
+    }
+
+    /// Regression for the invisible, undraggable outline/lane divider: egui
+    /// hit-tests a widget against its rect ∩ the ui clip, and the timeline
+    /// narrows its clip to the lane area (x ≥ track_left) for the
+    /// time-positioned overlays — the divider handle sits just LEFT of that,
+    /// so under the lane clip its rect ∩ clip was empty and it neither drew
+    /// nor dragged. The scene reproduces the geometry in miniature: a handle
+    /// left of a lane clip is dead until the clip is widened around it, which
+    /// is exactly what `timeline_panel` now does.
+    fn divider_drag_delta(widen_clip: bool) -> f32 {
+        let ctx = egui::Context::default();
+        let moved = std::cell::Cell::new(0.0_f32);
+        let run = |events: Vec<egui::Event>| {
+            let ri = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 400.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(ri, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let full = ui.max_rect();
+                    let track_left = 200.0;
+                    let lane =
+                        egui::Rect::from_min_max(egui::pos2(track_left, full.top()), full.max);
+                    let saved = ui.clip_rect();
+                    ui.set_clip_rect(saved.intersect(lane));
+                    if widen_clip {
+                        ui.set_clip_rect(saved); // the fix
+                    }
+                    // The handle straddles sep_x = track_left - 4, entirely
+                    // left of the lane clip — the original geometry, whose
+                    // rect ∩ clip came out empty.
+                    let handle = egui::Rect::from_min_max(
+                        egui::pos2(track_left - 7.0, full.top()),
+                        egui::pos2(track_left - 1.0, full.bottom()),
+                    );
+                    let r = ui.interact(
+                        handle,
+                        egui::Id::new("name-col-resize"),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if r.dragged() {
+                        moved.set(moved.get() + r.drag_delta().x);
+                    }
+                });
+            });
+        };
+        let m = egui::Modifiers::default();
+        let btn = egui::PointerButton::Primary;
+        run(vec![]); // lay out
+        let from = egui::pos2(196.0, 200.0);
+        let to = egui::pos2(236.0, 200.0);
+        run(vec![egui::Event::PointerMoved(from)]);
+        run(vec![egui::Event::PointerButton {
+            pos: from,
+            button: btn,
+            pressed: true,
+            modifiers: m,
+        }]);
+        run(vec![egui::Event::PointerMoved(to)]); // drag right, past threshold
+        run(vec![egui::Event::PointerButton {
+            pos: to,
+            button: btn,
+            pressed: false,
+            modifiers: m,
+        }]);
+        moved.get()
+    }
+
+    #[test]
+    fn the_divider_drags_only_once_the_lane_clip_is_widened_around_it() {
+        // The bug: under the lane clip the handle's rect ∩ clip is empty.
+        assert_eq!(divider_drag_delta(false), 0.0);
+        // The fix: with the clip widened, the drag registers and reports
+        // the pointer's travel.
+        assert!(divider_drag_delta(true) > 0.0);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod lane_drag_tests {
+    use super::*;
+    use crate::app_state::{LaneKeySel, PropRow};
+    use lumit_core::anim::{Animation, Keyframe, Property, SideInterp};
+    use lumit_core::model::{
+        BlendMode, Composition, Layer, LayerKind, LinearColour, Switches, TransformGroup,
+        TransformProp,
+    };
+    use lumit_core::time::{CompTime, Duration, FrameRate, Rational};
+    use uuid::Uuid;
+
+    fn kf_prop(times: &[f64]) -> Property {
+        let keys = times
+            .iter()
+            .map(|&t| Keyframe {
+                time: rational_at(t),
+                value: 0.0,
+                interp_in: SideInterp::Linear,
+                interp_out: SideInterp::Linear,
+            })
+            .collect();
+        Property {
+            animation: Animation::Keyframed(keys),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    fn comp_one_layer(tf: TransformGroup) -> (Composition, Uuid) {
+        let lid = Uuid::now_v7();
+        let layer = Layer {
+            id: lid,
+            name: "L".into(),
+            kind: LayerKind::Solid { def: Uuid::nil() },
+            in_point: CompTime(Rational::ZERO),
+            out_point: CompTime(Rational::new(10, 1).unwrap()),
+            start_offset: CompTime(Rational::ZERO),
+            transform: tf,
+            matte: None,
+            parent: None,
+            blend: BlendMode::Normal,
+            masks: Vec::new(),
+            effects: Vec::new(),
+            switches: Switches::default(),
+            extra: serde_json::Map::new(),
+        };
+        let comp = Composition {
+            id: Uuid::now_v7(),
+            name: "C".into(),
+            width: 100,
+            height: 100,
+            frame_rate: FrameRate::new(30, 1).unwrap(),
+            duration: Duration(Rational::new(10, 1).unwrap()),
+            background: LinearColour([0.0; 4]),
+            work_area: None,
+            layers: vec![layer],
+            markers: Vec::new(),
+            motion_blur: Default::default(),
+            extra: serde_json::Map::new(),
+        };
+        (comp, lid)
+    }
+
+    fn tsel(layer: Uuid, prop: TransformProp, t: f64) -> LaneKeySel {
+        LaneKeySel {
+            layer,
+            row: PropRow::Transform(prop),
+            time: rational_at(t),
+        }
+    }
+
+    // A single transform-channel selection slides just that channel's keys.
+    #[test]
+    fn transform_selection_shifts_that_channel() {
+        let tf = TransformGroup {
+            rotation: kf_prop(&[1.0, 2.0]),
+            ..Default::default()
+        };
+        let (comp, lid) = comp_one_layer(tf);
+        let sel = [tsel(lid, TransformProp::Rotation, 1.0)];
+        let op = build_lane_drag_op(&comp, &sel, &[], 0.5, 30.0).unwrap();
+        match op {
+            lumit_core::Op::SetTransformProperty {
+                prop, animation, ..
+            } => {
+                assert_eq!(prop, TransformProp::Rotation);
+                let Animation::Keyframed(k) = animation else {
+                    panic!("expected keyframed");
+                };
+                let ts: Vec<f64> = k.iter().map(|x| x.time.to_f64()).collect();
+                assert_eq!(ts, vec![1.5, 2.0]);
+            }
+            other => panic!("expected SetTransformProperty, got {other:?}"),
+        }
+    }
+
+    // A linked pair listed in the register moves both axes' keys in one Batch.
+    #[test]
+    fn linked_pair_moves_both_axes() {
+        let tf = TransformGroup {
+            position_x: kf_prop(&[1.0]),
+            position_y: kf_prop(&[1.0]),
+            ..Default::default()
+        };
+        let (comp, lid) = comp_one_layer(tf);
+        let sel = [tsel(lid, TransformProp::PositionX, 1.0)];
+        let linked = [(lid, TransformProp::PositionX)];
+        let op = build_lane_drag_op(&comp, &sel, &linked, 1.0, 30.0).unwrap();
+        let lumit_core::Op::Batch { ops } = op else {
+            panic!("expected a Batch across both axes");
+        };
+        let props: Vec<TransformProp> = ops
+            .iter()
+            .filter_map(|o| match o {
+                lumit_core::Op::SetTransformProperty { prop, .. } => Some(*prop),
+                _ => None,
+            })
+            .collect();
+        assert!(props.contains(&TransformProp::PositionX));
+        assert!(props.contains(&TransformProp::PositionY));
+    }
+
+    // The same channel, NOT in the register (unlinked), moves only itself.
+    #[test]
+    fn unlinked_axis_moves_only_itself() {
+        let tf = TransformGroup {
+            position_x: kf_prop(&[1.0]),
+            position_y: kf_prop(&[1.0]),
+            ..Default::default()
+        };
+        let (comp, lid) = comp_one_layer(tf);
+        let sel = [tsel(lid, TransformProp::PositionX, 1.0)];
+        let op = build_lane_drag_op(&comp, &sel, &[], 1.0, 30.0).unwrap();
+        match op {
+            lumit_core::Op::SetTransformProperty { prop, .. } => {
+                assert_eq!(prop, TransformProp::PositionX);
+            }
+            other => panic!("expected a single SetTransformProperty, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partner_maps_x_to_y_only() {
+        assert_eq!(
+            linked_partner(TransformProp::ScaleX),
+            Some(TransformProp::ScaleY)
+        );
+        assert_eq!(
+            linked_partner(TransformProp::AnchorX),
+            Some(TransformProp::AnchorY)
+        );
+        assert_eq!(linked_partner(TransformProp::Rotation), None);
+        assert_eq!(linked_partner(TransformProp::ScaleY), None);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod lane_marquee_interaction_tests {
+    // The lane marquee relies on egui's hit-test order: the full-lane background
+    // (click+drag) is registered BEFORE the layer rows (click only), so a press
+    // on empty lane space that then moves opens the marquee instead of reading as
+    // a click on the row underneath. If egui ever changed that fall-through, the
+    // marquee would silently stop working — this pins the behaviour.
+    fn drive() -> (bool, bool) {
+        let ctx = egui::Context::default();
+        let bg_drag = std::cell::Cell::new(false);
+        let row_click = std::cell::Cell::new(false);
+        let run = |events: Vec<egui::Event>| {
+            let ri = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 400.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(ri, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let full = ui.max_rect();
+                    // Marquee background: added first, senses click and drag.
+                    let bg = ui.interact(full, egui::Id::new("bg"), egui::Sense::click_and_drag());
+                    if bg.dragged() {
+                        bg_drag.set(true);
+                    }
+                    // A layer row on top: added after, senses click only.
+                    let row = ui.interact(full, egui::Id::new("row"), egui::Sense::click());
+                    if row.clicked() {
+                        row_click.set(true);
+                    }
+                });
+            });
+        };
+        let m = egui::Modifiers::default();
+        let btn = egui::PointerButton::Primary;
+        run(vec![]);
+        let from = egui::pos2(100.0, 100.0);
+        let to = egui::pos2(170.0, 150.0);
+        run(vec![egui::Event::PointerMoved(from)]);
+        run(vec![egui::Event::PointerButton {
+            pos: from,
+            button: btn,
+            pressed: true,
+            modifiers: m,
+        }]);
+        run(vec![egui::Event::PointerMoved(to)]);
+        run(vec![egui::Event::PointerButton {
+            pos: to,
+            button: btn,
+            pressed: false,
+            modifiers: m,
+        }]);
+        (bg_drag.get(), row_click.get())
+    }
+
+    #[test]
+    fn a_drag_on_empty_lane_opens_the_marquee_not_a_row_click() {
+        let (bg_dragged, row_clicked) = drive();
+        assert!(bg_dragged, "the drag must reach the marquee background");
+        assert!(!row_clicked, "a drag must not read as a click on the row");
+    }
+}
