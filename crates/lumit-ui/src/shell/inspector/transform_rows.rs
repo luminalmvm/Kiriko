@@ -603,9 +603,16 @@ pub(crate) fn combined_scale_row(
             (TransformProp::ScaleY, ay),
         ));
     }
-    // The ◄ ◆ ► navigator, driving both axes (note-2.5 fix) — shown once the row
-    // is animated, matching every other transform row.
-    keyframe_nav_scale(&mut c, app, ctx, sx, sy, pending);
+    // The shared ◄ ◆ ► navigator, driving both axes (note-2.5 fix) — shown once
+    // the row is animated, identical to every other row.
+    keyframe_nav_pair(
+        &mut c,
+        app,
+        ctx,
+        TransformProp::ScaleX,
+        TransformProp::ScaleY,
+        pending,
+    );
     let name_clicked = c
         .add(
             egui::Label::new(egui::RichText::new("Scale %").small().color(if is_graphed {
@@ -779,52 +786,10 @@ pub(crate) fn linked_pair_row(
         ));
     }
 
-    // The keyframe navigator over the union of both axes' keys: the arrows
+    // The shared ◄ ◆ ► navigator over the union of both axes' keys: the arrows
     // jump to the nearest key on either axis; the diamond keys or clears both
-    // axes at the playhead in one undo step.
-    let tol = 0.5 / ctx.fps.max(1.0); // within half a frame counts as "on" it
-    let times = union_key_times(sx, sy, tol);
-    if !times.is_empty() {
-        let (prev, on_key, next) = key_nav_targets(&times, ctx.lt, tol);
-        let small = |i: Icon| egui::Button::new(crate::icons::text(i, 11.0)).frame(false);
-        let mut jump_to: Option<f64> = None;
-        if c.add_enabled(prev.is_some(), small(Icon::PrevKeyframe))
-            .on_hover_text("Previous keyframe")
-            .clicked()
-        {
-            jump_to = prev;
-        }
-        if c.add(small(if on_key {
-            Icon::Keyframe
-        } else {
-            Icon::KeyframeAdd
-        }))
-        .on_hover_text(if on_key {
-            "Remove keyframe here (both axes)"
-        } else {
-            "Add keyframe here (both axes)"
-        })
-        .clicked()
-        {
-            *pending = Some(two_prop_batch(
-                ctx.comp_id,
-                ctx.layer.id,
-                (px, toggle_key_at(sx, ctx.lt, tol, on_key)),
-                (py, toggle_key_at(sy, ctx.lt, tol, on_key)),
-            ));
-        }
-        if c.add_enabled(next.is_some(), small(Icon::NextKeyframe))
-            .on_hover_text("Next keyframe")
-            .clicked()
-        {
-            jump_to = next;
-        }
-        if let Some(kt) = jump_to {
-            app.preview_frame = ((kt + ctx.off) * ctx.fps).round().max(0.0) as usize;
-            #[cfg(feature = "media")]
-            app.refresh_preview();
-        }
-    }
+    // axes at the playhead in one undo step. Identical to every other row now.
+    keyframe_nav_pair(&mut c, app, ctx, px, py, pending);
 
     // The name graphs the x channel (like Scale graphs ScaleX) — plain click
     // only; Ctrl/Shift-click is a list-select gesture handled above.

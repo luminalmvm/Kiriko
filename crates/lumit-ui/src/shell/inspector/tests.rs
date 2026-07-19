@@ -353,6 +353,50 @@ mod prop_select_gesture_tests {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod keyframe_navigator_tests {
+    //! The decision core shared by the one consolidated ◄ ◆ ► navigator now used
+    //! by transform, linked-pair, Retime and effect rows alike (owner parity
+    //! rule): which key a prev/next arrow jumps to, and whether a key sits at the
+    //! playhead (so the diamond reads add vs remove), with the half-frame
+    //! tolerance every row used to reimplement.
+    use super::*;
+
+    #[test]
+    fn between_keys_points_at_the_neighbours() {
+        let times = [0.0, 1.0, 2.0];
+        let tol = 0.5 / 30.0;
+        let (prev, on, next) = key_nav_targets(&times, 1.4, tol);
+        assert_eq!(prev, Some(1.0));
+        assert!(!on, "1.4 s is not on a key");
+        assert_eq!(next, Some(2.0));
+    }
+
+    #[test]
+    fn within_half_a_frame_reads_as_on_the_key() {
+        let times = [0.0, 1.0, 2.0];
+        let tol = 0.5 / 30.0;
+        let (prev, on, next) = key_nav_targets(&times, 1.0 + tol * 0.4, tol);
+        assert!(on, "just inside the tolerance counts as on the key");
+        assert_eq!(prev, Some(0.0), "the on-key itself is not the prev target");
+        assert_eq!(next, Some(2.0));
+    }
+
+    #[test]
+    fn before_first_and_after_last_have_no_wrap() {
+        let times = [0.0, 1.0, 2.0];
+        let tol = 0.5 / 30.0;
+        let (prev, on, next) = key_nav_targets(&times, -1.0, tol);
+        assert_eq!(prev, None);
+        assert!(!on);
+        assert_eq!(next, Some(0.0));
+        let (prev, _, next) = key_nav_targets(&times, 5.0, tol);
+        assert_eq!(prev, Some(2.0));
+        assert_eq!(next, None);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod motion_blur_switch_tests {
     use super::*;
     use crate::theme::{ColorScheme, ThemeShape};

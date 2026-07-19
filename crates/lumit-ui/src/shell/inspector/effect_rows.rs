@@ -54,8 +54,7 @@ pub(crate) fn effect_param_nav(
     let Animation::Keyframed(keys) = &prop.animation else {
         return;
     };
-    let tol = 0.5 / ctx.fps.max(1.0); // within half a frame counts as "on" it
-    let small = |i: Icon| egui::Button::new(crate::icons::text(i, 11.0)).frame(false);
+    let times: Vec<f64> = keys.iter().map(|k| k.time.to_f64()).collect();
     // One whole-stack op writing this param's new animation.
     let write = |ctx: &RowCtx, animation: Animation| -> lumit_core::Op {
         let mut effects = ctx.layer.effects.clone();
@@ -70,57 +69,28 @@ pub(crate) fn effect_param_nav(
         }
     };
 
-    let has_prev = keys.iter().any(|k| k.time.to_f64() < ctx.lt - tol);
-    if c.add_enabled(has_prev, small(Icon::PrevKeyframe))
-        .on_hover_text("Previous keyframe")
-        .clicked()
-    {
-        *nav_jump = keys
-            .iter()
-            .rev()
-            .find(|k| k.time.to_f64() < ctx.lt - tol)
-            .map(|k| k.time.to_f64());
-    }
-
-    let on_key = keys.iter().any(|k| (k.time.to_f64() - ctx.lt).abs() < tol);
-    if c.add(small(if on_key {
-        Icon::KeyframeFilled
-    } else {
-        Icon::Keyframe
-    }))
-    .on_hover_text(if on_key {
-        "Remove keyframe here"
-    } else {
-        "Add keyframe here"
-    })
-    .clicked()
-    {
-        let animation = if on_key {
-            let kept: Vec<_> = keys
-                .iter()
-                .filter(|k| (k.time.to_f64() - ctx.lt).abs() >= tol)
-                .cloned()
-                .collect();
-            if kept.is_empty() {
-                Animation::Static(prop.value_at(ctx.lt))
+    match keyframe_navigator(c, &times, ctx.lt, ctx.fps, true) {
+        // No `AppState` here, so route the jump out for the caller to apply.
+        Some(KeyNavAction::Jump(kt)) => *nav_jump = Some(kt),
+        Some(KeyNavAction::Toggle { on_key }) => {
+            let tol = 0.5 / ctx.fps.max(1.0);
+            let animation = if on_key {
+                let kept: Vec<_> = keys
+                    .iter()
+                    .filter(|k| (k.time.to_f64() - ctx.lt).abs() >= tol)
+                    .cloned()
+                    .collect();
+                if kept.is_empty() {
+                    Animation::Static(prop.value_at(ctx.lt))
+                } else {
+                    Animation::Keyframed(kept)
+                }
             } else {
-                Animation::Keyframed(kept)
-            }
-        } else {
-            Animation::Keyframed(upsert_key(prop, ctx.lt, prop.value_at(ctx.lt)))
-        };
-        *pending = Some(write(ctx, animation));
-    }
-
-    let has_next = keys.iter().any(|k| k.time.to_f64() > ctx.lt + tol);
-    if c.add_enabled(has_next, small(Icon::NextKeyframe))
-        .on_hover_text("Next keyframe")
-        .clicked()
-    {
-        *nav_jump = keys
-            .iter()
-            .find(|k| k.time.to_f64() > ctx.lt + tol)
-            .map(|k| k.time.to_f64());
+                Animation::Keyframed(upsert_key(prop, ctx.lt, prop.value_at(ctx.lt)))
+            };
+            *pending = Some(write(ctx, animation));
+        }
+        None => {}
     }
 }
 

@@ -1318,6 +1318,13 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   another. Under the bonnet each speed keyframe becomes a segment of the retiming curve (a
   straight speed ramp between keys); the frame-accurate maths that keeps cuts on the beat is
   the same engine described above. Curved (eased) speed ramps are still the graph editor's job.
+  In its **Time** lens the row shows a source timecode you can scrub, and the viewer now
+  **updates live as you drag it** — because changing the retiming changes *which frame of the
+  footage* is on screen, the preview re-fetches that frame while you drag rather than waiting
+  for release (the same instant feedback a transform or effect value already gives). Every
+  keyframe row across the whole layer area — transform properties, the Retime Time/Velocity
+  row and effect parameters — also shares **one** `◄ ◆ ►` add/step navigator now, so they look
+  and behave identically wherever you meet them.
 - **Getting around the Timeline** — the panel is split into the **layer outline** on the left
   (the stack of names, stopwatches and toggles) and the **lane area** on the right (the time
   ruler with each layer's bar on its own *lane*). Each bar wears its layer's identity colour:

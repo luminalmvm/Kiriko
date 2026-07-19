@@ -1106,3 +1106,27 @@ fn key_selected_props_keys_transform_and_effect_at_the_playhead() {
         rk[0].time.to_f64()
     );
 }
+
+/// A Retime "Time" value drag must count as a live edit so the preview
+/// re-decodes with the dragged source frame (unlike a transform/effect drag,
+/// which re-composites the same decoded frame). Guards the field wiring behind
+/// that fix: `retime_edit` participates in both preview predicates.
+#[test]
+fn a_retime_time_drag_registers_as_a_live_edit() {
+    let mut app = AppState::default();
+    assert!(!app.live_edit_active(), "nothing dragging yet");
+    assert!(!app.is_interacting());
+    app.retime_edit = Some((
+        uuid::Uuid::nil(),
+        lumit_core::retime::Retime::constant_speed(
+            Rational::from_f64_on_grid(5.0, Rational::FLICK_DEN).unwrap(),
+            Rational::ZERO,
+            Rational::ONE,
+        ),
+    ));
+    assert!(
+        app.live_edit_active(),
+        "a Time drag must force the decode path on a cache-hit frame"
+    );
+    assert!(app.is_interacting(), "a Time drag pauses background fills");
+}

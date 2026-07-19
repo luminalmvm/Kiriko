@@ -1887,5 +1887,16 @@ frame, mirroring the Timeline, so the two panels never tread on each other's ran
 keys every selected row at the playhead in one undo step, each holding its current value —
 transforms as `SetTransformProperty`, effects folded per layer into one `SetLayerEffects`, and
 the Retime channel as a velocity-lens speed key (lens-independent and media-free, so a mixed
-keying is deterministic). Backwards compatibility is not required (pre-release). Built in an
-isolated worktree; not pushed — renumber on merge if another agent also claims K-158.
+keying is deterministic). (4) **One shared `◄ ◆ ►` keyframe navigator** (`keyframe_navigator`
+returning a `KeyNavAction` the caller commits) replaces the four drifted copies used by
+transform single props, transform linked pairs, the Retime row and effects — the
+Position/Anchor and Retime rows had kept the older `Keyframe`/`KeyframeAdd` glyphs instead of
+the effect navigator's `KeyframeFilled`/`Keyframe` look. The only per-row deviation the shared
+navigator supports is the Retime lens's structural endpoint keys (removal disabled there).
+(5) The **Retime "Time" value drag now drives the live preview** like transform (`prop_edit`)
+and effect (`fx_edit`) drags: a new `AppState::retime_edit` field carries the provisional
+retime store, and — because a retime change alters *which source frame* is on screen rather
+than how an already-decoded frame composites — the decode job builder overrides the layer's
+retime with it and re-decodes, rather than re-compositing. Backwards compatibility is not
+required (pre-release). Built in an isolated worktree; not pushed — renumber on merge if
+another agent also claims K-158.
