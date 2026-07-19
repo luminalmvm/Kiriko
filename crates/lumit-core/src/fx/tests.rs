@@ -3771,7 +3771,8 @@ fn scanlines_instantiates_and_resolves() {
     let e = instantiate("scanlines").unwrap();
     assert_eq!(e.float_at("intensity", 0.0), Some(0.35));
     assert_eq!(e.float_at("scanline_period", 0.0), Some(3.0));
-    assert_eq!(e.float_at("scanline_darkness", 0.0), Some(40.0));
+    // Darkness is gone (FX-13/K-147): Intensity is the single darken dial.
+    assert_eq!(e.float_at("scanline_darkness", 0.0), None);
     assert_eq!(e.float_at("scanline_roll", 0.0), Some(0.0));
     assert!(matches!(
         e.param("scanline_interlace"),
@@ -3788,13 +3789,46 @@ fn scanlines_instantiates_and_resolves() {
     assert_eq!(
         a,
         vec![Resolved::Scanlines {
-            intensity: 0.35,
-            period_px: 1.5, // 3 px@comp * px_scale 0.5
-            darkness: 0.40,
-            roll_px: 0.0, // roll speed 0
+            intensity: 0.35, // no Darkness param, so the raw Intensity stands
+            period_px: 1.5,  // 3 px@comp * px_scale 0.5
+            roll_px: 0.0,    // roll speed 0
             interlace: false,
             mix: 1.0,
         }]
+    );
+}
+
+#[test]
+fn scanlines_migrates_old_darkness_into_intensity() {
+    // An old project (FX-13/K-147) carried a separate Darkness param
+    // (0..100). On load it folds into the single Intensity so the darken is
+    // the old Intensity × Darkness product exactly.
+    let mut e = instantiate("scanlines").unwrap();
+    // Restore the pre-K-147 shape: Intensity 0.5 plus a Darkness of 80%.
+    for p in &mut e.params {
+        if p.id == "intensity" {
+            p.value = EffectValue::Float(Property::fixed(0.5));
+        }
+    }
+    e.params.push(crate::model::EffectParam {
+        id: "scanline_darkness".to_owned(),
+        value: EffectValue::Float(Property::fixed(80.0)),
+        extra: serde_json::Map::new(),
+    });
+    let a = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    // 0.5 × 0.80 = 0.40.
+    let Resolved::Scanlines { intensity, .. } = a[0] else {
+        panic!("expected a scanlines op");
+    };
+    assert!(
+        (intensity - 0.40).abs() < 1e-6,
+        "old Darkness folds into Intensity: got {intensity}"
     );
 }
 
@@ -3816,7 +3850,7 @@ fn cpu_scanlines_is_identity_at_zero_intensity() {
     let (w, h) = (17u32, 9u32);
     let img = transform_card(w, h);
     let mut a = img.clone();
-    cpu::scanlines(&mut a, w, h, 0.0, 3.0, 0.6, 1.0, true, 0.4);
+    cpu::scanlines(&mut a, w, h, 0.0, 3.0, 1.0, true, 0.4);
     assert_eq!(a, img, "intensity 0 is the exact identity");
 }
 
@@ -3864,9 +3898,10 @@ fn cpu_scanlines_darken_a_periodic_band() {
     let red_at = |img: &[f32], y: u32| img[(y * w * 4) as usize];
 
     // Period 4px, no roll, no interlace: rows 0-1 of every period are
-    // bright, rows 2-3 dark — the same shape every period.
+    // bright, rows 2-3 dark — the same shape every period. Intensity 0.5
+    // takes the dark rows to half brightness (1 − intensity).
     let mut out = img.clone();
-    cpu::scanlines(&mut out, w, h, 1.0, 4.0, 0.5, 0.0, false, 1.0);
+    cpu::scanlines(&mut out, w, h, 0.5, 4.0, 0.0, false, 1.0);
     for y in 0..h {
         let expect = if (y % 4) < 2 { 1.0 } else { 0.5 };
         assert_eq!(red_at(&out, y), expect, "row {y}");
@@ -3876,7 +3911,7 @@ fn cpu_scanlines_darken_a_periodic_band() {
     // (rows 4-7) is dark-then-bright instead of bright-then-dark;
     // period 0 and period 2 (even) are unaffected.
     let mut inter = img.clone();
-    cpu::scanlines(&mut inter, w, h, 1.0, 4.0, 0.5, 0.0, true, 1.0);
+    cpu::scanlines(&mut inter, w, h, 0.5, 4.0, 0.0, true, 1.0);
     assert_eq!(red_at(&inter, 0), 1.0, "period 0 unaffected");
     assert_eq!(red_at(&inter, 2), 0.5, "period 0 unaffected");
     assert_eq!(red_at(&inter, 4), 0.5, "period 1 flips: dark first");

@@ -348,17 +348,17 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
-    /// Scanlines (docs/08 §3.12, split out by K-107). `roll_px` is the
-    /// scanline pattern's already-computed pixel offset (roll speed × local
-    /// time × period), host-computed so the kernel never sees raw time.
-    /// Intensity 0 is the bit-exact passthrough (pinned by test).
+    /// Scanlines (docs/08 §3.12, split by K-107; single Intensity since
+    /// FX-13/K-147). `roll_px` is the scanline pattern's already-computed
+    /// pixel offset (roll speed × local time × period), host-computed so the
+    /// kernel never sees raw time. Intensity 0 is the bit-exact passthrough
+    /// (pinned by test).
     Scanlines {
-        /// The master 0..1 dial; scales the darken strength.
+        /// The single 0..1 dial: how dark the dark lines get (1 = black).
+        /// An old project's separate Darkness folds into this at resolve.
         intensity: f32,
         /// Raster pixels (px@comp × the §2.3 preview factor).
         period_px: f32,
-        /// 0..1.
-        darkness: f32,
         /// The scanline pattern's pixel offset at this frame (roll speed ×
         /// local time × period_px, host-computed).
         roll_px: f32,
@@ -1005,11 +1005,19 @@ fn resolve_one(
             })
         }
         "scanlines" => {
-            let intensity = (e.float_at("intensity", lt).unwrap_or(0.35) as f32).clamp(0.0, 1.0);
+            // The single Intensity (FX-13, K-147): 0..1 = how dark the dark
+            // lines get. An old project also carried a separate Darkness
+            // param (0..100): fold it in, so the loaded look is the old
+            // Intensity × Darkness product exactly. A new project has no
+            // Darkness param, so the raw Intensity stands.
+            let raw = e.float_at("intensity", lt).unwrap_or(0.35);
+            let folded = match e.float_at("scanline_darkness", lt) {
+                Some(darkness_pct) => raw * (darkness_pct / 100.0),
+                None => raw,
+            };
+            let intensity = (folded as f32).clamp(0.0, 1.0);
             let period_px =
                 (e.float_at("scanline_period", lt).unwrap_or(3.0) as f32 * px_scale).max(1.0);
-            let darkness = (e.float_at("scanline_darkness", lt).unwrap_or(40.0) as f32 / 100.0)
-                .clamp(0.0, 1.0);
             let roll_speed = e.float_at("scanline_roll", lt).unwrap_or(0.0);
             // The scanline pattern's pixel offset at this frame (roll
             // speed × local time × period), so the kernel never sees
@@ -1025,7 +1033,6 @@ fn resolve_one(
             Some(Resolved::Scanlines {
                 intensity,
                 period_px,
-                darkness,
                 roll_px,
                 interlace,
                 mix,

@@ -163,12 +163,11 @@ pub fn apply(rgba: &mut [f32], w: u32, h: u32, fx: &Resolved) {
         Resolved::Scanlines {
             intensity,
             period_px,
-            darkness,
             roll_px,
             interlace,
             mix,
         } => scanlines(
-            rgba, w, h, *intensity, *period_px, *darkness, *roll_px, *interlace, *mix,
+            rgba, w, h, *intensity, *period_px, *roll_px, *interlace, *mix,
         ),
         // Echo is temporal: it needs the layer's neighbour frames, which
         // this single-buffer in-place dispatcher does not carry. The real
@@ -1466,14 +1465,16 @@ pub fn block_glitch(
     }
 }
 
-/// Scanlines (docs/08 §3.12, split out by K-107): standalone periodic
-/// darken, the scanline section of the old combined Glitch effect. No
-/// hash, no block resample — reads the input pixel directly (pointwise,
-/// [`Roi::Exact`](super::Roi::Exact)), darkens by a periodic band in
-/// raster Y (plus the precomputed roll offset), alternating which half
-/// of the period darkens on odd periods when Interlace is on. Intensity
-/// 0 is the bit-exact passthrough, pinned by the early return below —
-/// the same neutral shape [`block_glitch`] uses.
+/// Scanlines (docs/08 §3.12, split out by K-107; single Intensity since
+/// FX-13/K-147): standalone periodic darken, the scanline section of the old
+/// combined Glitch effect. No hash, no block resample — reads the input pixel
+/// directly (pointwise, [`Roi::Exact`](super::Roi::Exact)), darkens the dark
+/// lines by a periodic band in raster Y (plus the precomputed roll offset),
+/// alternating which half of the period darkens on odd periods when Interlace
+/// is on. `intensity` is the single dial (0..1 = how dark the dark lines get,
+/// 1 = black); the bright half is untouched. Intensity 0 is the bit-exact
+/// passthrough, pinned by the early return below — the same neutral shape
+/// [`block_glitch`] uses.
 #[allow(clippy::too_many_arguments)]
 pub fn scanlines(
     rgba: &mut [f32],
@@ -1481,7 +1482,6 @@ pub fn scanlines(
     h: u32,
     intensity: f32,
     period_px: f32,
-    darkness: f32,
     roll_px: f32,
     interlace: bool,
     mix: f32,
@@ -1508,7 +1508,9 @@ pub fn scanlines(
             let t = cell - cell_floor;
             let odd = (cell_floor as i64).rem_euclid(2) != 0;
             let bright = (t < 0.5) != (interlace && odd);
-            let band = if bright { 1.0 } else { 1.0 - darkness };
+            // The dark half's base is black (band 0), so eff_mult is
+            // 1 − intensity there and 1 on the bright half.
+            let band = if bright { 1.0 } else { 0.0 };
             let eff_mult = 1.0 - intensity * (1.0 - band);
             c[0] *= eff_mult;
             c[1] *= eff_mult;

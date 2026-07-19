@@ -1684,3 +1684,18 @@ Auto-scale cover behaviour itself is gone (an intentional change — the wobble 
 zooms to hide edges). CPU/GPU parity and the §1.6 oracle hold across all three edge modes.
 Spec: [08-EFFECTS.md](08-EFFECTS.md) §3.4. Built in an isolated worktree; not pushed —
 another agent may also claim K-146, renumber on merge if so.
+
+**K-147 · DECIDED · Scanlines collapses to a single Intensity (FX-13).** The Scanlines
+effect (§3.12) previously carried two darken controls — **Intensity** (0–1) and **Darkness**
+(%) — that multiplied into one darken amount (`eff_mult = 1 − Intensity × Darkness` on the
+dark half), so two dials did one job. They collapse into a **single Intensity** (0–1 = *how
+dark the dark lines get*: 0 the bit-exact passthrough, 1 takes the dark half to black); the
+bright half is untouched and Line period / Roll speed / Interlace / Mix are unchanged. The
+schema drops `scanline_darkness` and bumps the effect version 1 → 2. **Migration:** a project
+saved with the old pair still carries its `scanline_darkness` param; the resolve arm folds it
+in — the single Intensity resolves to the old `Intensity × Darkness` product — so the loaded
+look is unchanged (pinned by `scanlines_migrates_old_darkness_into_intensity`). The kernel is
+simplified (the dark half's base is black, band 0, so `eff_mult = 1 − Intensity`), keeping
+CPU/GPU parity and the §1.6 oracle; Intensity 0 stays a bit-exact passthrough via the
+early-return. Spec: [08-EFFECTS.md](08-EFFECTS.md) §3.12. Built in an isolated worktree; not
+pushed — another agent may also claim K-147, renumber on merge if so.

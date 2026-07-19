@@ -561,7 +561,6 @@ pub fn run_ops(
             Resolved::Scanlines {
                 intensity,
                 period_px,
-                darkness,
                 roll_px,
                 interlace,
                 mix,
@@ -574,7 +573,6 @@ pub fn run_ops(
                     &lumit_gpu::fx::ScanlinesOp {
                         intensity: *intensity,
                         period_px: *period_px,
-                        darkness: *darkness,
                         roll_px: *roll_px,
                         interlace: *interlace,
                         mix: *mix,

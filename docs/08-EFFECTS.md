@@ -691,19 +691,23 @@ carries the layer's local time into its cache key with no effect-specific plumbi
 
 #### Scanlines
 
-**Parameters:** Intensity (0–1, default 0.35, the master dial), Line period (px@comp,
-default 3), Darkness (%, default 40), Roll speed (lines/s, default 0, either direction),
-Interlace offset (Bool, default off), Mix.
+**Parameters:** Intensity (0–1, default 0.35), Line period (px@comp, default 3), Roll speed
+(lines/s, default 0, either direction), Interlace offset (Bool, default off), Mix.
 
 **Algorithm sketch.** A pointwise periodic darken in raster Y (plus the roll offset — roll
 speed × time × period, host-computed so the kernel never sees raw time), alternating which
 half of each period darkens on odd periods when Interlace offset is on — the classic
-interlaced-field look. No hash, no neighbour read: reads the input pixel directly, so ROI is
-`exact` (tighter than Block glitch's `full-frame`) and there is no Seed parameter. Intensity
-0 is the bit-exact passthrough, pinned by the same early-return shape as Block glitch's.
-`cheap` cost. Not seeded (`seeded: false`) — its pixels are a pure function of the frame's
-own position and the host-computed roll offset, not a random-looking hash, so it needs no
-extra cache-key plumbing beyond the ordinary parameter-animation case.
+interlaced-field look. **Intensity is the single darken dial** (FX-13, K-147): 0..1 is *how
+dark the dark lines get* — 0 the bit-exact passthrough, 1 takes them to black; the bright
+half is untouched. This collapses the former Intensity × Darkness pair (which multiplied to
+one darken amount) into one control; a project saved with the old pair folds losslessly on
+load — the single Intensity resolves to the old Intensity × Darkness product. No hash, no
+neighbour read: reads the input pixel directly, so ROI is `exact` (tighter than Block
+glitch's `full-frame`) and there is no Seed parameter. Intensity 0 is the bit-exact
+passthrough, pinned by the same early-return shape as Block glitch's. `cheap` cost. Not
+seeded (`seeded: false`) — its pixels are a pure function of the frame's own position and the
+host-computed roll offset, not a random-looking hash, so it needs no extra cache-key plumbing
+beyond the ordinary parameter-animation case.
 
 #### Datamosh
 

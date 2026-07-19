@@ -141,16 +141,15 @@ struct BlockGlitchParams {
 }
 
 /// One resolved Scanlines (docs/08 §3.12, split out of the old combined
-/// Glitch effect by K-107). `roll_px` arrives already computed from local
-/// time (roll speed × time × period), so the kernel never sees raw time.
+/// Glitch effect by K-107; single Intensity since FX-13/K-147). `roll_px`
+/// arrives already computed from local time (roll speed × time × period), so
+/// the kernel never sees raw time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScanlinesOp {
-    /// The master 0..1 dial; scales the darken strength.
+    /// The single 0..1 dial: how dark the dark lines get (1 = black).
     pub intensity: f32,
     /// Raster pixels (px@comp × the §2.3 preview factor).
     pub period_px: f32,
-    /// 0..1.
-    pub darkness: f32,
     /// The scanline pattern's pixel offset at this frame, host-computed.
     pub roll_px: f32,
     pub interlace: bool,
@@ -163,12 +162,12 @@ pub struct ScanlinesOp {
 struct ScanlinesParams {
     intensity: f32,
     period: f32,
-    darkness: f32,
     roll_px: f32,
     interlace: u32,
     mix_amt: f32,
     _pad0: f32,
     _pad1: f32,
+    _pad2: f32,
 }
 
 impl FxEngine {
@@ -338,12 +337,12 @@ impl FxEngine {
             bytemuck::bytes_of(&ScanlinesParams {
                 intensity: op.intensity,
                 period: op.period_px,
-                darkness: op.darkness,
                 roll_px: op.roll_px,
                 interlace: u32::from(op.interlace),
                 mix_amt: op.mix,
                 _pad0: 0.0,
                 _pad1: 0.0,
+                _pad2: 0.0,
             }),
         );
         out

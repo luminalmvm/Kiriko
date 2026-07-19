@@ -7,14 +7,14 @@
 // full-frame).
 
 struct Params {
-    intensity: f32,  // 0..1: the master dial, scales the darken strength
+    intensity: f32,  // 0..1: how dark the dark lines get (1 = black)
     period: f32,     // raster px: the scanline pitch
-    darkness: f32,   // 0..1
     roll_px: f32,    // the scanline pattern's pixel offset this frame
     interlace: u32,  // 1 = alternate which half darkens on odd periods
     mix_amt: f32,    // 0..1, blended against the unprocessed input
     _pad0: f32,
     _pad1: f32,
+    _pad2: f32,
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -46,9 +46,11 @@ fn scanlines(@builtin(global_invocation_id) gid: vec3<u32>) {
     // cpu::scanlines's `(cell_floor as i64).rem_euclid(2) != 0`).
     let odd = abs(i32(cell_floor) % 2) != 0;
     let bright = (t < 0.5) != (p.interlace == 1u && odd);
+    // The dark half's base is black (band 0), so eff_mult is 1 − intensity
+    // there and 1 on the bright half.
     var band = 1.0;
     if (!bright) {
-        band = 1.0 - p.darkness;
+        band = 0.0;
     }
     let eff_mult = 1.0 - p.intensity * (1.0 - band);
     let darkened = vec4<f32>(o.r * eff_mult, o.g * eff_mult, o.b * eff_mult, o.a);

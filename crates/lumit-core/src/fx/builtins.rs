@@ -1656,17 +1656,19 @@ pub const BUILTINS: &[EffectSchema] = &[
         ],
     },
     // Scanlines (docs/08 §3.12, split out of the old combined Glitch effect
-    // by K-107). No hash, no seed — a pointwise periodic darken read
-    // straight from the input pixel, never a neighbour, so its ROI is
-    // `exact` (tighter than Block glitch's full-frame). Category Distortion,
-    // alongside Block glitch and Datamosh. Roll speed's sign is open (either
-    // direction); Interlace alternates which half of each scanline period
-    // darkens on odd periods, the classic interlaced-field look.
+    // by K-107; collapsed to a single Intensity by FX-13/K-147). No hash, no
+    // seed — a pointwise periodic darken read straight from the input pixel,
+    // never a neighbour, so its ROI is `exact` (tighter than Block glitch's
+    // full-frame). Category Distortion, alongside Block glitch and Datamosh.
+    // Roll speed's sign is open (either direction); Interlace alternates which
+    // half of each scanline period darkens on odd periods, the classic
+    // interlaced-field look. Intensity is now the one darken dial (the old
+    // separate Darkness param folds into it on load).
     EffectSchema {
         groups: &[],
         match_name: "scanlines",
         label: "Scanlines",
-        version: 1,
+        version: 2,
         category: FxCategory::Distortion,
         traits: EffectTraits {
             cost: CostClass::Cheap,
@@ -1680,8 +1682,11 @@ pub const BUILTINS: &[EffectSchema] = &[
             ParamSchema {
                 id: "intensity",
                 label: "Intensity",
-                // The master dial (§1.2): scales the darken strength. 0 is
-                // the bit-exact passthrough (pinned by test).
+                // The single dial (FX-13, K-147): 0..1 is how dark the dark
+                // lines get — 0 is the bit-exact passthrough (pinned by test),
+                // 1 takes the dark lines to black. Collapses the old
+                // Intensity × Darkness pair into one control; an old project's
+                // Darkness folds into this on load (the resolve arm).
                 kind: ParamKind::Float {
                     default: 0.35,
                     slider: (0.0, 1.0),
@@ -1696,15 +1701,6 @@ pub const BUILTINS: &[EffectSchema] = &[
                     default: 3.0,
                     slider: (1.0, 20.0),
                     hard: (Some(1.0), None),
-                },
-            },
-            ParamSchema {
-                id: "scanline_darkness",
-                label: "Darkness",
-                kind: ParamKind::Float {
-                    default: 40.0,
-                    slider: (0.0, 100.0),
-                    hard: (Some(0.0), Some(100.0)),
                 },
             },
             ParamSchema {

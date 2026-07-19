@@ -1579,11 +1579,10 @@ fn wgsl_block_glitch_matches_the_cpu_oracle() {
     }
 }
 
-/// The §1.6 oracle for Scanlines (docs/08 §3.12, split out by K-107):
-/// WGSL agrees with the CPU reference across intensity, period,
-/// darkness, roll and interlace, and is bit-stable (§2.4). Mirrors the
-/// old combined Glitch oracle's scanline cases — same maths, now a
-/// standalone pointwise pass with no block resample. Intensity 0 is
+/// The §1.6 oracle for Scanlines (docs/08 §3.12, split out by K-107; single
+/// Intensity since FX-13/K-147): WGSL agrees with the CPU reference across
+/// intensity, period, roll and interlace, and is bit-stable (§2.4). Intensity
+/// is now the sole darken dial (dark lines reach black at 1). Intensity 0 is
 /// asserted bit-exact against the untouched corpus regardless of Mix,
 /// matching the CPU reference's early return.
 #[test]
@@ -1600,7 +1599,6 @@ fn wgsl_scanlines_matches_the_cpu_oracle() {
         name: &'static str,
         intensity: f32,
         period_px: f32,
-        darkness: f32,
         roll_px: f32,
         interlace: bool,
         mix: f32,
@@ -1610,7 +1608,6 @@ fn wgsl_scanlines_matches_the_cpu_oracle() {
             name: "neutral-intensity0",
             intensity: 0.0,
             period_px: 3.0,
-            darkness: 0.6,
             roll_px: 1.0,
             interlace: true,
             mix: 0.4,
@@ -1619,7 +1616,6 @@ fn wgsl_scanlines_matches_the_cpu_oracle() {
             name: "moderate",
             intensity: 0.8,
             period_px: 4.0,
-            darkness: 0.5,
             roll_px: 2.5,
             interlace: true,
             mix: 1.0,
@@ -1628,7 +1624,6 @@ fn wgsl_scanlines_matches_the_cpu_oracle() {
             name: "full-partial-mix-no-interlace",
             intensity: 1.0,
             period_px: 2.5,
-            darkness: 0.8,
             roll_px: -1.5,
             interlace: false,
             mix: 0.6,
@@ -1643,7 +1638,6 @@ fn wgsl_scanlines_matches_the_cpu_oracle() {
             h,
             case.intensity,
             case.period_px,
-            case.darkness,
             case.roll_px,
             case.interlace,
             case.mix,
@@ -1653,7 +1647,6 @@ fn wgsl_scanlines_matches_the_cpu_oracle() {
         let op = ScanlinesOp {
             intensity: case.intensity,
             period_px: case.period_px,
-            darkness: case.darkness,
             roll_px: case.roll_px,
             interlace: case.interlace,
             mix: case.mix,
