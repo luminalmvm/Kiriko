@@ -54,8 +54,9 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
   and keyframeable like any other property.
 - [ ] **UI-12** Per-layer motion-blur toggle not visible — space seems reserved on the
   right of the layer area but the toggle isn't drawing.
-- [ ] **UI-13** Importing footage should auto-highlight it in the Project tab and switch to
-  that tab if not already there.
+- [x] **UI-13** Importing footage should auto-highlight it in the Project tab and switch to
+  that tab if not already there. — done: import selects the new item and raises the Project
+  tab (`focus_project_tab` flag consumed by the shell).
 - [ ] **UI-14** Bottom timeline bar: the graph-option buttons are slightly clipped — make
   room.
 - [ ] **UI-15** Viewfinder: in soft mode the zoomed preview spills over the border edges —

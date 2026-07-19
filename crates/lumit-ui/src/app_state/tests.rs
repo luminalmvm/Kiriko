@@ -301,6 +301,33 @@ fn comp_settings_dialog_edits_and_undoes() {
 /// bug was `preview_comp` (the add target) lagging behind `selected_comp`
 /// after a second comp was created.
 #[test]
+fn importing_footage_selects_it_and_requests_the_project_tab() {
+    // UI-13: an import highlights the new item in the Project panel and asks the
+    // shell to bring the Project tab to the front.
+    let mut app = AppState::default();
+    app.import_paths(vec![
+        std::path::PathBuf::from("a.mp4"),
+        std::path::PathBuf::from("b.mp4"),
+    ]);
+    let last = app
+        .store
+        .snapshot()
+        .items
+        .iter()
+        .rev()
+        .find_map(|i| match i {
+            ProjectItem::Footage(f) => Some(f.id),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(app.selected_item, Some(last), "the last import is selected");
+    assert!(
+        app.focus_project_tab,
+        "an import should request the Project tab"
+    );
+}
+
+#[test]
 fn a_new_composition_becomes_the_active_add_target() {
     let mut app = AppState::default();
 
@@ -518,4 +545,123 @@ fn a_live_edit_decodes_instead_of_taking_the_composite_cache() {
         app.cached_present, None,
         "a live edit forces a decode rather than a cache hit"
     );
+}
+
+#[test]
+fn repro_copy_move_paste() {
+    use lumit_core::anim::{Animation, Keyframe, SideInterp};
+    use lumit_core::model::TransformProp;
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+    app.add_solid_layer();
+    let comp_id = app.selected_comp.unwrap();
+    let layer_id = app.store.snapshot().comp(comp_id).unwrap().layers[0].id;
+    // Put two rotation keys at 1.0 and 2.0 (layer-local; start_offset = 0).
+    let keys = vec![
+        Keyframe {
+            time: Rational::from_f64_on_grid(1.0, Rational::FLICK_DEN).unwrap(),
+            value: 10.0,
+            interp_in: SideInterp::Linear,
+            interp_out: SideInterp::Linear,
+        },
+        Keyframe {
+            time: Rational::from_f64_on_grid(2.0, Rational::FLICK_DEN).unwrap(),
+            value: 20.0,
+            interp_in: SideInterp::Linear,
+            interp_out: SideInterp::Linear,
+        },
+    ];
+    app.commit(Op::SetTransformProperty {
+        comp: comp_id,
+        layer: layer_id,
+        prop: TransformProp::Rotation,
+        animation: Animation::Keyframed(keys),
+    });
+    // Select both lane keys.
+    app.lane_selection = vec![
+        LaneKeySel {
+            layer: layer_id,
+            row: PropRow::Transform(TransformProp::Rotation),
+            time: Rational::from_f64_on_grid(1.0, Rational::FLICK_DEN).unwrap(),
+        },
+        LaneKeySel {
+            layer: layer_id,
+            row: PropRow::Transform(TransformProp::Rotation),
+            time: Rational::from_f64_on_grid(2.0, Rational::FLICK_DEN).unwrap(),
+        },
+    ];
+    app.copy_selected_keyframes();
+    eprintln!("clipboard len = {}", app.keyframe_clipboard.len());
+    // Move the playhead to 3.0 s (fps 60 => frame 180).
+    let fps = app.store.snapshot().comp(comp_id).unwrap().frame_rate.fps();
+    app.preview_frame = (3.0 * fps).round() as usize;
+    app.paste_keyframes();
+    let comp = app.store.snapshot();
+    let layer = comp
+        .comp(comp_id)
+        .unwrap()
+        .layers
+        .iter()
+        .find(|l| l.id == layer_id)
+        .unwrap()
+        .clone();
+    let Animation::Keyframed(ks) = &layer.transform.get(TransformProp::Rotation).animation else {
+        panic!("expected keyframed rotation");
+    };
+    let ts: Vec<f64> = ks.iter().map(|k| k.time.to_f64()).collect();
+    eprintln!("rotation key times after paste = {ts:?}");
+    assert!(
+        ts.iter().any(|t| (t - 3.0).abs() < 0.05),
+        "expected a pasted key near 3.0: {ts:?}"
+    );
+    assert!(
+        ts.iter().any(|t| (t - 4.0).abs() < 0.05),
+        "expected a pasted key near 4.0: {ts:?}"
+    );
+}
+
+#[test]
+fn repro_click_grabs_focus() {
+    let ctx = egui::Context::default();
+    let focused_after = std::cell::Cell::new(true);
+    let run = |events: Vec<egui::Event>| {
+        let ri = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(200.0, 200.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(ri, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let rect =
+                    egui::Rect::from_min_size(egui::pos2(50.0, 50.0), egui::vec2(12.0, 14.0));
+                let _ = ui.interact(
+                    rect,
+                    egui::Id::new("lanekey"),
+                    egui::Sense::click_and_drag(),
+                );
+            });
+            focused_after.set(ctx.memory(|m| m.focused()).is_some());
+        });
+    };
+    let p = egui::pos2(56.0, 57.0);
+    run(vec![egui::Event::PointerMoved(p)]);
+    run(vec![egui::Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::default(),
+    }]);
+    run(vec![egui::Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::default(),
+    }]);
+    // Run one more idle frame to settle focus.
+    run(vec![]);
+    eprintln!("focused after click = {}", focused_after.get());
 }

@@ -20,6 +20,7 @@ impl AppState {
     /// Import media files (dialogue or drag-and-drop onto the window).
     pub fn import_paths(&mut self, files: Vec<PathBuf>) {
         let base = self.store.snapshot().items.len();
+        let mut last_id = None;
         for (i, file) in files.into_iter().enumerate() {
             let name = file
                 .file_name()
@@ -35,6 +36,7 @@ impl AppState {
                     extra: serde_json::Map::new(),
                 },
             };
+            last_id = Some(item.id);
             #[cfg(feature = "media")]
             let probe_target = (item.id, file.clone());
             self.commit(Op::AddItem {
@@ -43,6 +45,12 @@ impl AppState {
             });
             #[cfg(feature = "media")]
             self.media.spawn_probe(probe_target.0, probe_target.1);
+        }
+        // UI-13: highlight the freshly imported footage and ask the shell to
+        // bring the Project tab to the front, so the user sees where it landed.
+        if let Some(id) = last_id {
+            self.selected_item = Some(id);
+            self.focus_project_tab = true;
         }
     }
 

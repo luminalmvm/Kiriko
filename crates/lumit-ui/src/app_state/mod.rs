@@ -793,6 +793,10 @@ pub struct AppState {
     /// the strip renders deep inside the panel, so the request travels to the
     /// shell through here. Consumed each frame after the dock draws.
     pub pop_out_timeline: bool,
+    /// Set after importing footage (UI-13): the shell brings the Project tab to
+    /// the front so the user sees where the new item landed. Consumed each frame
+    /// after the dock draws, like `pop_out_timeline`.
+    pub focus_project_tab: bool,
     /// The layer whose name is being edited inline in the Timeline outline, and
     /// its live edit buffer. Double-clicking a layer name opens the editor;
     /// Enter or focus-loss commits a `RenameLayer`, Escape cancels. Session
@@ -920,6 +924,7 @@ impl Default for AppState {
             comp_counter: 0,
             open_comps: Vec::new(),
             pop_out_timeline: false,
+            focus_project_tab: false,
             renaming_layer: None,
             layer_reorder: None,
             selected_item: None,

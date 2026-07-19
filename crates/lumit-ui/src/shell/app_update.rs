@@ -1027,6 +1027,12 @@ impl Shell {
             }
         }
 
+        // UI-13: after an import, bring the Project tab to the front so the new
+        // footage is visible where it was just selected.
+        if std::mem::take(&mut app.focus_project_tab) {
+            activate_panel_tab(dock, Panel::Project);
+        }
+
         // Render each floating panel in its own OS window (an immediate
         // viewport, so it can borrow the live app state). Closing the window
         // docks the panel back into the tree where it came from.
