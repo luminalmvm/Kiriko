@@ -547,8 +547,13 @@ fn a_live_edit_decodes_instead_of_taking_the_composite_cache() {
     );
 }
 
+/// UI-7 end-to-end (logic level): copy a lane keyframe selection, move the
+/// playhead, paste — the copied keys reappear at the new playhead preserving
+/// their relative offsets, on the correct property, leaving the originals in
+/// place. This exercises `copy_selected_keyframes` → `paste_keyframes` directly
+/// (the shortcut routing is covered separately in `shell::shortcuts`).
 #[test]
-fn repro_copy_move_paste() {
+fn copy_move_paste_replays_keys_at_the_playhead() {
     use lumit_core::anim::{Animation, Keyframe, SideInterp};
     use lumit_core::model::TransformProp;
     let mut app = AppState::default();
@@ -592,7 +597,7 @@ fn repro_copy_move_paste() {
         },
     ];
     app.copy_selected_keyframes();
-    eprintln!("clipboard len = {}", app.keyframe_clipboard.len());
+    assert_eq!(app.keyframe_clipboard.len(), 2, "both keys must be copied");
     // Move the playhead to 3.0 s (fps 60 => frame 180).
     let fps = app.store.snapshot().comp(comp_id).unwrap().frame_rate.fps();
     app.preview_frame = (3.0 * fps).round() as usize;
@@ -610,7 +615,16 @@ fn repro_copy_move_paste() {
         panic!("expected keyframed rotation");
     };
     let ts: Vec<f64> = ks.iter().map(|k| k.time.to_f64()).collect();
-    eprintln!("rotation key times after paste = {ts:?}");
+    // The two originals stay put; the two pasted keys land at 3.0 and 4.0
+    // (playhead + each key's offset from the copy anchor).
+    assert!(
+        ts.iter().any(|t| (t - 1.0).abs() < 0.05),
+        "the original key at 1.0 must remain: {ts:?}"
+    );
+    assert!(
+        ts.iter().any(|t| (t - 2.0).abs() < 0.05),
+        "the original key at 2.0 must remain: {ts:?}"
+    );
     assert!(
         ts.iter().any(|t| (t - 3.0).abs() < 0.05),
         "expected a pasted key near 3.0: {ts:?}"
@@ -621,8 +635,13 @@ fn repro_copy_move_paste() {
     );
 }
 
+/// UI-7 supporting fact: a lane-key glyph is drawn with `Sense::click_and_drag`,
+/// which egui marks focusable — but selecting one (a click) does not leave it
+/// holding keyboard focus. So `keyframe_clipboard_shortcuts`' "skip while a
+/// widget is focused" guard is not tripped just because keys are selected, and
+/// the copy/paste gesture still routes to the timeline.
 #[test]
-fn repro_click_grabs_focus() {
+fn clicking_a_lane_key_glyph_does_not_hold_focus() {
     let ctx = egui::Context::default();
     let focused_after = std::cell::Cell::new(true);
     let run = |events: Vec<egui::Event>| {
@@ -661,7 +680,10 @@ fn repro_click_grabs_focus() {
         pressed: false,
         modifiers: egui::Modifiers::default(),
     }]);
-    // Run one more idle frame to settle focus.
+    // One more idle frame to settle focus.
     run(vec![]);
-    eprintln!("focused after click = {}", focused_after.get());
+    assert!(
+        !focused_after.get(),
+        "selecting a lane key must not leave a widget holding focus"
+    );
 }

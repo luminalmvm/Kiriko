@@ -82,17 +82,15 @@ impl Shell {
     /// Ctrl/Cmd+C copies the selected lane keyframes; Ctrl/Cmd+V pastes them at
     /// the playhead (note 2.2). Handled on both platforms. Skipped while a text
     /// field is focused, so its own copy/paste keeps working; otherwise there is
-    /// no other C/V binding, so it is safe to consume.
+    /// no other copy/paste consumer, so it is safe to take the gesture. A clicked
+    /// lane-key glyph does not hold keyboard focus (see
+    /// `clicking_a_lane_key_glyph_does_not_hold_focus`), so having a keyframe
+    /// selection never trips the focus guard.
     pub(super) fn keyframe_clipboard_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.memory(|m| m.focused()).is_some() {
             return;
         }
-        let (copy, paste) = ctx.input_mut(|i| {
-            (
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::C),
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::V),
-            )
-        });
+        let (copy, paste) = keyframe_clipboard_intent(ctx);
         if copy {
             self.app.copy_selected_keyframes();
         }
@@ -128,5 +126,103 @@ impl Shell {
         if ctx.input_mut(|i| i.consume_shortcut(&PALETTE)) {
             self.open_command_palette();
         }
+    }
+}
+
+/// The lane keyframe copy/paste gesture this frame, taken from the input events.
+///
+/// UI-7: egui-winit translates Ctrl/Cmd+C and Ctrl/Cmd+V (and the dedicated
+/// Copy/Paste keys) into [`egui::Event::Copy`] / [`egui::Event::Paste`] and never
+/// emits a `Key::C` / `Key::V` press for them — so the previous wiring, which
+/// read `consume_key(COMMAND, Key::C/V)`, could never fire and paste did nothing.
+/// This reads the actual clipboard events and consumes them, so no other reader
+/// acts on the same gesture. Returns `(copy, paste)`.
+pub(crate) fn keyframe_clipboard_intent(ctx: &egui::Context) -> (bool, bool) {
+    ctx.input_mut(|i| {
+        let mut copy = false;
+        let mut paste = false;
+        i.events.retain(|e| match e {
+            egui::Event::Copy => {
+                copy = true;
+                false
+            }
+            egui::Event::Paste(_) => {
+                paste = true;
+                false
+            }
+            _ => true,
+        });
+        (copy, paste)
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// Drive one headless frame with `events` and return the copy/paste gesture
+    /// `keyframe_clipboard_intent` reads from it.
+    fn intent_from(events: Vec<egui::Event>) -> (bool, bool) {
+        let ctx = egui::Context::default();
+        let out = std::cell::Cell::new((false, false));
+        let ri = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(ri, |ctx| {
+            out.set(keyframe_clipboard_intent(ctx));
+        });
+        out.get()
+    }
+
+    /// UI-7 regression: Ctrl/Cmd+C reaches egui as `Event::Copy`, not a `Key::C`
+    /// press, so the gesture must be read from the clipboard event. Before the
+    /// fix the wiring watched `Key::C`, so this arrived as nothing and copy never
+    /// ran.
+    #[test]
+    fn a_copy_event_is_read_as_the_copy_gesture() {
+        assert_eq!(intent_from(vec![egui::Event::Copy]), (true, false));
+    }
+
+    /// Likewise Ctrl/Cmd+V arrives as `Event::Paste`, never a `Key::V` press.
+    #[test]
+    fn a_paste_event_is_read_as_the_paste_gesture() {
+        assert_eq!(
+            intent_from(vec![egui::Event::Paste(String::new())]),
+            (false, true)
+        );
+    }
+
+    /// A bare `Key::C` press (no clipboard translation) is NOT a copy gesture —
+    /// this is exactly what the old `consume_key(Key::C)` wiring keyed on, and
+    /// why it never fired for a real Ctrl+C.
+    #[test]
+    fn a_plain_key_c_press_is_not_a_copy_gesture() {
+        let key_c = egui::Event::Key {
+            key: egui::Key::C,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        assert_eq!(intent_from(vec![key_c]), (false, false));
+    }
+
+    /// The gesture is consumed, so a text field drawn later in the frame does not
+    /// also act on the same Copy/Paste.
+    #[test]
+    fn reading_the_gesture_consumes_the_events() {
+        let ctx = egui::Context::default();
+        let remaining = std::cell::Cell::new(usize::MAX);
+        let ri = egui::RawInput {
+            events: vec![egui::Event::Copy, egui::Event::Paste(String::new())],
+            ..Default::default()
+        };
+        let _ = ctx.run(ri, |ctx| {
+            let _ = keyframe_clipboard_intent(ctx);
+            remaining.set(ctx.input(|i| i.events.len()));
+        });
+        assert_eq!(remaining.get(), 0, "the clipboard events must be consumed");
     }
 }
