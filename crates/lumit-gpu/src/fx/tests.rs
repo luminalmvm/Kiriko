@@ -2272,13 +2272,15 @@ fn wgsl_motion_blur_matches_the_cpu_oracle() {
 }
 
 /// The §1.6 oracle for Datamosh (docs/08 §3.12, K-104; its own effect
-/// since K-107): the GPU single-tap warp matches
-/// `lumit_core::fx::cpu::datamosh` given the same -1 neighbour and flow
-/// field, on a constant field and a varying one — the same two shapes
-/// [`wgsl_motion_blur_matches_the_cpu_oracle`] exercises, since both
-/// kernels read flow the same way. One bilinear tap, no multi-tap sum,
-/// so it holds to the same ≤ 2 fp16 ULP cheap-class bound. The GPU is
-/// bit-stable (§2.4); Intensity 0 is a bit-exact passthrough.
+/// since K-107; reworked to a flow-driven melt by K-164/T19): the GPU
+/// streamline melt matches `lumit_core::fx::cpu::datamosh` given the same
+/// -1 neighbour and flow field, on a constant field and a varying one — the
+/// same two shapes [`wgsl_motion_blur_matches_the_cpu_oracle`] exercises,
+/// since both kernels read flow the same way. The walk is a multi-tap
+/// bilinear sum like Motion blur's streak (plus a bilinear flow re-sample
+/// each step), so it holds to the same ≤ 2 fp16 ULP bound Motion blur does.
+/// The bloom and step counts vary across the cases; the GPU is bit-stable
+/// (§2.4); Intensity 0 is a bit-exact passthrough.
 #[test]
 fn wgsl_datamosh_matches_the_cpu_oracle() {
     let Ok(ctx) = GpuContext::headless() else {
@@ -2317,20 +2319,44 @@ fn wgsl_datamosh_matches_the_cpu_oracle() {
     }
     let varying = (vary_u, vary_v);
 
-    // Streak length (FX-14) scales the flow reach; the > 1 intensity case
-    // exercises the open ceiling (K-135), which mix() extrapolates past the
-    // moshed frame in both the CPU and GPU paths.
-    for (field, intensity, streak, name) in [
-        (&constant, 1.0f32, 1.0f32, "constant streak1"),
-        (&varying, 0.6, 2.0, "varying streak2"),
-        (&constant, 0.35, 4.0, "partial mix streak4"),
-        (&varying, 1.4, 1.5, "over-unity streak1.5"),
+    // Displacement sets the reach, steps the tap count, bloom the accumulation;
+    // the > 1 intensity case exercises the open ceiling (K-135), which mix()
+    // extrapolates past the moshed frame in both the CPU and GPU paths.
+    for (field, intensity, displacement, bloom, steps, name) in [
+        (
+            &constant,
+            1.0f32,
+            1.0f32,
+            0.6f32,
+            1,
+            "constant reach1 step1",
+        ),
+        (&varying, 0.6, 2.0, 1.0, 2, "varying reach2 bloom1"),
+        (&constant, 0.35, 4.0, 0.0, 4, "reach4 bloom0"),
+        (&varying, 1.4, 6.0, 0.5, 6, "over-unity reach6"),
+        (&varying, 0.8, 12.0, 0.85, 12, "long melt reach12"),
     ] {
         let (u, v) = field;
-        let cpu = lumit_core::fx::cpu::datamosh(&current, &prev, w, h, u, v, intensity, streak);
+        let cpu = lumit_core::fx::cpu::datamosh(
+            &current,
+            &prev,
+            w,
+            h,
+            u,
+            v,
+            intensity,
+            displacement,
+            bloom,
+            steps,
+        );
         // Datamosh reads only the flow .xy; confidence is irrelevant (empty).
         let flow_t = upload_flow_field(&ctx, u, v, &[], w, h);
-        let op = DatamoshOp { intensity, streak };
+        let op = DatamoshOp {
+            intensity,
+            displacement,
+            bloom,
+            steps,
+        };
         let out = fx.datamosh(&ctx, &cur_t, &prev_t, &flow_t, w, h, &op);
         let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
         let worst = worst_f16_ulp(&cpu, &gpu);
@@ -2344,7 +2370,7 @@ fn wgsl_datamosh_matches_the_cpu_oracle() {
         );
     }
 
-    // Intensity 0 must be a bit-exact passthrough regardless of motion/streak.
+    // Intensity 0 must be a bit-exact passthrough regardless of the melt.
     let moving = upload_flow_field(&ctx, &constant.0, &constant.1, &[], w, h);
     let out = fx.datamosh(
         &ctx,
@@ -2355,7 +2381,9 @@ fn wgsl_datamosh_matches_the_cpu_oracle() {
         h,
         &DatamoshOp {
             intensity: 0.0,
-            streak: 8.0,
+            displacement: 8.0,
+            bloom: 0.7,
+            steps: 8,
         },
     );
     assert_eq!(

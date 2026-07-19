@@ -1025,20 +1025,56 @@ pub fn motion_blur(
     }
 }
 
-/// The §1.6 oracle for Datamosh (docs/08 §3.12, K-104; Streak length added
-/// FX-14/K-148): the CPU twin of `fx_datamosh.wgsl`, op-for-op. `current` is
-/// the already block/scanline'd frame (linear premultiplied RGBA) this
-/// section blends against; `prev` is the raw -1 source neighbour; `u`/`v` are
-/// the dense flow the decode worker measured from the current frame to it
-/// (this raster's pixel grid, one entry per pixel — the same current→neighbour
+/// Clamp-addressed bilinear sample of a two-channel flow field (`u`/`v` as
+/// separate per-pixel arrays), the exact arithmetic order [`bilinear`] uses so
+/// the WGSL `bilinear_flow` matches op-for-op. Used to re-sample the flow at
+/// each streamline step of [`datamosh`], so the melt follows curved motion.
+fn bilinear_uv(u: &[f32], v: &[f32], w: u32, h: u32, sx: f32, sy: f32) -> (f32, f32) {
+    let fx = sx - 0.5;
+    let fy = sy - 0.5;
+    let x0 = fx.floor();
+    let y0 = fy.floor();
+    let tx = fx - x0;
+    let ty = fy - y0;
+    let (wi, hi) = (w as i64, h as i64);
+    let at = |x: i64, y: i64| {
+        let s = (y.clamp(0, hi - 1) * wi + x.clamp(0, wi - 1)) as usize;
+        (u[s], v[s])
+    };
+    let (x0, y0) = (x0 as i64, y0 as i64);
+    let (u00, v00) = at(x0, y0);
+    let (u10, v10) = at(x0 + 1, y0);
+    let (u01, v01) = at(x0, y0 + 1);
+    let (u11, v11) = at(x0 + 1, y0 + 1);
+    let lerp = |a: f32, b: f32, c: f32, d: f32| {
+        let top = a * (1.0 - tx) + b * tx;
+        let bottom = c * (1.0 - tx) + d * tx;
+        top * (1.0 - ty) + bottom * ty
+    };
+    (lerp(u00, u10, u01, u11), lerp(v00, v10, v01, v11))
+}
+
+/// The §1.6 oracle for Datamosh (docs/08 §3.12, K-104; reworked to a
+/// flow-driven melt by K-164/T19): the CPU twin of `fx_datamosh.wgsl`,
+/// op-for-op. `current` is the already-effected frame (linear premultiplied
+/// RGBA) the melt blends over; `prev` is the raw -1 source neighbour; `u`/`v`
+/// are the dense current→previous flow the decode worker measured (this
+/// raster's pixel grid, one entry per pixel — the same current→neighbour
 /// convention [`motion_blur`] uses for its own +1 neighbour, just pointed at
-/// -1). A single bilinear tap per pixel, not a streak integral: this looks up
-/// one displaced source pixel (motion-compensated prediction), not a line
-/// integral of motion. `streak` scales the flow displacement, so the warp
-/// reaches that many frames of predicted motion (1 = the historical
-/// one-frame prediction; higher accumulates more smear). `intensity == 0.0`
-/// collapses the blend to zero, so the result is the bit-exact `current`
-/// input regardless of `streak`.
+/// -1).
+///
+/// Per pixel, a **streamline walk** of `steps` bilinear taps follows the flow
+/// out of `prev`: starting at the pixel centre, each step re-samples the flow
+/// at the current position and advances by `displacement / steps` of it (≈ one
+/// frame of motion per step), then samples `prev` there. The samples accumulate
+/// with a geometric weight `bloom^k` from the near end, so `bloom == 0` keeps
+/// only the nearest step (a short, quickly-resetting trail) and `bloom == 1`
+/// averages the whole walk evenly (a long melting bloom). The weighted mean is
+/// the moshed prediction, blended over `current` by `intensity`. `intensity ==
+/// 0.0` collapses the blend to zero, so the result is the bit-exact `current`
+/// input regardless of the other parameters. Fixed tap order and count for
+/// determinism (§2.4); edges clamp (the shared [`bilinear`] rule), so a walk
+/// off-frame reads the border rather than darkening.
 #[allow(clippy::too_many_arguments)]
 pub fn datamosh(
     current: &[f32],
@@ -1048,20 +1084,37 @@ pub fn datamosh(
     u: &[f32],
     v: &[f32],
     intensity: f32,
-    streak: f32,
+    displacement: f32,
+    bloom: f32,
+    steps: i32,
 ) -> Vec<f32> {
     let mut out = current.to_vec();
+    let n = steps.max(1);
+    let step = displacement / n as f32;
     for y in 0..h {
         for x in 0..w {
             let idx = (y * w + x) as usize;
             let i = idx * 4;
-            let pos = (
-                x as f32 + 0.5 + u[idx] * streak,
-                y as f32 + 0.5 + v[idx] * streak,
-            );
-            let warped = bilinear(prev, w, h, pos.0, pos.1);
+            let mut px = x as f32 + 0.5;
+            let mut py = y as f32 + 0.5;
+            let mut acc = [0.0f32; 4];
+            let mut wsum = 0.0f32;
+            let mut wt = 1.0f32;
+            for _ in 0..n {
+                let (fu, fv) = bilinear_uv(u, v, w, h, px, py);
+                px += fu * step;
+                py += fv * step;
+                let s = bilinear(prev, w, h, px, py);
+                for c in 0..4 {
+                    acc[c] += s[c] * wt;
+                }
+                wsum += wt;
+                wt *= bloom;
+            }
+            let inv = 1.0 / wsum;
             for c in 0..4 {
-                out[i + c] = current[i + c] * (1.0 - intensity) + warped[c] * intensity;
+                let warped = acc[c] * inv;
+                out[i + c] = current[i + c] * (1.0 - intensity) + warped * intensity;
             }
         }
     }

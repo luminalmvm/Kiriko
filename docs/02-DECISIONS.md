@@ -2024,3 +2024,45 @@ oracle and WGSL kernel (the kernel is unchanged, so preview == export holds, K-0
 `SPECTRAL_BASIS` const and its column-sum test are retired. Pre-release, no migration. This
 resolves the §3.6 open question and supersedes the "physically-based dispersion" detail of
 K-090/K-144 (the smooth-many-tap machinery is otherwise unchanged). Built on `main`.
+
+**K-164 · DECIDED · Datamosh is reimplemented as a flow-driven streamline melt with Bloom and
+a periodic Reset (T19).** From the owner's test note T19 ("reimplement referencing the
+well-known datamoshing technique; adjust params as needed"). The K-104/K-148 Datamosh (§3.12)
+was a single motion-compensated tap — it warped the -1 source neighbour by that pixel's own
+flow vector once and blended it over the current frame. T19 rebuilds it toward the genuine
+datamosh look (removing I-frames so a frame's motion vectors keep being applied to the *wrong*
+picture, dragging and blooming the moving regions). The new per-pixel kernel is a **streamline
+walk**: starting at the pixel centre it follows the current→previous flow field out of the -1
+neighbour, **re-sampling the flow at each step** (so the smear curves with the motion) and
+advancing ~one frame of motion per step, then sampling the neighbour there; the samples
+accumulate with a geometric weight into a melting prediction blended over the current frame.
+Four params (schema version 2 → 3):
+- **Intensity** (open ceiling, K-135) — blend strength; 0 the bit-exact passthrough.
+- **Displacement** (frames, ≥ 1, open) — the walk's reach; the tap count is derived from it
+  (~one tap per frame of motion, clamped 2–64). Supersedes K-148's `streak_length`, still read
+  as a fallback so an existing instance keeps its reach (pre-release, no migration required).
+- **Bloom** (0–1) — how much of the reach accumulates: 0 keeps the nearest step (a short,
+  quickly-resetting trail ≈ the old single tap), 1 averages the whole walk (a long melting
+  bloom). The "accumulates vs resets" dial.
+- **Reset interval** (seconds, 0 = off) — the simulated I-frame period. When set, the melt
+  ramps from a clean frame just after each reset up to full by the next (a sawtooth in layer
+  time, computed in resolve and folded into the effective Intensity and Displacement), so the
+  kernel stays time-agnostic and the frame-cache key already covers it (a param+time function —
+  the K-093/K-094 reasoning; no `ALGO_VERSION` bump). It is in **seconds, not frames**, because
+  the resolve step is frame-rate-agnostic — a frame-count interval needs the comp frame index
+  threaded through `resolve_stack`, the broad signature change K-148 deferred, and this delivers
+  the periodic-reset look without it. A **content-driven reset** still fires regardless (zero/
+  unmeasurable flow at a still or cut holds the picture, where a real codec inserts its I-frame).
+
+No new host plumbing: it keeps Datamosh's existing threaded inputs (current frame, -1 source
+neighbour, one shared flow field) and its `temporal: {-1, 0}` static reach, so
+`stack_flow_neighbour`/`stack_temporal_window` and the one-flow-field-per-layer rule (K-104) are
+unchanged. Cost rises **cheap → moderate** (a multi-tap streamline like Motion blur's streak,
+plus a flow re-sample each step); ROI stays `full-frame`, `seeded: false`. The GPU kernel
+mirrors the CPU oracle (`lumit_core::fx::cpu::datamosh`) op-for-op — the same walk, tap order,
+bloom weights and edge-clamp — measured worst **1 fp16 ULP** across a bloom/step sweep, within
+the ≤ 2 bound. Sites: schema (`fx/builtins.rs`), `Resolved::Datamosh` variant + resolve arm
+(`fx/resolved.rs`), CPU reference (`fx/cpu.rs`), WGSL kernel (`fx_datamosh.wgsl`) + `DatamoshOp`
+(`lumit-gpu/src/fx/temporal.rs`) + UI dispatch (`lumit-ui/src/fxops.rs`); docs (§3.12, GUIDE).
+Built in an isolated worktree; renumbered from K-161 to K-164 on merge (K-161-163 were taken by
+the main session's T17 / T24 / A1).

@@ -183,7 +183,12 @@ parallel pass left several not-quite-right). No migration burden (pre-release).
 - [x] T16 Vignette: added a Ramp param (gamma on the smoothstep falloff; default 1.0, 0.2–4, hard min 0.05). Full 4-site + oracle (non-identity ramp case).
 - [x] T17 RGB split: removed the Radial option (K-161); added the shared 3-colour picker. Now a linear tinted-tap fringe — default red/green/blue tints reproduce the classic split bit-for-bit. Full 4-site + oracle.
 - [ ] T18 Shake: add its own motion-blur twirl (toggle + amount), computed from inter-frame movement, applying only to this effect.
-- [ ] T19 Datamosh: reimplement referencing https://github.com/tiberiuiancu/datamoshing; adjust params as needed.
+- [x] T19 (K-164) Datamosh reimplemented as a flow-driven **streamline melt**: per pixel a walk
+  follows the flow out of the -1 neighbour (re-sampling the flow each step so the smear curves),
+  accumulating a melting prediction over the current frame. New params **Displacement** (frames of
+  reach, supersedes Streak length), **Bloom** (accumulate ↔ reset trail) and **Reset interval**
+  (seconds; a deterministic periodic I-frame ramp folded into resolve). Content-driven reset kept.
+  Full 4-site + oracle (worst 1 fp16 ULP); cost cheap→moderate.
 - [ ] T20 Flash still broken — likely because beat detection isn't working (beats grid shows nothing) with the audio.
 - [~] T21 Echo Mode reworked: Behind + In front (effect-only orders) at the TOP with a divider (new Choice `dividers_after`), then the standard blend set; Max dropped (= Lighten); added Difference/Exclusion/Subtract/Divide. Shared `BlendMode::name`/`ALL` back the layer dropdown. NOT full 26-mode parity: HSL/burn/dodge are ill-defined on a premultiplied light trail — deliberately curated, logged as §3.13 open question (flagged at check-in). Full 4-site + oracle.
 - [~] T22 The composition MB master button now lives in the timeline's top row (TL4), next to the view toggle — AE's timeline motion-blur button. (The comp-level master already exists — `comp.motion_blur` + `Op::SetCompMotionBlur`; with it on, layers whose own MB switch is set blur. The redundant accumulation-MB *effect* removal + the full DAG-forcing proposal is separate follow-up work.)

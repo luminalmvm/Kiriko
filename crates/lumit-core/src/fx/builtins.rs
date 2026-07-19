@@ -1816,20 +1816,23 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
-    // Datamosh (docs/08 §3.12, K-104, split out on its own by K-107; FX-14/
-    // K-148 lifted the Intensity cap and added Streak length): re-warps the
-    // -1 source neighbour along the flow measured from this frame to it —
-    // "reused an old frame's motion" — blended by Intensity. Streak length
-    // scales that flow displacement, so the single warp reaches that many
-    // frames of predicted motion — the accumulated smear of a long P-frame
-    // run before a clean reference frame (longer = more smearing). Reuses
-    // Motion blur's flow machinery and its GPU pass/CPU oracle
-    // (`FxEngine::datamosh`, `cpu::datamosh`). Previously a toggle inside the
-    // combined Glitch effect with a dynamic per-instance temporal reach (the
-    // one place `stack_temporal_window`/`stack_flow_neighbour` read a param
-    // value instead of the schema's own static `temporal`); as its own effect
-    // that toggle is gone and the reach is simply the schema's `{0, -1}`,
-    // exactly the static shape Motion blur's own `{0, 1}` already has.
+    // Datamosh (docs/08 §3.12, K-104; its own effect since K-107; reworked to
+    // a flow-driven melt by K-164/T19). Simulates the compression-glitch look
+    // of removing I-frames: the previous picture keeps being dragged along the
+    // current frame's motion, so moving regions smear and bloom while static
+    // ones stay. Per pixel, a short streamline walk follows the current→
+    // previous flow field out of the -1 source neighbour — each step advances
+    // by (roughly) one frame of motion, re-sampling the flow so the smear
+    // curves with the motion — and the samples along that walk accumulate into
+    // a melting prediction that blends over the current frame by Intensity.
+    // Displacement sets how many frames of motion the walk reaches; Bloom sets
+    // how much of that reach accumulates (a short reset trail near 0, a long
+    // melting trail near 1); Reset interval periodically ramps the whole melt
+    // back to a clean frame (the simulated I-frame). Reuses Motion blur's flow
+    // machinery and its GPU pass/CPU oracle (`FxEngine::datamosh`,
+    // `cpu::datamosh`); no new host plumbing. Temporal reach `{0, -1}`,
+    // static, exactly the shape Motion blur's own `{0, +1}` has, so
+    // `stack_flow_neighbour` reads the match name the same static way.
     // Footage-only: with no -1 neighbour or flow field (a non-footage layer,
     // or a dropped decode) it degrades to a no-op, never a fault. Category
     // Distortion, matching Shake and RGB split (its closest siblings: a
@@ -1839,13 +1842,16 @@ pub const BUILTINS: &[EffectSchema] = &[
         groups: &[],
         match_name: "datamosh",
         label: "Datamosh",
-        version: 2,
+        version: 3,
         category: FxCategory::Distortion,
         traits: EffectTraits {
-            cost: CostClass::Cheap,
-            // One bilinear tap, but the flow can point anywhere in the
-            // frame — the same unbounded-read reasoning Motion blur's own
-            // full-frame ROI already carries for its flow-directed taps.
+            // A streamline of up to 64 bilinear taps (like Motion blur's own
+            // streak integral), not the single tap the K-104/K-148 version
+            // took — moderate, the same class as Motion blur and Echo.
+            cost: CostClass::Moderate,
+            // The flow can point anywhere in the frame — the same unbounded-
+            // read reasoning Motion blur's own full-frame ROI carries for its
+            // flow-directed taps.
             roi: Roi::FullFrame,
             temporal: &[0, -1],
             premultiplied: true,
@@ -1867,16 +1873,48 @@ pub const BUILTINS: &[EffectSchema] = &[
                 },
             },
             ParamSchema {
-                id: "streak_length",
-                label: "Streak length",
-                // Frames of predicted motion the single warp reaches: 1 is
-                // the historical one-frame prediction, higher reaches further
-                // along the flow so more smearing accumulates (the P-frame run
-                // length between clean reference frames). Open above (K-135).
+                id: "displacement",
+                label: "Displacement",
+                // Frames of predicted motion the streamline walk reaches
+                // (each step advances ~1 frame of flow): 1 is a one-frame
+                // prediction, higher reaches further so more smearing
+                // accumulates (the P-frame run length between clean reference
+                // frames). Open above (K-135); id `displacement` supersedes
+                // the K-148 `streak_length`, still read as a fallback.
                 kind: ParamKind::Float {
                     default: 4.0,
                     slider: (1.0, 16.0),
                     hard: (Some(1.0), None),
+                },
+            },
+            ParamSchema {
+                id: "bloom",
+                label: "Bloom",
+                // How much of the reach accumulates into the smear: 0 keeps
+                // only the nearest step (a short, quickly-resetting trail), 1
+                // averages the whole walk evenly (a long melting bloom). A
+                // pure 0..1 ratio — the natural unit for a blend weight.
+                kind: ParamKind::Float {
+                    default: 0.6,
+                    slider: (0.0, 1.0),
+                    hard: (Some(0.0), Some(1.0)),
+                },
+            },
+            ParamSchema {
+                id: "reset_interval",
+                label: "Reset interval",
+                // Seconds between simulated I-frames: the melt ramps from a
+                // clean frame just after each reset up to full by the next,
+                // the accumulating-P-frame look. 0 turns the periodic reset
+                // off (a constant melt); the content-driven reset — stills and
+                // cuts, where the flow is zero — still fires regardless. In
+                // seconds (not frames) because the resolve step is frame-rate-
+                // agnostic; a frame-count interval needs the comp frame index
+                // threaded through resolve, a deferred broad change (K-148).
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (0.0, 5.0),
+                    hard: (Some(0.0), None),
                 },
             },
             MIX_PARAM,
@@ -1944,7 +1982,7 @@ pub const BUILTINS: &[EffectSchema] = &[
                 // (the old "Normal"). Max is gone — it was just Lighten. The
                 // HSL / burn / dodge modes a layer offers are omitted here: they
                 // are ill-defined on a premultiplied light trail (see §3.13 Open
-                // questions). Default is Screen (K-161/FX-17). Pre-release, no
+                // questions). Default is Screen (FX-17/K-149). Pre-release, no
                 // migration: old stored indices simply re-map.
                 kind: ParamKind::Choice {
                     options: &[

@@ -57,27 +57,34 @@ struct MotionBlurParams {
 }
 
 /// One resolved Datamosh pass (docs/08 §3.12, K-104; its own effect since
-/// K-107; Streak length added FX-14/K-148). The raw -1 source neighbour and
-/// the dense current→previous flow field arrive as their own textures (see
-/// [`FxEngine::datamosh`]); this op carries the blend scalar and the streak
-/// reach. Callers fold the schema's Intensity and host Mix into `intensity`
-/// before calling (mixing the same two inputs twice collapses to one mix by
-/// the product), so this kernel and its CPU oracle need no second blend knob.
+/// K-107; reworked to a flow-driven melt by K-164/T19). The raw -1 source
+/// neighbour and the dense current→previous flow field arrive as their own
+/// textures (see [`FxEngine::datamosh`]); this op carries the melt scalars.
+/// Callers fold the schema's Intensity and host Mix into `intensity` before
+/// calling (mixing the same two inputs twice collapses to one mix by the
+/// product), so this kernel and its CPU oracle need no second blend knob.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DatamoshOp {
-    /// Blended against the current frame; > 1 extrapolates (K-135/FX-14).
+    /// Blended over the current frame; > 1 extrapolates (K-135/FX-14).
     pub intensity: f32,
-    /// Frames of predicted motion the warp reaches (FX-14): scales the flow
-    /// displacement. 1 is the historical one-frame prediction.
-    pub streak: f32,
+    /// Frames of predicted motion the streamline walk reaches (K-164); the
+    /// walk's `steps` taps span it.
+    pub displacement: f32,
+    /// 0..1, how much of the reach accumulates into the smear (K-161): 0 a
+    /// short trail, 1 a long melting bloom.
+    pub bloom: f32,
+    /// Bilinear taps along the walk (2..64, or 1 at a sub-frame reach) — the
+    /// same count the CPU oracle loops.
+    pub steps: i32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DatamoshParams {
     intensity: f32,
-    streak: f32,
-    _pad: [f32; 2],
+    displacement: f32,
+    bloom: f32,
+    steps: i32,
 }
 
 impl FxEngine {
@@ -227,13 +234,13 @@ impl FxEngine {
         out
     }
 
-    /// Apply Datamosh (docs/08 §3.12, K-104; its own effect since K-107)
-    /// to a linear working texture, returning a new texture of the
-    /// same size. One pass: per output pixel, read its current→previous
-    /// motion vector from `flow`, scale it by `op.streak` (the frames of
-    /// predicted motion the warp reaches), and take a single bilinear tap of
-    /// `prev` at the displaced position — a motion-compensated prediction,
-    /// not a streak integral — then blend against `cur` by Intensity. Shares
+    /// Apply Datamosh (docs/08 §3.12, K-104; its own effect since K-107;
+    /// reworked to a flow-driven melt by K-164/T19) to a linear working
+    /// texture, returning a new texture of the same size. One pass: per output
+    /// pixel, a streamline walk of `op.steps` taps follows the `flow` field out
+    /// of `prev` (re-sampling the flow each step, advancing ~one frame of
+    /// motion), accumulating the samples with a `op.bloom` geometric weight,
+    /// then blends the weighted mean over `cur` by Intensity. Shares
     /// [`Self::mb_layout`]/its pipeline layout with Motion blur (same
     /// three-sampled-input shape); its own pipeline and shader.
     #[allow(clippy::too_many_arguments)]
@@ -255,8 +262,9 @@ impl FxEngine {
                 label: Some("fx-dm-params"),
                 contents: bytemuck::bytes_of(&DatamoshParams {
                     intensity: op.intensity,
-                    streak: op.streak,
-                    _pad: [0.0; 2],
+                    displacement: op.displacement,
+                    bloom: op.bloom,
+                    steps: op.steps,
                 }),
                 usage: wgpu::BufferUsages::UNIFORM,
             });

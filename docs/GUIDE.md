@@ -196,33 +196,45 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   effect is doing. A still frame, a shutter of zero, or zero confidence leaves the picture
   untouched. For now it follows the footage's own motion only (not, yet, motion you add with
   keyframes) and works on footage layers, the same starting scope Echo has.
-- **Datamosh** — the corrupted-video "reused an old frame's motion" look, and the third
-  effect to use the flow-field machinery Motion blur introduced. Real video codecs sometimes
-  drop a frame's actual picture data and just reuse the previous frame's content nudged by
-  that frame's motion vectors — which looks like melting, trailing smears where things
-  moved. This effect fakes that on purpose: it works out how far every pixel moved between
-  the frame *before* this one and this one (the same kind of arrow-map Motion blur reads,
-  just measured one frame earlier), then paints each pixel of *this* frame by looking up
-  where that arrow says its content used to be, back in the previous frame — a single lookup
-  per pixel, not Motion blur's multi-step smear along the arrow. Intensity fades between the
-  ordinary frame and the moshed one — and it now goes *above* full, past the moshed frame, for
-  a harder tear when you want it (the effect used to be too subtle). A new **Streak length**
-  dial says how many frames of motion that single lookup reaches along: at 1 it predicts one
-  frame ahead (the old behaviour), higher and it reaches further, so more smearing piles up —
-  the way a long run of "reused" frames drifts further and further from the last clean one
-  before a real codec inserts a fresh frame. The "clean frame" reset here happens naturally
-  wherever there's no motion to follow (a still, a cut), which is exactly where a codec would
-  put one; a fixed every-N-frames reset would need the effect to know the frame number, which
-  it does not today, so that is left for later. It started life as a toggle inside Glitch, off by
-  default, because turning it on meant fetching an extra frame and running the motion-arrow
-  calculation, unlike Glitch's other two sections which were always on; when Glitch split
-  into three separate effects, Datamosh kept that same shape as its own effect — you simply
-  do not add it to a layer unless you want the look, rather than flicking a switch inside a
-  bigger effect. One wrinkle worth knowing: the app can only carry one motion-arrow map per
-  layer per frame right now, so if a layer somehow had both Motion blur and Datamosh turned
-  on together, only whichever one is listed first in the effect stack gets its arrows this
-  frame — the other quietly sits out, the same "missing data, do nothing" safety rule every
-  temporal effect already follows.
+- **Datamosh** — the corrupted-video "melting picture" look, rebuilt (T19) to follow motion
+  properly. Real video codecs sometimes drop a frame's actual picture and just reuse the last
+  one nudged by that frame's motion arrows; when this keeps happening, the old picture is
+  dragged further and further along the motion and everything that's moving smears and *blooms*
+  while the still parts stay put. This effect fakes that on purpose. For every pixel it takes a
+  short **walk** along the motion arrows, starting from the previous frame: each step follows
+  the arrow at the spot it's currently standing on (re-reading the arrow as it goes, so the
+  smear *curves* with the motion instead of running dead straight), nudges along by about one
+  frame's worth of movement, and picks up the previous frame's colour there. Those picked-up
+  colours are blended together into a melting streak, which is then laid over the ordinary
+  frame. Four dials shape it:
+  - **Intensity** — how strongly the melt is laid over the true frame. It goes *above* full,
+    which over-shoots past the moshed picture for a harder tear; at zero the effect does
+    nothing at all.
+  - **Displacement** — how far the walk reaches, measured in frames of motion. Higher reaches
+    further along the arrows, so a longer smear piles up — the way a long run of "reused"
+    frames drifts further from the last clean one. (This replaces the old "Streak length" dial;
+    an older project's setting is read straight into it, so nothing changes on load.)
+  - **Bloom** — how much of that reach actually accumulates. Turned down, only the nearest bit
+    of the walk counts, so the trail is short and keeps resetting; turned up, the whole walk
+    averages together into a long, drawn-out melt. It is the "does the smear pile up, or keep
+    starting fresh" control.
+  - **Reset interval** — an optional clock, in seconds, for the "clean frame" that a real codec
+    inserts now and then. Leave it at zero and the melt just runs continuously. Set it, and the
+    whole melt fades back to a clean picture at each tick and then builds up again until the
+    next — the classic datamosh rhythm of clean, melt, melt, melt, clean. (It's in seconds
+    rather than a frame count because, at the point in the pipeline where this is worked out,
+    the effect doesn't know the project's frame rate; a frame-count version is a later job.) On
+    top of that clock, a clean frame *also* happens by itself wherever there's no motion to
+    follow — a still, or a hard cut — which is exactly where a codec would put one.
+
+  It started life as a toggle inside Glitch, off by default, because turning it on means
+  fetching an extra frame and running the motion-arrow calculation; when Glitch split into
+  three separate effects it became its own, and T19 rebuilt its insides into the walk described
+  above. One wrinkle worth knowing: the app can only carry one motion-arrow map per layer per
+  frame right now, so if a layer somehow had both Motion blur and Datamosh turned on together,
+  only whichever one is listed first in the effect stack gets its arrows this frame — the other
+  quietly sits out, the same "missing data, do nothing" safety rule every temporal effect
+  already follows.
 - **Posterize time — the stop-motion "on twos" look, and a new kind of effect entirely.**
   Every effect so far takes a finished picture and paints on it. **Posterize time** does
   something different: it changes *what moment in time* the layers render at. Drop it on a

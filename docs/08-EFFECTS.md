@@ -207,7 +207,7 @@ specified in §3.1's original text but surfaced as layer UI, not an effect. Summ
 | 3.11 | LUT | stock + Looks | trivial | `{0}` |
 | 3.12 | Block glitch | Universe / glitch packs | cheap | `{0}` |
 | 3.12 | Scanlines | Universe / glitch packs | cheap | `{0}` |
-| 3.12 | Datamosh | Universe / glitch packs | cheap | `{-1, 0}` |
+| 3.12 | Datamosh | Universe / glitch packs | moderate | `{-1, 0}` |
 | 3.13 | Echo | stock Echo / speed-lines packs | moderate | `{-n..0}` |
 | 3.14 | Vignette | stock CC pack vignette | cheap | `{0}` |
 | 3.15 | Chromatic aberration | stock CC pack fillers | cheap | `{0}` |
@@ -740,45 +740,70 @@ beyond the ordinary parameter-animation case.
 
 #### Datamosh
 
-**Parameters:** Intensity (default 0.5, open above per K-135), Streak length (frames,
-default 4, hard min 1, open above per K-135), Mix.
+**Parameters:** Intensity (default 0.5, open above per K-135), Displacement (frames, default
+4, hard min 1, open above per K-135), Bloom (0–1, default 0.6), Reset interval (seconds,
+default 0 = off, hard min 0, open above), Mix.
 
-**Algorithm sketch.** Simulates I-frame removal by re-warping the previous source frame
-with the flow field measured from the current frame to it, instead of showing the current
-frame — blended by Intensity × Mix. It is a *look*, not real bitstream corruption —
-deterministic and safe. Reuses the §3.2 flow machinery Motion blur introduced (`flow_pair`
-on the shared `FlowEngine`) rather than needing new plumbing. A single bilinear tap per
-pixel reads the -1 neighbour at the position its own flow vector displaces to — a
-motion-compensated prediction, not Motion blur's multi-tap streak integral. **Streak length**
-(FX-14, K-148) scales that flow displacement, so the single warp reaches that many frames of
-predicted motion — the accumulated smear of a long P-frame run before a clean reference frame
-(longer = more smearing), directly addressing the effect being too subtle at one frame's
-reach. The clean "reset" is content-driven: where the flow is zero or unmeasurable (a still,
-a cut) the warp lands on the pixel itself, exactly where a real codec inserts an I-frame; a
-fixed-interval I-frame reset would need the comp frame index threaded into resolve and is a
-later refinement. **Intensity's hard ceiling is open** (K-135): above 1 the blend
-extrapolates past the moshed frame for a punchier tear (`mix()` does not clamp in either the
-CPU or GPU path); 0 stays the bit-exact passthrough regardless of Streak length. Only the
-flow's `.xy` is read (the shared field's `.z` confidence lane is left untouched).
-Footage-only: with no -1 neighbour or flow field (a non-footage layer, or a dropped decode)
-it degrades to a no-op, never a fault. Temporal window `{-1, 0}` — statically, unlike its
-K-104-era shape as
-a toggle inside the combined Glitch effect (see Status below). A layer can carry only one
-flow field per frame in v1; if a stack somehow has both a live Motion blur and a live
-Datamosh, whichever comes first in stack order wins the single slot and the other's
-flow-dependent behaviour degrades to its own missing-field passthrough — never a fault,
-pinned by test. `cheap` cost (one bilinear tap), `full-frame` ROI (the flow can point
-anywhere in the frame, the same unbounded-read reasoning Motion blur's own ROI carries).
-Not seeded (`seeded: false`) — no hash or random-looking sequence, just flow-directed
-sampling.
+**Algorithm sketch (K-164/T19).** Simulates the compression-glitch look of removing I-frames:
+the previous picture keeps being dragged along the current frame's motion, so moving regions
+smear and *bloom* while static ones stay. It is a *look*, not real bitstream corruption —
+deterministic and safe. Reuses the §3.2 flow machinery Motion blur introduced (the shared
+`FlowEngine`) rather than needing new plumbing; only the flow's `.xy` is read (the shared
+field's `.z` confidence lane is left untouched).
 
-**Status (K-104, its own effect since K-107):** originally shipped as a toggle
-(`datamosh_enabled`, off by default) inside the combined Glitch effect — the one place
-`stack_temporal_window`/`stack_flow_neighbour` read a param value instead of a schema's
-static `temporal` trait, because the section was footage-only and opted in rather than
-silently changing every existing Glitch instance's output the moment it landed. As its own
-effect that per-instance toggle is gone: `temporal: {-1, 0}` is simply the schema's own
-static declaration, exactly the shape Motion blur's own `{0, +1}` already has, and
+Per output pixel a short **streamline walk** follows the current→previous flow field out of
+the -1 source neighbour: starting at the pixel centre, each step re-samples the flow at its
+current position (so the smear curves with the motion) and advances by roughly one frame of
+that motion, then samples the -1 neighbour there. The samples accumulate into a melting
+prediction, which blends over the current frame by **Intensity × Mix**. The three shaping
+controls:
+
+- **Displacement** (frames) — how far the walk reaches, i.e. how many frames of predicted
+  motion it accumulates (the P-frame run length before a clean reference frame; longer = more
+  melt). The tap count is derived from it (one tap ≈ one frame of motion, clamped 2–64), so it
+  supersedes K-148's Streak length; an old project's `streak_length` is still read as the
+  reach so its look is unchanged.
+- **Bloom** (0–1) — how much of that reach accumulates into the smear. Near 0 only the nearest
+  step survives (a short, quickly-resetting trail — close to the old single-tap prediction);
+  near 1 the whole walk averages evenly (a long, melting bloom). It is the "accumulates vs
+  resets" dial, weighting the taps geometrically (`bloom^k`) from the near end.
+- **Reset interval** (seconds) — the simulated I-frame period. Off (0) the melt runs
+  constantly; set, the whole melt ramps from a *clean frame* just after each reset up to full
+  by the next — the accumulating-P-frame look, restarting on a fixed cadence. The ramp is a
+  pure function of layer time (a sawtooth), computed in resolve and folded into Intensity and
+  Displacement, so the kernel stays time-agnostic and the frame-cache key already covers it (a
+  param+time function, the K-093/K-094 reasoning). It is in *seconds*, not frames, because the
+  resolve step is frame-rate-agnostic; a frame-count interval would need the comp frame index
+  threaded through resolve, the deferred broad change K-148 avoided. A **content-driven reset**
+  also fires regardless: where the flow is zero or unmeasurable (a still, a cut) the walk does
+  not move, so the picture holds — exactly where a real codec inserts an I-frame.
+
+**Intensity's hard ceiling is open** (K-135): above 1 the blend extrapolates past the moshed
+frame for a punchier tear (`mix()` does not clamp in either the CPU or GPU path); 0 stays the
+bit-exact passthrough regardless of the other parameters (pinned by test).
+
+Footage-only: with no -1 neighbour or flow field (a non-footage layer, or a dropped decode) it
+degrades to a no-op, never a fault. Temporal window `{-1, 0}` — static, exactly the shape
+Motion blur's own `{0, +1}` has, so `stack_flow_neighbour` reads the match name the same
+static way. A layer can carry only one flow field per frame in v1; if a stack somehow has both
+a live Motion blur and a live Datamosh, whichever comes first in stack order wins the single
+slot and the other's flow-dependent behaviour degrades to its own missing-field passthrough —
+never a fault, pinned by test. `moderate` cost (a multi-tap streamline like Motion blur's
+streak, plus a bilinear flow re-sample each step), `full-frame` ROI (the flow can point
+anywhere in the frame, the same unbounded-read reasoning Motion blur's own ROI carries). Not
+seeded (`seeded: false`) — no hash or random-looking sequence, just flow-directed sampling.
+Oracle: GPU matches `lumit_core::fx::cpu::datamosh` at ≤ 2 fp16 ULP (measured worst 1 across
+the bloom and step sweep).
+
+**Status (K-104, its own effect since K-107, reworked to a flow-driven melt by K-164/T19):**
+originally a single motion-compensated tap that warped the -1 neighbour by its own flow vector
+(a "reused old motion" prediction), added first as a toggle (`datamosh_enabled`) inside the
+combined Glitch effect and split out at K-107. T19 rebuilt it referencing the well-known
+datamoshing technique (removing I-frames so P-frame motion keeps being applied to the wrong
+picture) into the streamline-melt above, adding the Bloom accumulation dial and the periodic
+Reset. The schema bumps version 2 → 3; pre-release, no migration is required (K-148's
+`streak_length` is still read as the Displacement reach as a courtesy, so an existing instance
+keeps its look). `temporal: {-1, 0}` remains the schema's static declaration and
 `stack_flow_neighbour` reads the match name the same static way it reads Motion blur's.
 
 ### 3.13 Echo — frame echo and trails (speed lines)

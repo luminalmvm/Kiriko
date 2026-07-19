@@ -605,7 +605,9 @@ fn motion_blur_and_datamosh_together_the_first_in_stack_order_wins() {
 fn datamosh_instantiates_and_resolves() {
     let e = instantiate("datamosh").unwrap();
     assert_eq!(e.float_at("intensity", 0.0), Some(0.5));
-    assert_eq!(e.float_at("streak_length", 0.0), Some(4.0));
+    assert_eq!(e.float_at("displacement", 0.0), Some(4.0));
+    assert_eq!(e.float_at("bloom", 0.0), Some(0.6));
+    assert_eq!(e.float_at("reset_interval", 0.0), Some(0.0));
     assert_eq!(e.float_at("mix", 0.0), Some(100.0));
 
     let r = resolve_stack(
@@ -615,11 +617,14 @@ fn datamosh_instantiates_and_resolves() {
         1.0,
         &MarkerContext::NONE,
     );
+    // Reset off (interval 0) → full ramp; displacement 4 → 4 taps.
     assert_eq!(
         r,
         vec![Resolved::Datamosh {
             intensity: 0.5,
-            streak: 4.0,
+            displacement: 4.0,
+            bloom: 0.6,
+            steps: 4,
             mix: 1.0,
         }]
     );
@@ -645,23 +650,25 @@ fn datamosh_instantiates_and_resolves() {
         r,
         vec![Resolved::Datamosh {
             intensity: 0.0,
-            streak: 4.0,
+            displacement: 4.0,
+            bloom: 0.6,
+            steps: 4,
             mix: 1.0,
         }]
     );
 }
 
 #[test]
-fn datamosh_intensity_ceiling_is_open_and_streak_migrates() {
-    // FX-14/K-148: the Intensity hard cap lifted (K-135), so a typed value
-    // above 1 resolves through for a punchier tear; Streak length is clamped
-    // at 1 below and open above.
+fn datamosh_intensity_ceiling_is_open_and_displacement_migrates() {
+    // FX-14/K-148/K-161: the Intensity hard cap is lifted (K-135), so a typed
+    // value above 1 resolves through for a punchier tear; Displacement is
+    // clamped at 1 below and open above.
     let mut e = instantiate("datamosh").unwrap();
     for p in &mut e.params {
         if p.id == "intensity" {
             p.value = EffectValue::Float(Property::fixed(2.5));
         }
-        if p.id == "streak_length" {
+        if p.id == "displacement" {
             p.value = EffectValue::Float(Property::fixed(9.0));
         }
     }
@@ -670,28 +677,85 @@ fn datamosh_intensity_ceiling_is_open_and_streak_migrates() {
         r,
         vec![Resolved::Datamosh {
             intensity: 2.5,
-            streak: 9.0,
+            displacement: 9.0,
+            bloom: 0.6,
+            steps: 9,
             mix: 1.0,
         }]
     );
 
-    // An old project (pre-FX-14) has no streak_length param: it folds to the
-    // default 4-frame reach, and its intensity is no longer capped at 1.
+    // An old project (K-148) carries `streak_length`, not `displacement`: the
+    // resolve reads it as the reach fallback, so the loaded look is unchanged.
     let mut legacy = instantiate("datamosh").unwrap();
-    legacy.params.retain(|p| p.id != "streak_length");
     for p in &mut legacy.params {
-        if p.id == "intensity" {
-            p.value = EffectValue::Float(Property::fixed(1.0));
+        if p.id == "displacement" {
+            p.id = "streak_length".to_string();
+            p.value = EffectValue::Float(Property::fixed(7.0));
         }
     }
     let r = resolve_stack(&[legacy], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
     assert_eq!(
         r,
         vec![Resolved::Datamosh {
-            intensity: 1.0,
-            streak: 4.0,
+            intensity: 0.5,
+            displacement: 7.0,
+            bloom: 0.6,
+            steps: 7,
             mix: 1.0,
         }]
+    );
+}
+
+/// Resolve one datamosh instance at `lt` and return its `(intensity,
+/// displacement)`; a small helper for the reset-ramp test.
+fn datamosh_reach(e: &EffectInstance, lt: f64) -> (f32, f32) {
+    match &resolve_stack(
+        std::slice::from_ref(e),
+        lt,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    )[..]
+    {
+        [Resolved::Datamosh {
+            intensity,
+            displacement,
+            ..
+        }] => (*intensity, *displacement),
+        other => panic!("expected one Datamosh, got {other:?}"),
+    }
+}
+
+#[test]
+fn datamosh_reset_interval_ramps_the_melt() {
+    // K-164: a non-zero Reset interval ramps the melt from a clean frame just
+    // after each reset up to full by the next — a pure function of layer time.
+    let mut e = instantiate("datamosh").unwrap();
+    for p in &mut e.params {
+        if p.id == "reset_interval" {
+            p.value = EffectValue::Float(Property::fixed(2.0));
+        }
+    }
+    // At each reset boundary (t = 0, 2, 4 s with a 2 s interval) the melt is a
+    // clean frame: intensity and displacement both 0.
+    assert_eq!(datamosh_reach(&e, 0.0), (0.0, 0.0));
+    assert_eq!(datamosh_reach(&e, 2.0), (0.0, 0.0));
+    // Half-way through the interval the ramp is 0.5.
+    let (mid_i, mid_d) = datamosh_reach(&e, 1.0);
+    assert!((mid_i - 0.25).abs() < 1e-6, "intensity 0.5 × 0.5");
+    assert!((mid_d - 2.0).abs() < 1e-6, "displacement 4 × 0.5");
+    // Just before the next reset the ramp is near full.
+    let (late_i, late_d) = datamosh_reach(&e, 1.9);
+    assert!(
+        late_i > mid_i && late_d > mid_d,
+        "the melt grows across the run"
+    );
+    // Interval 0 (the default) leaves the melt at full strength always.
+    let off = instantiate("datamosh").unwrap();
+    assert_eq!(
+        datamosh_reach(&off, 0.0),
+        (0.5, 4.0),
+        "reset off → full melt at t=0"
     );
 }
 
@@ -709,7 +773,9 @@ fn cpu_apply_datamosh_is_a_passthrough() {
         h,
         &Resolved::Datamosh {
             intensity: 1.0,
-            streak: 4.0,
+            displacement: 4.0,
+            bloom: 0.6,
+            steps: 4,
             mix: 1.0,
         },
     );
@@ -955,29 +1021,28 @@ fn cpu_datamosh_zero_intensity_is_the_bit_exact_current_frame() {
     let current: Vec<f32> = (0..n * 4).map(|i| (i % 7) as f32 * 0.1).collect();
     let prev: Vec<f32> = (0..n * 4).map(|i| (i % 5) as f32 * 0.2).collect();
     let (u, v) = (vec![3.0f32; n], vec![-2.0f32; n]);
-    // Streak has no effect at intensity 0 — the blend collapses to `current`.
-    let out = cpu::datamosh(&current, &prev, w, h, &u, &v, 0.0, 8.0);
+    // The melt has no effect at intensity 0 — the blend collapses to `current`.
+    let out = cpu::datamosh(&current, &prev, w, h, &u, &v, 0.0, 8.0, 0.7, 8);
     assert_eq!(out, current, "intensity 0 is a bit-exact passthrough");
 }
 
 #[test]
 fn cpu_datamosh_full_intensity_reads_the_shifted_previous_frame() {
-    // A single bright premultiplied pixel in `prev`; datamosh at full
-    // intensity with a flow that points straight at it should recover
-    // that pixel's colour at the sampling position, not `current`'s.
+    // A single bright premultiplied pixel in `prev`; a one-step walk whose
+    // flow points straight at it should recover that pixel's colour at the
+    // sampling position, not `current`'s.
     let (w, h) = (9u32, 9u32);
     let n = (w * h) as usize;
     let current = vec![0.0f32; n * 4]; // all black
     let mut prev = vec![0.0f32; n * 4];
     let bright = ((4 * w + 6) * 4) as usize; // (x=6, y=4)
     prev[bright..bright + 4].copy_from_slice(&[4.0, 2.0, 1.0, 1.0]);
-    // Sample position for output pixel (4, 4) is (4 + u, 4 + v); pointing
-    // it at (6, 4) means u = 2, v = 0.
+    // Output pixel (4, 4) walks one step of flow u = 2 (× displacement 1) to
+    // (6, 4).
     let mut u = vec![0.0f32; n];
     let v = vec![0.0f32; n];
     u[(4 * w + 4) as usize] = 2.0;
-    // Streak 1 is the historical one-frame prediction: u = 2 lands on (6, 4).
-    let out = cpu::datamosh(&current, &prev, w, h, &u, &v, 1.0, 1.0);
+    let out = cpu::datamosh(&current, &prev, w, h, &u, &v, 1.0, 1.0, 0.6, 1);
     let i = ((4 * w + 4) * 4) as usize;
     assert_eq!(&out[i..i + 4], &[4.0, 2.0, 1.0, 1.0]);
     // A pixel whose flow is zero and whose `prev` neighbourhood is dark
@@ -986,10 +1051,10 @@ fn cpu_datamosh_full_intensity_reads_the_shifted_previous_frame() {
 }
 
 #[test]
-fn cpu_datamosh_streak_scales_the_flow_reach() {
-    // A single bright pixel at (6, 4). A half-strength flow of u = 1 reaches
-    // it only when Streak length doubles the displacement to 2 (FX-14): the
-    // warp then predicts two frames of motion from one frame's flow.
+fn cpu_datamosh_displacement_scales_the_flow_reach() {
+    // A single bright pixel at (6, 4). A flow of u = 1 reaches it only when
+    // Displacement doubles the one-step reach to 2 (K-161): the walk then
+    // predicts two frames of motion from one frame's flow.
     let (w, h) = (9u32, 9u32);
     let n = (w * h) as usize;
     let current = vec![0.0f32; n * 4];
@@ -1001,12 +1066,39 @@ fn cpu_datamosh_streak_scales_the_flow_reach() {
     u[(4 * w + 4) as usize] = 1.0; // one frame of flow points halfway there
     let i = ((4 * w + 4) * 4) as usize;
 
-    // Streak 1: u = 1 lands on (5, 4) — still dark, the bright pixel unreached.
-    let short = cpu::datamosh(&current, &prev, w, h, &u, &v, 1.0, 1.0);
+    // Displacement 1, one step: u = 1 lands on (5, 4) — the bright pixel unreached.
+    let short = cpu::datamosh(&current, &prev, w, h, &u, &v, 1.0, 1.0, 0.6, 1);
     assert_eq!(&short[i..i + 4], &[0.0, 0.0, 0.0, 0.0]);
-    // Streak 2: u × 2 = 2 lands on (6, 4) — the bright pixel is now recovered.
-    let long = cpu::datamosh(&current, &prev, w, h, &u, &v, 1.0, 2.0);
+    // Displacement 2, one step: u × 2 = 2 lands on (6, 4) — now recovered.
+    let long = cpu::datamosh(&current, &prev, w, h, &u, &v, 1.0, 2.0, 0.6, 1);
     assert_eq!(&long[i..i + 4], &[4.0, 2.0, 1.0, 1.0]);
+}
+
+#[test]
+fn cpu_datamosh_bloom_accumulates_the_far_trail() {
+    // A constant rightward flow walks the streamline across four columns; a
+    // bright pixel sits at the far end. Bloom 0 keeps only the nearest step
+    // (missing it); Bloom 1 averages the whole walk (pulling it in). The dial
+    // is monotone between (K-161).
+    let (w, h) = (12u32, 9u32);
+    let n = (w * h) as usize;
+    let current = vec![0.0f32; n * 4]; // black
+    let mut prev = vec![0.0f32; n * 4];
+    let far = ((4 * w + 8) * 4) as usize; // (x=8, y=4), the far end of the walk
+    prev[far..far + 4].copy_from_slice(&[4.0, 0.0, 0.0, 1.0]);
+    let (u, v) = (vec![1.0f32; n], vec![0.0f32; n]); // one column per step
+    let i = ((4 * w + 4) * 4) as usize; // output pixel (4, 4)
+                                        // Four steps from (4,4) sample prev at columns 5, 6, 7, 8 — the bright
+                                        // pixel is the last (fourth) tap.
+    let r = |bloom: f32| cpu::datamosh(&current, &prev, w, h, &u, &v, 1.0, 4.0, bloom, 4)[i];
+    assert_eq!(r(0.0), 0.0, "bloom 0 keeps only the near step (dark)");
+    // Bloom 1 averages 4 taps: (0 + 0 + 0 + 4) / 4 = 1.0 in red.
+    assert!(
+        (r(1.0) - 1.0).abs() < 1e-5,
+        "bloom 1 pulls in the far trail"
+    );
+    let mid = r(0.5);
+    assert!(mid > 0.0 && mid < 1.0, "bloom is monotone between 0 and 1");
 }
 
 #[test]

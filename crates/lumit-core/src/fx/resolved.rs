@@ -492,21 +492,33 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
-    /// Datamosh (docs/08 §3.12, K-104, its own effect since K-107): re-warp
-    /// the -1 source neighbour along the flow measured from this frame to
-    /// it. The neighbour frame and its flow field are not carried here —
-    /// like Echo's neighbour frames and Motion blur's flow field, they
-    /// travel beside the resolved op, supplied only when the layer is
-    /// footage and the decode fetched them; a missing pair degrades this to
-    /// a no-op, never a fault.
+    /// Datamosh (docs/08 §3.12, K-104, its own effect since K-107; reworked to
+    /// a flow-driven melt by K-164/T19): follow the current→previous flow field
+    /// out of the -1 source neighbour in a short streamline walk, accumulating
+    /// the samples along it into a melting prediction blended over the current
+    /// frame. The neighbour frame and its flow field are not carried here —
+    /// like Echo's neighbour frames and Motion blur's flow field, they travel
+    /// beside the resolved op, supplied only when the layer is footage and the
+    /// decode fetched them; a missing pair degrades this to a no-op, never a
+    /// fault. The periodic Reset (docs/08 §3.12) is already folded into
+    /// `intensity`/`displacement` here — it is a pure function of layer time,
+    /// so the kernel stays time-agnostic and the oracle tests the melt directly.
     Datamosh {
         /// Blend against the current frame; 0 the passthrough, > 1
         /// extrapolates past the moshed frame (open ceiling, K-135/FX-14).
+        /// Already scaled by the reset ramp (0 at each simulated I-frame).
         intensity: f32,
-        /// Frames of predicted motion the warp reaches (FX-14): scales the
-        /// flow displacement, so a longer streak accumulates more smearing
-        /// from the -1 reference. 1 is the historical one-frame prediction.
-        streak: f32,
+        /// Total reach of the streamline walk in frames of predicted motion
+        /// (K-161): `steps` samples span it, so each step advances ~1 frame of
+        /// flow. Already scaled by the reset ramp.
+        displacement: f32,
+        /// How much of the reach accumulates (0..1): 0 keeps the nearest step
+        /// (a short trail), 1 averages the whole walk (a long melting bloom).
+        bloom: f32,
+        /// Bilinear taps along the streamline (2..64, or 1), derived from
+        /// `displacement` so each step is ~one frame of motion. Carried
+        /// explicitly so the CPU oracle and WGSL kernel loop the same count.
+        steps: i32,
         /// 0..1, the host Mix. Composes with `intensity` by multiplication
         /// before reaching the kernel (mixing the same two inputs twice
         /// collapses to one mix by the product), so the existing GPU/CPU
@@ -1234,16 +1246,44 @@ fn resolve_one(
         }
         "datamosh" => {
             // Intensity ceiling is open (K-135/FX-14): clamp only at zero, so
-            // > 1 extrapolates past the moshed frame. An old project with no
-            // Streak length param reaches the default 4 frames — deliberately
-            // stronger than the historical one-frame prediction (FX-14: the
-            // effect was too subtle), a sanctioned look change.
+            // > 1 extrapolates past the moshed frame. Displacement supersedes
+            // the K-148 `streak_length` id (read as a fallback so an old
+            // project keeps its reach); default 4 frames.
             let intensity = (e.float_at("intensity", lt).unwrap_or(0.5) as f32).max(0.0);
-            let streak = (e.float_at("streak_length", lt).unwrap_or(4.0) as f32).max(1.0);
+            let displacement = e
+                .float_at("displacement", lt)
+                .or_else(|| e.float_at("streak_length", lt))
+                .unwrap_or(4.0)
+                .max(1.0) as f32;
+            let bloom = (e.float_at("bloom", lt).unwrap_or(0.6) as f32).clamp(0.0, 1.0);
+            // Periodic I-frame reset (K-164): the melt ramps from a clean frame
+            // just after each reset up to full by the next. A pure function of
+            // layer time `lt` (seconds), so the kernel stays time-agnostic and
+            // the frame-cache key already covers it (a param+time function, the
+            // K-093/K-094 reasoning). 0 = off (a constant melt); the content-
+            // driven reset at stills/cuts (zero flow) fires regardless.
+            let interval = (e.float_at("reset_interval", lt).unwrap_or(0.0)).max(0.0);
+            let ramp = if interval > 0.0 {
+                (lt / interval).rem_euclid(1.0) as f32
+            } else {
+                1.0
+            };
+            let eff_intensity = intensity * ramp;
+            let eff_displacement = (displacement * ramp).max(0.0);
+            // Each step advances ~1 frame of flow, so the tap count tracks the
+            // reach; clamped to the 2..64 Motion blur's own streak loops (or 1
+            // at a sub-frame reach, where a single tap is exact).
+            let steps = if eff_displacement < 1.0 {
+                1
+            } else {
+                (eff_displacement.round() as i32).clamp(2, 64)
+            };
             let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
             Some(Resolved::Datamosh {
-                intensity,
-                streak,
+                intensity: eff_intensity,
+                displacement: eff_displacement,
+                bloom,
+                steps,
                 mix,
             })
         }
