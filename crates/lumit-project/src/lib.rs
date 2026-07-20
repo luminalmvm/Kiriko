@@ -355,14 +355,21 @@ mod tests {
 
         let ja = entry_bytes(&a, "project.json");
         let jb = entry_bytes(&b, "project.json");
-        assert_eq!(ja, jb, "two saves of the same document must be byte-identical");
+        assert_eq!(
+            ja, jb,
+            "two saves of the same document must be byte-identical"
+        );
 
         // And a round-trip (open then save) reproduces those exact bytes, so
         // unknown-field preservation is deterministic too.
         let (reopened, _) = open(&a).unwrap();
         let c = dir.path().join("c.lum");
         save(&reopened, &c).unwrap();
-        assert_eq!(ja, entry_bytes(&c, "project.json"), "open+save must be stable");
+        assert_eq!(
+            ja,
+            entry_bytes(&c, "project.json"),
+            "open+save must be stable"
+        );
     }
 
     #[test]
