@@ -41,26 +41,33 @@ Baking exists only inside the export pipeline and produces no model mutations.
 
 ## 2. Project
 
+v1 ships this as lumit-core's `Document` — a flat item store. The richer
+`Project`/`ProjectSettings` shape is the intended direction; the settings it
+would hold (a display-transform default, an expression-engine version) arrive
+with those features (colour management, expressions), so v1 has no
+`ProjectSettings` yet.
+
 ```rust
-struct Project {
+struct Document {
     id: Uuid,
-    settings: ProjectSettings,      // display transform default, expression engine version
-    assets: Vec<Asset>,             // tree via Folder
-    compositions: Vec<Uuid>,        // comps are assets too; this orders the Project panel
+    items: Vec<ProjectItem>,   // flat storage; Project-panel order = Vec order; folders hold children by id
+    auto_folders: AutoFolders, // where new solids / comps are auto-filed (K-068)
 }
 ```
 
-An **Asset** is one of:
+A `ProjectItem` (the intended **Asset**) is one of the following. **v1 ships
+`Footage`, `Folder`, `Composition`, `Solid`**; the audio/still/sequence kinds
+are future (audio is currently only a footage layer's stream, §5.2):
 
-| Asset | Contents |
-|---|---|
-| `FootageItem` | Media reference (§3), interpretation, proxy state |
-| `AudioItem` | Audio-only media reference |
-| `StillItem` | Single image |
-| `SequenceItem` | Image sequence (pattern, fps) |
-| `Composition` | §4 |
-| `Folder` | Ordered children ids |
-| `SolidDef` | Shared solid definition (colour, size) — solids are assets so they dedupe |
+| Asset | v1? | Contents |
+|---|---|---|
+| `Footage` (`FootageItem`) | yes | Media reference (§3); interpretation and proxy state are future |
+| `AudioItem` | future | Audio-only media reference |
+| `StillItem` | future | Single image |
+| `SequenceItem` | future | Image sequence (pattern, fps) |
+| `Composition` | yes | §4 |
+| `Folder` | yes | Ordered children ids |
+| `Solid` (`SolidDef`) | yes | Shared solid definition (colour, size) — solids are items so they dedupe |
 
 ### 3. Media references and interpretation
 
@@ -124,26 +131,30 @@ struct Layer {
     in_point: CompTime,                // may be negative — the layer may start before comp 0 (K-153)
     out_point: CompTime,               // exclusive; out > in; may exceed the comp duration (K-153)
     start_offset: CompTime,            // where layer time 0 sits on the comp timeline; may be negative
-    stretch: Rational,                 // uniform rate multiplier; rescales this layer's keyframes
-    parent: Option<Uuid>,              // transform parenting; cycles are invalid states
-    switches: Switches,
-    blend_mode: BlendMode,
+    parent: Option<Uuid>,              // transform parenting (K-103); a missing/cyclic parent degrades to none
+    label: u8,                         // index into the theme label palette (TL2); organisational, never rendered
+    blend: BlendMode,
     matte: Option<MatteRef>,           // { layer, channel: Alpha|Luma, inverted, source } (K-142)
     transform: TransformGroup,         // §6
     masks: Vec<Mask>,                  // §7
     effects: Vec<EffectInstance>,      // §8, ordered top-to-bottom
-    markers: Vec<Marker>,
-    audio: Option<AudioProps>,         // level (animatable), mute — when the source has audio
+    switches: Switches,
 }
+// Future (not in v1): `stretch` (uniform rate multiplier), per-layer `markers`,
+// and `audio: AudioProps` (animatable level / mute). v1 mutes via the `audible`
+// switch, and audio comes only from a footage layer's own stream (§5.2, docs/09).
 
 struct Switches {
-    visible: bool, audible: bool, solo: bool, locked: bool, shy: bool,
-    quality: Quality,                  // Draft | Full
-    motion_blur: bool,
-    adjustment: bool,
-    three_d: bool,
-    collapse: bool,                    // Precomp layers: transform concatenation
+    visible: bool, audible: bool, locked: bool,
+    solo: bool,                        // K-105: while any layer is soloed, only soloed layers render
+    fx: bool,                          // docs/08 §1.5: off bypasses the layer's whole effect stack (default on)
+    motion_blur: bool,                 // K-120: per-layer shutter smear (needs the comp master on)
+    three_d: bool,                     // 2.5D: position in z, honour the active camera
+    collapse: bool,                    // Precomp layers: transform concatenation (docs/06 §1.4)
 }
+// Future switches (K-168, deferred): `shy` (needs an outline filter row) and
+// `quality` (Draft|Full — needs a bicubic sampler choice). `adjustment` is not a
+// switch — an adjustment layer is a LayerKind (§5.2).
 ```
 
 Invariants:
@@ -157,28 +168,31 @@ Invariants:
 - A matte reference to a missing/deleted layer degrades to "no matte" with a badge, never an error.
 - Any layer can serve as a matte for any number of consumers; the engine evaluates it once
   ([06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md)).
-- `source: LayerInputSource` (default `None`, K-142, revising K-125's `after_effects` bool):
+- `source: LayerInputSource` (default `EffectsAndMasks`, K-142, revising K-125's `after_effects`
+  bool — the most complete source is the sensible default for a new matte/depth input):
   **None** gates by the matte layer's **raw** pixels (no masks, no effects); **Masks** gates
   by the source plus its own masks; **EffectsAndMasks** runs the matte layer's effect stack
   into the matte first (a keyed or blurred matte). v1 skips the source's *temporal* effects
   through a matte (echo/flow degrade to a still — [docs/impl/layer-input.md](impl/layer-input.md)).
   A project saved with K-125's `after_effects` bool migrates on load (`true` →
-  `EffectsAndMasks`, `false`/absent → `None`).
+  `EffectsAndMasks`, `false` → `Masks` so no masks are dropped, absent → the default
+  `EffectsAndMasks`).
 
 ### 5.2 Layer kinds
 
-| Kind | Source payload | Notes |
-|---|---|---|
-| `Footage { item: Uuid, retime: Retime }` | One footage/still/sequence item | The AE-style default. Retime per [04-RETIMING.md](04-RETIMING.md). |
-| `Sequence { clips: Vec<Clip> }` | Its clips | §5.3. |
-| `Precomp { comp: Uuid, retime: Retime }` | Another composition | `collapse` switch defers rasterisation. Cycles invalid. Retime supported (a non-identity Retime forces an intermediate, disabling collapse). |
-| `Solid { def: Uuid }` | A SolidDef | |
-| `Text { document: TextDocument }` | §9.1 | |
-| `Shape { contents: Vec<ShapeElement> }` | §9.2 | |
-| `Null` | — | Transform-only, invisible. |
-| `Adjustment` | — | `adjustment` switch implied; effect stack applies to composite below. |
-| `Audio { item: Uuid }` | An audio item | No visual payload. |
-| `Camera { cam: CameraProps }` | §9.3 | 3D only. |
+| Kind | v1? | Source payload | Notes |
+|---|---|---|---|
+| `Footage { item: Uuid, retime: Option<Retime> }` | yes | One footage item | The AE-style default. `None` = source rate. Retime per [04-RETIMING.md](04-RETIMING.md). |
+| `Sequence { clips: Vec<Clip> }` | yes | Its clips | §5.3. |
+| `Precomp { comp: Uuid }` | yes | Another composition | `collapse` switch defers rasterisation. Cycles invalid. **Precomp-level retime is future** — the `retime` field is not on the kind yet; nest through a Sequence clip to retime a comp for now. |
+| `Solid { def: Uuid }` | yes | A SolidDef | |
+| `Text { document: TextDocument }` | yes | §9.1 | v1: one run. |
+| `Camera { zoom: Property }` | yes | — | AE camera: `zoom` is focal distance in comp pixels (z=0 maps 1:1). Only affects 3D-switch layers; the topmost visible camera is active. |
+| `Adjustment` | yes | — | No source of its own; its masks + effect stack apply to the composite of every layer beneath it, within its span. (There is no `adjustment` switch — it is this kind.) |
+| `Shape { contents: Vec<ShapeElement> }` | future | §9.2 | |
+| `Null` | future | — | Transform-only, invisible. |
+| `Audio { item: Uuid }` | future | An audio item | v1 audio is only a footage layer's own stream (§5.2, docs/09). |
+| `Light` | future | — | Paired with Camera; not in v1. |
 | `Light { light: LightProps }` | §9.3 | 3D only. |
 
 ### 5.3 Clips (Sequence layers only)

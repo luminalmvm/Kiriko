@@ -234,22 +234,22 @@ outright contradicted.
 
 | § | Claim | Status | Evidence / what's missing | Resolution / next step |
 |---|---|---|---|---|
-| 2 | `Project { id, settings, assets, compositions }` | Contradicted | Actual: `Document { id, items, auto_folders, extra }` (`model.rs:1053`); no `ProjectSettings`, no comp-ordering vec | — |
-| 2 | `ProjectSettings` | Not implemented | No such struct | — |
-| 2 | Asset kinds `AudioItem`, `StillItem`, `SequenceItem` | Not implemented | `ProjectItem` = Footage/Folder/Composition/Solid only (`model.rs:1004`) | — |
+| 2 | `Project { id, settings, assets, compositions }` | Contradicted | Actual: `Document { id, items, auto_folders, extra }` (`model.rs:1053`); no `ProjectSettings`, no comp-ordering vec | ✅ Doc-synced (03 structural pass) — code verified; unbuilt bits now marked future |
+| 2 | `ProjectSettings` | Not implemented | No such struct | ✅ Doc-synced (03 structural pass) — code verified; unbuilt bits now marked future |
+| 2 | Asset kinds `AudioItem`, `StillItem`, `SequenceItem` | Not implemented | `ProjectItem` = Footage/Folder/Composition/Solid only (`model.rs:1004`) | ✅ Doc-synced (03 structural pass) — code verified; unbuilt bits now marked future |
 | 2/3 | `FootageItem` carries interpretation + proxy state | Partial | `{ id, name, media, extra }` only (`model.rs:31`) | — |
 | 3 | `MediaRef.fingerprint` | Partial/contradicted | No fingerprint field ("lands in slice 4", `model.rs:20`); `Fingerprint` exists only in `lumit-media` | — |
 | 3 | `FootageInterpretation` (fps override, alpha, colour space, loop, TC policy) | Not implemented | None of the types exist | — |
 | 4 | `Composition.pixel_aspect`; `Composition.depth: CompDepth` | Not implemented | Neither field exists (depth superseded by K-069 anyway) | — |
 | 4 | 16384² hard cap | Not implemented | No enforcement (doc's own open question) | — |
 | 4 | `work_area` mandatory | Partial | Code: `Option<(CompTime, CompTime)>`, `None` = full comp | — |
-| 5.1 | `Layer.stretch` | Not implemented | No field (doc's own open question) | — |
-| 5.1 | `Layer.audio: AudioProps` (animatable level) | Not implemented | Mute is `Switches.audible`; no volume anywhere | — |
-| 5.1 | Per-layer `markers` | Not implemented | Markers only on `Composition` (`model.rs:86`) | — |
-| 5.1 | `Switches { shy, quality, adjustment }` | Contradicted | Missing shy/quality/adjustment (adjustment is a `LayerKind`); code adds an undocumented `fx` switch (`model.rs:615`) | — |
-| 5.1 | `source: LayerInputSource` defaults **None**; K-125 migration `false→None` | Contradicted | Default is `EffectsAndMasks` (`model.rs:289`); migration maps `false→Masks`, absent→`EffectsAndMasks` (`model.rs:299`, tests `:1220`) | — |
-| 5.2 | `Precomp { comp, retime }` | Contradicted | No retime on Precomp (`model.rs:740`); only Footage carries retime | — |
-| 5.2 | Layer kinds Shape/Null/Audio/Light | Not implemented | See 01 | — |
+| 5.1 | `Layer.stretch` | Not implemented | No field (doc's own open question) | ✅ Doc-synced (03 structural pass) — code verified; unbuilt bits now marked future |
+| 5.1 | `Layer.audio: AudioProps` (animatable level) | Not implemented | Mute is `Switches.audible`; no volume anywhere | ✅ Doc-synced (03 structural pass) — code verified; unbuilt bits now marked future |
+| 5.1 | Per-layer `markers` | Not implemented | Markers only on `Composition` (`model.rs:86`) | ✅ Doc-synced (03 structural pass) — code verified; unbuilt bits now marked future |
+| 5.1 | `Switches { shy, quality, adjustment }` | Contradicted | Missing shy/quality/adjustment (adjustment is a `LayerKind`); code adds an undocumented `fx` switch (`model.rs:615`) | ✅ Doc-synced (03 structural pass) — code verified; unbuilt bits now marked future |
+| 5.1 | `source: LayerInputSource` defaults **None**; K-125 migration `false→None` | Contradicted | Default is `EffectsAndMasks` (`model.rs:289`); migration maps `false→Masks`, absent→`EffectsAndMasks` (`model.rs:299`, tests `:1220`) | ✅ Doc-synced (03 structural pass) — code verified; unbuilt bits now marked future |
+| 5.2 | `Precomp { comp, retime }` | Contradicted | No retime on Precomp (`model.rs:740`); only Footage carries retime | ✅ Doc-synced (03 structural pass) — code verified; unbuilt bits now marked future |
+| 5.2 | Layer kinds Shape/Null/Audio/Light | Not implemented | See 01 | ✅ Doc-synced (03 structural pass) — code verified; unbuilt bits now marked future |
 | 5.3 | `Clip.label: LabelColour` | Partial | Absent from `Clip` (`place` split into start+duration is fine) | — |
 | 6.1 | `Property<T: PropValue>` generic, with `id` + expression slot | Contradicted/partial | `Property` is `f64`-scalar only (`anim.rs:285`); Vec2/Vec3 modelled as separate scalar dims; no id, no expression | — |
 | 6.2 | `Keyframe` spatial tangents, roving, label | Not implemented | `{ time, value: f64, interp_in, interp_out }` only (`anim.rs:29`) | — |
