@@ -1610,6 +1610,17 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   rather than slowing down. The stepping decision — advance, or hold and render, and whether
   sound should be playing — is a plain tested function; the messy wiring (the audio clock, the
   render requests) lives in the UI and just asks it what to do each screen refresh.
+  The way realtime keeps from freezing is a small but important rule: it renders **one frame
+  at a time and never throws that render away just because the clock moved on**. It asks for a
+  frame, lets it finish however long it takes, shows it, times it — and only *then* asks for
+  the next one, at wherever the clock has reached by that point (skipping the frames in
+  between). The timing of each finished frame is what tells the resolution controller to drop a
+  notch when things are slow. The earlier version re-asked for a new frame every screen refresh,
+  so under load each render was abandoned before it finished: nothing ever completed, the
+  controller was never told how slow things were, and the picture sat frozen. Rendering one
+  un-abandoned frame at a time fixes both — the picture always moves forward, and the
+  resolution actually adapts. (A cached frame still shows instantly and for free, without
+  waiting on any render.)
 - **The frame scheduler's brain (`lumit-eval::schedule`)** — the decision rules for
   smooth playback, written as plain arithmetic so tests can prove them. During playback
   Lumit renders frames ahead of the playhead onto a small shelf; each screen refresh

@@ -345,9 +345,19 @@ impl AppState {
     }
 
     /// Realtime mode: chase the wall/audio clock, dropping resolution to keep
-    /// up rather than freezing (K-030/K-171). The adaptive tier is applied via
-    /// [`Self::target_width_for`]; here we just advance the shown frame to the
-    /// clock and present the newest available.
+    /// up rather than freezing (K-030/K-171).
+    ///
+    /// Audio never waits: it plays on its own clock and the picture chases it,
+    /// showing the newest frame it manages to render. The rule that keeps this
+    /// from freezing is **render-pull**: exactly one live render is in flight at
+    /// a time and it is *never* superseded by the clock moving on. The old tick
+    /// re-requested every clock boundary, so under load each render was
+    /// abandoned before it finished — nothing ever completed, the adaptive
+    /// controller was never fed a measurement, and the picture froze. Now a slow
+    /// frame is allowed to finish; its measured cost drops the resolution tier
+    /// ([`Self::target_width_for`] reads [`Self::realtime_ctrl`]); and only then
+    /// do we pull the next frame — at the clock's *current* position, skipping
+    /// whatever the render took. Cached frames present for free and don't gate.
     #[cfg(feature = "media")]
     fn comp_realtime_tick(
         &mut self,
@@ -381,22 +391,46 @@ impl AppState {
                 self.comp_playback = Some(CompPlayback::start(wa_start));
             }
             self.preview_frame = wa_start;
+            self.realtime_inflight = None; // abandon any live render across the loop
             self.refresh_preview();
             return true;
         }
-        if frame != self.preview_frame {
-            self.preview_frame = frame;
-            self.refresh_preview();
-        }
-        if self.fill_in_flight.is_none() {
-            let present_cached = self
-                .frame_key_for(comp_id, frame)
-                .is_some_and(|k| self.comp_frame_cache.contains_key(&k));
-            if present_cached {
-                if let Some(prefetch) = self.next_playback_prefetch(comp_id, frame, wa_end) {
-                    self.request_fill_frame(comp_id, prefetch);
+
+        // Fast path: the clock frame is already cached — present it for free and
+        // warm ahead. A live render becomes moot the moment a newer cached frame
+        // carries the picture, so clear the gate.
+        if let Some(key) = self.frame_key_for(comp_id, frame) {
+            if self.comp_frame_cache.contains_key(&key) {
+                if frame != self.preview_frame {
+                    self.preview_frame = frame;
+                    self.cached_present = Some(key);
                 }
+                self.realtime_inflight = None;
+                if self.fill_in_flight.is_none() {
+                    if let Some(prefetch) = self.next_playback_prefetch(comp_id, frame, wa_end) {
+                        self.request_fill_frame(comp_id, prefetch);
+                    }
+                }
+                return true;
             }
+        }
+
+        // Uncached: render-pull. Hold `preview_frame` on the frame we asked for
+        // (so its result presents as the shown frame, is timed, and feeds the
+        // controller — a mismatch would bank it as a silent fill instead) until
+        // it lands. The completion handler clears `realtime_inflight`; the
+        // timeout only rescues a render lost to an unrelated supersede.
+        let awaiting_render = matches!(
+            self.realtime_inflight,
+            Some((_, at)) if at.elapsed() < super::REALTIME_RENDER_TIMEOUT
+        );
+        if !awaiting_render {
+            // Pipeline idle (or a lost render timed out): pull the clock's
+            // current frame and hold it until it lands. While a render is in
+            // flight we do nothing — never supersede it (that was the freeze).
+            self.preview_frame = frame;
+            self.realtime_inflight = Some((frame, Instant::now()));
+            self.refresh_comp_preview();
         }
         true
     }
@@ -419,6 +453,10 @@ impl AppState {
             engine.pause();
         }
         self.comp_playback = None;
+        #[cfg(feature = "media")]
+        {
+            self.realtime_inflight = None;
+        }
     }
 
     pub fn toggle_play(&mut self) {

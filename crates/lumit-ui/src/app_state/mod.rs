@@ -38,6 +38,14 @@ pub mod media;
 /// moment they stop). Chosen to keep even 4K sources instant to draft.
 const DRAFT_MAX_WIDTH: u32 = 640;
 
+/// Safety net for realtime playback's render-pull: if the one live render is
+/// lost (an unrelated request superseded it), the tick retries after this long
+/// rather than waiting on a result that will never arrive. Generous — a heavy
+/// full-resolution frame stays well under it, so it never fires in normal play;
+/// it exists only so a lost render cannot wedge playback permanently.
+#[cfg(feature = "media")]
+pub const REALTIME_RENDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Infallible constructor for small literal rationals.
 /// One decode-width policy for requests AND cache keys — if these ever
 /// disagreed, a cached frame could present at the wrong resolution. `draft`
@@ -1022,6 +1030,16 @@ pub struct AppState {
     /// The (comp, frame) currently rendering for the background cache fill.
     #[cfg(feature = "media")]
     pub fill_in_flight: Option<(Uuid, usize)>,
+    /// Realtime playback's one outstanding live render: the frame we asked for
+    /// and the instant we asked. Realtime is render-*pull*ed — exactly one live
+    /// render is in flight and it is never superseded by the clock moving on, so
+    /// a slow frame completes and feeds the adaptive controller instead of being
+    /// abandoned every tick (which used to leave the picture frozen with the
+    /// controller starved of measurements). The instant is a safety net: a live
+    /// render lost to an unrelated supersede is retried after
+    /// [`REALTIME_RENDER_TIMEOUT`], so playback can never wedge for good.
+    #[cfg(feature = "media")]
+    pub realtime_inflight: Option<(usize, Instant)>,
     /// The disk tier's IO worker (docs/06 §5.4), started lazily once the
     /// project has a path (unsaved projects have no sidecar to cache into).
     pub disk_io: Option<diskio::DiskIo>,
@@ -1195,6 +1213,8 @@ impl Default for AppState {
             cached_present: None,
             #[cfg(feature = "media")]
             fill_in_flight: None,
+            #[cfg(feature = "media")]
+            realtime_inflight: None,
             disk_io: None,
             disk_root: None,
             disk_load_pending: std::collections::HashSet::new(),

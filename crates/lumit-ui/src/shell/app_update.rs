@@ -403,6 +403,10 @@ impl Shell {
                                         .realtime_ctrl
                                         .record(started.elapsed().as_secs_f64(), fps);
                                 }
+                                // The live render we were gated on has landed and
+                                // been shown+measured; release the pull so the
+                                // next tick can ask for the clock's current frame.
+                                self.app.realtime_inflight = None;
                                 // Paused: bank the frame while it's hot (playback
                                 // misses skip the readback to protect the frame
                                 // budget; draft frames are never banked — the
@@ -462,7 +466,13 @@ impl Shell {
                         self.preview_tex = Some(tex);
                     }
                 }
-                Some(Err(e)) => self.app.error = Some(format!("preview: {e}")),
+                Some(Err(e)) => {
+                    // A failed live render still releases the realtime pull, so
+                    // playback retries the next frame at once rather than sitting
+                    // frozen until the safety timeout.
+                    self.app.realtime_inflight = None;
+                    self.app.error = Some(format!("preview: {e}"));
+                }
                 _ => {}
             }
             // Edits (commits/undo) re-render the comp preview automatically.
