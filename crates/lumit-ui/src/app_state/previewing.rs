@@ -1066,7 +1066,7 @@ impl AppState {
                 // Keep any in-progress playback going on the wall clock, from
                 // the current playhead (the audio clock has just gone away).
                 if self.comp_playback.is_some() {
-                    self.comp_playback = Some((Instant::now(), self.preview_frame));
+                    self.comp_playback = Some(CompPlayback::start(self.preview_frame));
                 }
             }
             super::AudioSync::Rebake(_) => {

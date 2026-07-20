@@ -375,11 +375,144 @@ pub fn next_frame_to_schedule<T>(
     (clock_frame..=target_frame).find(|&n| !ring.contains(n) && !already_scheduled(n))
 }
 
+/// How many consecutive on-pace advances before Cached-mode audio is allowed
+/// to play — enough smooth replay that starting the sound won't immediately
+/// stutter. A quarter-second at any frame rate (rounded up, min 1).
+#[must_use]
+pub fn cached_audio_streak(fps: f64) -> u32 {
+    ((fps / 4.0).ceil() as u32).max(1)
+}
+
+/// What Cached-mode playback (K-171, docs/06 §6.5) should do this UI tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachedStep {
+    /// Move the playhead on to the next frame this tick.
+    pub advance: bool,
+    /// Kick off a render of the next frame now — it is not ready, so playback
+    /// is render-gated (waits for it) rather than skipping it.
+    pub request_next: bool,
+    /// The updated on-pace streak (feed back in next tick).
+    pub smooth: u32,
+    /// Whether comp audio should be running this tick. Audio plays only during
+    /// smooth realtime replay of cached frames; it pauses whenever a frame is
+    /// being awaited, so sound never runs ahead of a stalled picture.
+    pub audio_playing: bool,
+}
+
+/// Decide the Cached-mode step: render every frame, never skip, paced to at
+/// most realtime (K-171). The playhead advances to `next` only once `next` is
+/// ready (cached) *and* a frame's worth of real time has passed since the last
+/// advance — so a fully-cached span replays at true speed, and a span still
+/// rendering advances exactly as fast as frames complete (slower than
+/// realtime), never dropping one.
+///
+/// - `next_ready` — is the next frame already in the cache?
+/// - `elapsed` / `frame_dur` — seconds since the last advance, and one frame's
+///   duration (`1/fps`); their ratio is the realtime pace cap.
+/// - `smooth` — the running on-pace streak from the previous tick.
+/// - `audio_streak` — advances of smooth replay required before audio plays
+///   ([`cached_audio_streak`]).
+#[must_use]
+pub fn cached_step(
+    next_ready: bool,
+    elapsed: f64,
+    frame_dur: f64,
+    smooth: u32,
+    audio_streak: u32,
+) -> CachedStep {
+    let pace_ok = elapsed >= frame_dur;
+    if !next_ready {
+        // Render-gate: hold the picture, render the frame, and pause audio so
+        // it never runs ahead of the stalled picture. The streak resets — we
+        // are no longer replaying smoothly.
+        return CachedStep {
+            advance: false,
+            request_next: true,
+            smooth: 0,
+            audio_playing: false,
+        };
+    }
+    if !pace_ok {
+        // Ready, but advancing now would outrun realtime — hold this frame for
+        // smooth replay. Audio keeps whatever state the streak has earned.
+        return CachedStep {
+            advance: false,
+            request_next: false,
+            smooth,
+            audio_playing: smooth >= audio_streak,
+        };
+    }
+    // Ready and it is time: advance. "On pace" (not a recovered stall) means we
+    // did not wait much beyond one frame — that grows the smooth streak; a late
+    // advance (we had been waiting on a render) resets it.
+    let on_pace = elapsed <= frame_dur * 1.5;
+    let smooth = if on_pace { smooth.saturating_add(1) } else { 0 };
+    CachedStep {
+        advance: true,
+        request_next: false,
+        smooth,
+        audio_playing: smooth >= audio_streak,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    // ---- Cached-mode render-gated stepping (K-171) ----
+
+    #[test]
+    fn cached_replay_advances_at_realtime_pace_with_audio() {
+        let fd = 1.0 / 60.0;
+        let streak = cached_audio_streak(60.0); // 15
+                                                // Frames all cached (ready). Before a frame's worth of time: hold.
+        let early = cached_step(true, fd * 0.5, fd, 100, streak);
+        assert!(!early.advance && !early.request_next);
+        // Once a frame's time has passed: advance, streak grows, audio on.
+        let s = cached_step(true, fd, fd, 100, streak);
+        assert!(s.advance && !s.request_next && s.audio_playing);
+        assert_eq!(s.smooth, 101);
+    }
+
+    #[test]
+    fn cached_building_render_gates_and_mutes_until_ready() {
+        let fd = 1.0 / 30.0;
+        let streak = cached_audio_streak(30.0);
+        // Next frame not ready: hold, request it, audio paused, streak reset —
+        // however long we have been waiting.
+        let waiting = cached_step(false, fd * 5.0, fd, 50, streak);
+        assert!(!waiting.advance && waiting.request_next);
+        assert!(!waiting.audio_playing && waiting.smooth == 0);
+        // It arrives (now ready) after a long wait: advance immediately, but as
+        // a recovered stall — the streak stays low, so audio stays paused.
+        let arrived = cached_step(true, fd * 5.0, fd, 0, streak);
+        assert!(arrived.advance && !arrived.request_next);
+        assert_eq!(
+            arrived.smooth, 0,
+            "a late advance does not build smoothness"
+        );
+        assert!(!arrived.audio_playing);
+    }
+
+    #[test]
+    fn cached_audio_waits_for_a_smooth_streak_then_plays() {
+        let fd = 1.0 / 60.0;
+        let streak = cached_audio_streak(60.0);
+        // Build the streak with on-pace advances; audio stays off until the
+        // streak is earned, then turns on and stays on.
+        let mut smooth = 0;
+        let mut turned_on_at = None;
+        for i in 1..=streak + 3 {
+            let s = cached_step(true, fd, fd, smooth, streak);
+            smooth = s.smooth;
+            if s.audio_playing && turned_on_at.is_none() {
+                turned_on_at = Some(i);
+            }
+        }
+        assert_eq!(turned_on_at, Some(streak));
+    }
 
     // ---- FrameRing ----
 

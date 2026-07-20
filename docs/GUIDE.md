@@ -1598,6 +1598,18 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   the adapters the full layer vocabulary (transforms, masks, retimes, effects) and then
   switching preview and export over. Until then the shipped renderer in `lumit-ui` keeps
   drawing the picture.
+- **Two ways to play back (`lumit-eval::schedule::cached_step`, K-171)** — the important
+  distinction between the two preview modes. In **Cached** mode (the default), Lumit shows you
+  *every* frame and never skips: the playhead only moves on to the next frame once that frame
+  has finished rendering, and no faster than real time. So if a comp is heavy and rendering is
+  slower than real time, playback simply slows down to match — you see every frame, just not at
+  full speed — and once a stretch is rendered it plays back at true speed from the cache. Sound
+  pauses while a frame is being waited for (so it never runs ahead of a frozen picture) and
+  plays during smooth realtime replay. In **Realtime** mode, the opposite trade: the clock never
+  waits, and when frames can't keep up Lumit drops the preview *resolution* to stay in time
+  rather than slowing down. The stepping decision — advance, or hold and render, and whether
+  sound should be playing — is a plain tested function; the messy wiring (the audio clock, the
+  render requests) lives in the UI and just asks it what to do each screen refresh.
 - **The frame scheduler's brain (`lumit-eval::schedule`)** — the decision rules for
   smooth playback, written as plain arithmetic so tests can prove them. During playback
   Lumit renders frames ahead of the playhead onto a small shelf; each screen refresh

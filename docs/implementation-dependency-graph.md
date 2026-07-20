@@ -20,7 +20,7 @@ commit (add ✅ / re-wire arrows), so the graph stays the live picture of what r
 flowchart TD
 
   subgraph SVERIFY["Verify first — built, awaiting your eye"]
-    RTEYE["👁 Realtime adaptive preview slice<br/>(owner: verify on PC later; K-030, 06 §6.5)"]
+    RTEYE["👁 Realtime adaptive preview — reworked as a distinct mode;<br/>cost signal still CPU-composite-only (may under-drop tier).<br/>Verify on PC; may need decode/GPU cost added"]
     LUMAEYE["✅ Luma matte perceptual gate — owner-verified"]
     BANNEREYE["👁 Error banner fig tint (15 §10)"]
     SOLOEYE["👁 Audio solo — logic verified; re-test the live<br/>mix plan: edits heard on the next callback"]
@@ -42,7 +42,7 @@ flowchart TD
     GPUSUB["GPU-submit thread owns the queue (05 §2)"]
     RING["Wire render-ahead ring and pre-roll (06 §6.4)"]
     FRAMEPACE["Frame-pacing budgets B5–B7 (13 §2)"]
-    CACHEDPLAY["Cached playback renders every frame, never skips<br/>(K-171): render-gated stepping, audio pauses/stretches,<br/>realtime replay from cache — the intended default"]
+    CACHEDPLAY["👁 Cached playback render-gated stepping — BUILT (K-171):<br/>every frame shown, advances when cached + at realtime pace,<br/>audio pauses while awaiting a frame. Tested core (cached_step).<br/>Re-test on the movie; then remaining: audio timestretch (vs pause)"]
     SCOPESGPU["GPU compute scopes (06 §8, K-096)"]
     WPOOL --> PIXPASS
     SEAMS --> PIXPASS

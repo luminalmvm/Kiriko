@@ -979,7 +979,7 @@ fn muting_an_audio_layer_drops_it_from_the_mix() {
 fn sync_unloads_a_comp_silenced_by_muting() {
     let (mut app, comp_id, layer_id) = app_with_audio_layer();
     mark_mix_loaded(&mut app, comp_id);
-    app.comp_playback = Some((Instant::now(), 0));
+    app.comp_playback = Some(super::CompPlayback::start(0));
 
     app.commit(Op::SetLayerAudible {
         comp: comp_id,
@@ -1096,7 +1096,7 @@ fn scrubbing_pause_stops_the_whole_transport() {
     let mut app = AppState::default();
     app.new_composition();
     app.confirm_comp_dialog();
-    app.comp_playback = Some((std::time::Instant::now(), 3));
+    app.comp_playback = Some(super::CompPlayback::start(3));
     assert!(
         app.is_playing(),
         "the comp playback clock counts as playing"

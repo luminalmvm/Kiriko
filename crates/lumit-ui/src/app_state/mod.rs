@@ -466,6 +466,30 @@ impl lumit_cache::ByteSized for CachedAudio {
     }
 }
 
+/// Comp playback state (see [`AppState::comp_playback`]).
+#[derive(Debug, Clone, Copy)]
+pub struct CompPlayback {
+    /// Realtime: the wall-clock origin. Cached: when the current frame was
+    /// shown (the realtime-pace timer for the next advance).
+    pub started: Instant,
+    /// Realtime: the frame the clock is measured from. Cached: unused
+    /// (`current` leads).
+    pub start_frame: usize,
+    /// Cached mode: consecutive on-pace advances — the audio gate.
+    pub smooth: u32,
+}
+
+impl CompPlayback {
+    /// Begin playing from `frame` now.
+    pub fn start(frame: usize) -> Self {
+        Self {
+            started: Instant::now(),
+            start_frame: frame,
+            smooth: 0,
+        }
+    }
+}
+
 /// A background comp-audio delivery (see the `comp_audio_rx` field).
 #[cfg(feature = "media")]
 pub(crate) enum CompAudioMsg {
@@ -930,9 +954,12 @@ pub struct AppState {
     pub graph_retime_edit: Option<(usize, f64)>,
     /// Comp shown in the Viewer (takes precedence over preview_item).
     pub preview_comp: Option<Uuid>,
-    /// Wall-clock comp playback v0 (the frame scheduler replaces this):
-    /// (started, frame at start).
-    pub comp_playback: Option<(Instant, usize)>,
+    /// Comp playback state, or None when stopped. `started`/`start_frame` are
+    /// the wall-clock origin **Realtime** mode chases; in **Cached** mode
+    /// (K-171) `started` doubles as the pace timer for the current frame and
+    /// `smooth` is the on-pace streak that gates audio (see
+    /// [`lumit_eval::schedule::cached_step`]).
+    pub comp_playback: Option<CompPlayback>,
     /// Footage item currently shown in the Viewer, and the scrub position.
     pub preview_item: Option<Uuid>,
     pub preview_frame: usize,
@@ -1141,7 +1168,7 @@ impl Default for AppState {
             timeline_grid: TimelineGrid::Off,
             graph_retime_edit: None,
             preview_comp: None,
-            comp_playback: None,
+            comp_playback: None, // set on play
             preview_item: None,
             preview_frame: 0,
             preview_divisor: 1,

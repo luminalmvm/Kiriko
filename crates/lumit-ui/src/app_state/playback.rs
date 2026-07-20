@@ -183,9 +183,17 @@ impl AppState {
     }
 
     /// Advance comp playback; returns true while playing (UI keeps repainting).
-    /// Audio-clock-driven when this comp's mixed audio is loaded and running
-    /// (the audio card's sample count is the one clock — docs/impl §4), else a
-    /// wall-clock fallback so silent comps and the pre-mix moment still play.
+    ///
+    /// Two disciplines (K-171, docs/06 §6.5):
+    /// - **Cached** (the default): render every frame, never skip. The playhead
+    ///   advances to the next frame only once it is cached, paced to at most
+    ///   realtime — so a rendered span plays at true speed and an
+    ///   as-yet-unrendered span advances exactly as fast as frames complete
+    ///   (slower than realtime), dropping none. Audio plays only during smooth
+    ///   realtime replay and pauses whenever a frame is being awaited, so sound
+    ///   never runs ahead of a stalled picture.
+    /// - **Realtime**: chase the clock, never freeze; the adaptive controller
+    ///   drops resolution to keep up ([`Self::comp_realtime_tick`]).
     #[cfg(feature = "media")]
     pub fn comp_playback_tick(&mut self) -> bool {
         if self.comp_playback.is_none() {
@@ -202,10 +210,157 @@ impl AppState {
         };
         let (wa_start, wa_end) = self.work_area_frames(comp);
         let fps = comp.frame_rate.fps().max(1.0);
+        if self.preview_realtime {
+            self.comp_realtime_tick(comp_id, wa_start, wa_end, fps)
+        } else {
+            self.comp_cached_tick(comp_id, wa_start, wa_end, fps)
+        }
+    }
 
+    /// Cached mode: render-gated stepping (K-171). See [`Self::comp_playback_tick`].
+    #[cfg(feature = "media")]
+    fn comp_cached_tick(
+        &mut self,
+        comp_id: Uuid,
+        wa_start: usize,
+        wa_end: usize,
+        fps: f64,
+    ) -> bool {
+        use lumit_eval::schedule::{cached_audio_streak, cached_step};
+        let Some(pb) = self.comp_playback else {
+            return false;
+        };
+        // Clamp a playhead left outside the work area (e.g. by a scrub) back in.
+        if self.preview_frame < wa_start || self.preview_frame >= wa_end {
+            self.preview_frame = wa_start;
+            self.comp_playback = Some(CompPlayback::start(wa_start));
+            self.refresh_preview();
+            return true;
+        }
+        let next = if self.preview_frame + 1 >= wa_end {
+            wa_start // loop the work area
+        } else {
+            self.preview_frame + 1
+        };
+        // Is `next` ready to show? A keyable frame is ready once it is in the
+        // RAM cache; an unkeyable frame (unprobed footage) can't be gated on the
+        // cache, so it is treated as ready (best effort — it renders live).
+        let next_ready = match self.frame_key_for(comp_id, next) {
+            Some(key) => self.comp_frame_cache.contains_key(&key),
+            None => true,
+        };
+        let step = cached_step(
+            next_ready,
+            pb.started.elapsed().as_secs_f64(),
+            1.0 / fps,
+            pb.smooth,
+            cached_audio_streak(fps),
+        );
+
+        if step.advance {
+            self.preview_frame = next;
+            self.comp_playback = Some(CompPlayback {
+                started: Instant::now(),
+                start_frame: next,
+                smooth: step.smooth,
+            });
+            self.refresh_preview();
+        } else {
+            self.comp_playback = Some(CompPlayback {
+                smooth: step.smooth,
+                ..pb
+            });
+            if step.request_next {
+                // Render-gate: make sure the frame we are waiting on is on its
+                // way (idempotent — a matching request in flight is not
+                // re-sent). A cached frame under the playhead also keeps its
+                // display up to date.
+                self.request_frame_render(comp_id, next);
+            }
+        }
+
+        // Audio follows the picture: play during smooth replay, pause while a
+        // frame is awaited, and keep it seeked to the shown frame so a resumed
+        // stretch starts in sync.
+        self.sync_cached_audio(comp_id, step.audio_playing, fps);
+
+        // Warm ahead only once we are replaying smoothly (audio playing), so a
+        // prefetch never competes with the render we are gated on.
+        if step.audio_playing && self.fill_in_flight.is_none() {
+            if let Some(prefetch) = self.next_playback_prefetch(comp_id, self.preview_frame, wa_end)
+            {
+                self.request_fill_frame(comp_id, prefetch);
+            }
+        }
+        true
+    }
+
+    /// Ensure `frame` of `comp_id` is being rendered/displayed now. Unlike
+    /// [`Self::refresh_preview`] (which always targets `preview_frame`), this
+    /// renders an arbitrary frame the cached stepper is gated on.
+    #[cfg(feature = "media")]
+    fn request_frame_render(&mut self, comp_id: Uuid, frame: usize) {
+        // A frame the disk tier already holds is promoted, not re-rendered.
+        if let Some(key) = self.frame_key_for(comp_id, frame) {
+            if self.comp_frame_cache.contains_key(&key) {
+                return; // already ready
+            }
+            if self.disk_has(key) {
+                self.disk_request_load(key);
+                return;
+            }
+        }
+        if self.fill_in_flight != Some((comp_id, frame)) {
+            self.request_fill_frame(comp_id, frame);
+        }
+    }
+
+    /// Cached-mode audio: play/pause per the stepper and keep the audio clock
+    /// pinned to the shown frame, so sound tracks the render-gated picture
+    /// (K-171) instead of running on ahead.
+    #[cfg(feature = "media")]
+    fn sync_cached_audio(&mut self, comp_id: Uuid, want_playing: bool, fps: f64) {
+        if self.audio_loaded_comp != Some(comp_id) {
+            return; // silent comp, or its mix not loaded yet
+        }
+        let target_s = self.preview_frame as f64 / fps;
+        let Some(engine) = &self.audio_engine else {
+            return;
+        };
+        if want_playing {
+            // Resync only when it has drifted more than ~2 frames, so smooth
+            // replay is not re-seeked every frame (which would stutter).
+            if (engine.clock_seconds() - target_s).abs() > 2.0 / fps {
+                engine.seek_seconds(target_s);
+            }
+            if !engine.is_playing() {
+                engine.play();
+            }
+        } else {
+            if engine.is_playing() {
+                engine.pause();
+            }
+            engine.seek_seconds(target_s); // park it on the shown frame
+        }
+    }
+
+    /// Realtime mode: chase the wall/audio clock, dropping resolution to keep
+    /// up rather than freezing (K-030/K-171). The adaptive tier is applied via
+    /// [`Self::target_width_for`]; here we just advance the shown frame to the
+    /// clock and present the newest available.
+    #[cfg(feature = "media")]
+    fn comp_realtime_tick(
+        &mut self,
+        comp_id: Uuid,
+        wa_start: usize,
+        wa_end: usize,
+        fps: f64,
+    ) -> bool {
+        let Some(pb) = self.comp_playback else {
+            return false;
+        };
         let clock_driven = self.audio_loaded_comp == Some(comp_id)
             && self.audio_engine.as_ref().is_some_and(|e| e.is_playing());
-        // The audio clock IS comp time (mix sample 0 = comp time 0).
         let frame = if clock_driven {
             let t = self
                 .audio_engine
@@ -213,23 +368,17 @@ impl AppState {
                 .map(|e| e.clock_seconds())
                 .unwrap_or(0.0);
             (t * fps).round().max(0.0) as usize
-        } else if let Some((started, start_frame)) = self.comp_playback {
-            start_frame + (started.elapsed().as_secs_f64() * fps) as usize
         } else {
-            return false;
+            pb.start_frame + (pb.started.elapsed().as_secs_f64() * fps) as usize
         };
-
         if frame >= wa_end {
-            // Loop the work area (07-UI-SPEC transport: loop work area default).
-            // Re-seek AND re-play the mix so a loop that reached the buffer's
-            // end (which pauses the stream) restarts cleanly.
             if self.audio_loaded_comp == Some(comp_id) {
                 if let Some(engine) = &self.audio_engine {
                     engine.seek_seconds(wa_start as f64 / fps);
                     engine.play();
                 }
             } else {
-                self.comp_playback = Some((Instant::now(), wa_start));
+                self.comp_playback = Some(CompPlayback::start(wa_start));
             }
             self.preview_frame = wa_start;
             self.refresh_preview();
@@ -239,10 +388,6 @@ impl AppState {
             self.preview_frame = frame;
             self.refresh_preview();
         }
-        // Warm a little ahead of the clock so the work-area loop stays smooth
-        // once frames are cached (docs/impl/playback-scheduler.md §5). Only when
-        // the frame under the playhead is already cached — so this never
-        // pre-empts the present request above — and one prefetch at a time.
         if self.fill_in_flight.is_none() {
             let present_cached = self
                 .frame_key_for(comp_id, frame)
@@ -291,7 +436,7 @@ impl AppState {
             };
             let fps = comp.frame_rate.fps().max(1.0);
             // Start on the wall clock immediately; audio joins when mixed.
-            self.comp_playback = Some((Instant::now(), self.preview_frame));
+            self.comp_playback = Some(CompPlayback::start(self.preview_frame));
             // Only replay the loaded mix when it still matches the comp; an edit
             // since it was baked (mute, move, trim, delete) re-bakes it instead,
             // so playback follows the current comp (GEN-4 fixes).
