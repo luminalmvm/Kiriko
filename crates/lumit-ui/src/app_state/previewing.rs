@@ -170,7 +170,7 @@ impl AppState {
         }
     }
 
-    /// Which of a comp's frames are in Kura's RAM tier — the timeline cache
+    /// Which of a comp's frames are in Nebula's RAM tier — the timeline cache
     /// bar (docs/07-UI-SPEC.md: cache bars). Memoised per (document, cache
     /// state, quality); comps beyond 2 400 frames skip the bar for now (the
     /// evaluator's incremental bar replaces this scan — S-budget debt).
@@ -310,7 +310,7 @@ impl AppState {
         // A real request supersedes any background fill in flight.
         self.fill_in_flight = None;
 
-        // Kura warm path: a cached frame presents without decoding anything —
+        // Nebula warm path: a cached frame presents without decoding anything —
         // but a live value edit needs this frame's decoded per-layer pixels
         // (`last_comp`) to re-composite, and a cache hit never populates them, so
         // skip the shortcut and decode while one is active (owner bug — see
@@ -755,7 +755,7 @@ impl AppState {
     }
 
     /// Kick off background decode + mix of a comp's audio layers into one
-    /// buffer (Hibiki mix): the layers' sound laid on the comp timeline at
+    /// buffer (Pulsar mix): the layers' sound laid on the comp timeline at
     /// their offsets and trims. The result arrives via [`Self::poll_comp_audio`].
     /// A comp with no audio layers prepares nothing (it plays on the fallback
     /// wall clock).

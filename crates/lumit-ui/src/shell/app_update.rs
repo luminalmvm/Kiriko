@@ -68,19 +68,19 @@ impl Shell {
             Some(rs) => {
                 shell.gpu = Some(GpuViewer::new(rs));
                 lines.push(BootLine::ok(
-                    "Togi render pipeline: GPU (sRGB → linear fp16 → display)",
+                    "Nova render pipeline: GPU (sRGB → linear fp16 → display)",
                 ));
             }
             None => lines.push(BootLine {
-                text: "Togi render pipeline: CPU fallback (no wgpu render state)".into(),
+                text: "Nova render pipeline: CPU fallback (no wgpu render state)".into(),
                 failed: true,
             }),
         }
         #[cfg(feature = "media")]
-        lines.push(BootLine::ok("Kura cache: RAM tier ready (512 MB)"));
+        lines.push(BootLine::ok("Nebula cache: RAM tier ready (512 MB)"));
         #[cfg(feature = "media")]
         lines.push(BootLine::ok(
-            "Hibiki audio: cpal (clock starts with playback)",
+            "Pulsar audio: cpal (clock starts with playback)",
         ));
         lines.push(BootLine::ok(format!(
             "Effects: {} built-in registered",
@@ -267,7 +267,7 @@ impl Shell {
             if self.app.drain_disk_loads() {
                 ctx.request_repaint();
             }
-            // Kura warm path: a cached frame presents as a plain upload.
+            // Nebula warm path: a cached frame presents as a plain upload.
             if let Some(key) = self.app.cached_present.take() {
                 if let Some(gpu) = &mut self.gpu {
                     // VRAM first (docs/06 §5): a still-resident display texture

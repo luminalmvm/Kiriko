@@ -434,7 +434,7 @@ pub enum CacheTier {
 #[cfg(feature = "media")]
 pub mod diskio;
 
-/// One display-ready comp frame in Kura's RAM tier (sRGB bytes as shown and
+/// One display-ready comp frame in Nebula's RAM tier (sRGB bytes as shown and
 /// as exported — the same pixels, K-031).
 #[cfg(feature = "media")]
 pub struct CachedCompFrame {
@@ -921,7 +921,7 @@ pub struct AppState {
     /// Timeline right area shows the graph editor (curves) instead of the
     /// layer bars — a mode of the Timeline, not a separate panel (K-070).
     pub timeline_graph_mode: bool,
-    /// Kura's RAM tier for final comp frames (K-016): display-ready sRGB
+    /// Nebula's RAM tier for final comp frames (K-016): display-ready sRGB
     /// bytes keyed by content hash. Hash mismatch is the only invalidation.
     #[cfg(feature = "media")]
     pub comp_frame_cache: lumit_cache::ByteLru<u128, CachedCompFrame>,

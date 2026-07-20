@@ -1,4 +1,4 @@
-//! The seed of **Togi**'s evaluator (K-067): pure content-hash frame keys
+//! The seed of **Nova**'s evaluator (K-067): pure content-hash frame keys
 //! per docs/06-RENDER-PIPELINE.md §5.2.
 //!
 //! In plain terms: before rendering a frame, Lumit writes down everything
