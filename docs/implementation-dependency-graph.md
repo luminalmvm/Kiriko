@@ -37,7 +37,7 @@ flowchart TD
   subgraph SSPINE["Render and evaluation spine"]
     WPOOL["✅ Worker pool — built + tested<br/>(lumit-eval::pool, cores−3 min 2, two classes;<br/>its tenants — per-frame render jobs — arrive with PIXPASS;<br/>existing shell spawns are decode/IO roles, correctly off-pool)"]
     SEAMS["✅ Eval trait seams — built + tested<br/>(lumit-eval::exec: FrameSource / KernelExecutor /<br/>CacheStore + demand-pull executor over fakes)"]
-    PIXPASS["Eval-graph pixel pass — the graph renders,<br/>not lumit-ui (06 §1.1). Executor core done; walking<br/>skeleton proven on the real compositor (solids, exact<br/>transform placement, linear blend, cache hits,<br/>ALL blend modes, layer masks — lavapipe-tested);<br/>remaining: adjustments/retime vocabulary +<br/>switching preview/export onto it"]
+    PIXPASS["Eval-graph pixel pass — the graph renders,<br/>not lumit-ui (06 §1.1). Executor core done; walking<br/>skeleton proven on the real compositor (solids, exact<br/>transform placement, linear blend, cache hits, ALL blend<br/>modes, layer masks, adjustment-layer effects — lavapipe-tested);<br/>remaining: retime vocabulary +<br/>switching preview/export onto it"]
     ROIDOD["ROI/DoD protocol, macro-tiles,<br/>per-node CPU fallback (06 §2, K-019)"]
     EXPORTC["Export compiler and baking (06 §7.2, K-024)"]
     PROFILER["Per-node profiler and<br/>render-time column (13 §7.1)"]
@@ -307,8 +307,8 @@ flowchart TD
    and it is the architecture 05/06 actually specify. Worker pool and the trait seams are done;
    the walking skeleton (executor driving the real compositor through the seams) is being widened
    one vocabulary slice at a time — solids, transform placement, opacity, linear blend, all blend
-   modes and layer masks proven (lavapipe-tested); adjustments and retime next — before preview and
-   export switch onto it.
+   modes, layer masks and adjustment-layer effects proven (lavapipe-tested); retime is the last
+   vocabulary slice — before preview and export switch onto it.
 3. **Texture pool → governor → degradation ladder** (plus device-lost recovery and the VRAM
    tier) — the performance backbone; nothing in 13 can be enforced without it.
 4. **Media and colour: persistent decoders → hardware decode → CM pass, with colour tags.**

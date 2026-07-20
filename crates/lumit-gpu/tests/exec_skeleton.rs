@@ -14,9 +14,10 @@
 //! Scope: Source (solids), Transform (identity passthrough — placement
 //! resolution stays with the adapter's owner), Composite (all blend modes via
 //! the adapter's `BlendMode` → `Blend` map, per-layer opacity, and layer-mask
-//! coverage), Masks (coverage applied at Composite), CompOutput (over the comp
-//! background). Retime and adjustments are later slices. Skips cleanly when no
-//! GPU adapter is present, like every other lumit-gpu test.
+//! coverage), Masks (coverage applied at Composite), Adjust (an adjustment
+//! layer's effect stack over the composite below), CompOutput (over the comp
+//! background). Retime is the remaining slice. Skips cleanly when no GPU
+//! adapter is present, like every other lumit-gpu test.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -31,8 +32,18 @@ use lumit_eval::exec::{
 use lumit_eval::graph::{EvalGraph, Node, NodeId, NodeKind, SourceRef};
 use lumit_eval::FrameKey;
 use lumit_gpu::composite::{Blend, CompositeLayer, Compositor};
+use lumit_gpu::fx::{FxEngine, InvertOp};
 use lumit_gpu::{ColourEngine, GpuContext};
 use uuid::Uuid;
+
+/// One resolved effect an adjustment layer applies to the composite below it.
+/// The production adapter will resolve a layer's full effect stack from the
+/// document; the skeleton pins the one it needs (Invert is parameter-light and
+/// its result is trivial to predict, so it makes a clean seam proof).
+#[derive(Clone, Copy)]
+enum AdjustFx {
+    Invert { mix: f32 },
+}
 
 /// The frame store handles index into. Shared by the two adapters via
 /// `Rc<RefCell<…>>` — single-threaded test plumbing, nothing more.
@@ -132,6 +143,11 @@ struct GpuKernels {
     /// layer's mask shapes here; the test uploads a ready alpha texture. Absent
     /// = no mask (fully visible).
     masks: HashMap<Uuid, wgpu::Texture>,
+    /// The effect engine an adjustment layer runs its stack through.
+    fx: FxEngine,
+    /// adjustment-layer id → the effect stack it applies to the composite
+    /// below (empty / absent = a no-op adjustment).
+    adjusts: HashMap<Uuid, Vec<AdjustFx>>,
 }
 
 impl GpuKernels {
@@ -228,6 +244,36 @@ impl KernelExecutor for GpuKernels {
                 );
                 drop(frames);
                 Ok(self.frames.borrow_mut().push(out))
+            }
+            // An adjustment layer runs its effect stack over the composite
+            // below it (its single input), returning the adjusted accumulator.
+            // The executor stays semantics-blind: which effects, and their
+            // parameters, are the adapter's to resolve (here from a table; the
+            // production adapter reads the layer's effect list at time `t`).
+            NodeKind::Adjust { layer } => {
+                let &below = inputs
+                    .first()
+                    .ok_or_else(|| err("adjust needs the composite below".into()))?;
+                let ops = self.adjusts.get(layer).cloned().unwrap_or_default();
+                // Start from the input texture; each op returns a fresh one.
+                let mut current = {
+                    let frames = self.frames.borrow();
+                    let src = frames
+                        .get(below)
+                        .ok_or_else(|| err("missing adjust input".into()))?;
+                    // No ops: an identity copy so the pass still yields a frame
+                    // (a bare Invert with mix 0 is the identity kernel).
+                    self.fx.invert(&self.ctx, src, w, h, &InvertOp { mix: 0.0 })
+                };
+                for op in &ops {
+                    current = match op {
+                        AdjustFx::Invert { mix } => {
+                            self.fx
+                                .invert(&self.ctx, &current, w, h, &InvertOp { mix: *mix })
+                        }
+                    };
+                }
+                Ok(self.frames.borrow_mut().push(current))
             }
             NodeKind::CompOutput { .. } => {
                 let frames = self.frames.borrow();
@@ -377,6 +423,8 @@ impl Rig {
             background,
             layers,
             masks: HashMap::new(),
+            fx: FxEngine::new(&self.ctx),
+            adjusts: HashMap::new(),
         }
     }
 
@@ -627,6 +675,79 @@ fn a_layer_mask_gates_the_layer_through_the_seams() {
             assert_eq!(p, expected, "pixel ({x},{y})");
         }
     }
+}
+
+/// An adjustment layer runs its effect stack over the composite below it,
+/// through the seams: a red solid with an Invert adjustment above it reads back
+/// as cyan. Invert works in linear light — red (1,0,0) → (0,1,1) → cyan once
+/// displayed — so this also pins that the effect ran in the right domain, on
+/// the accumulator the executor handed it, with the executor semantics-blind
+/// (the effect choice lives in the adapter's table).
+#[test]
+fn an_adjustment_layer_runs_its_effect_over_the_composite_below() {
+    let Some(rig) = Rig::new((8, 8)) else { return };
+    let (red, l_red, adj, comp) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    let mut source = rig.source(HashMap::from([(red, [255, 0, 0, 255])]));
+    let mut kernels = rig.kernels([0.0, 0.0, 0.0, 1.0], HashMap::new());
+    kernels
+        .adjusts
+        .insert(adj, vec![AdjustFx::Invert { mix: 1.0 }]);
+    let mut cache = MapCache::default();
+    // source(red) → transform → composite → adjust(invert) → output.
+    let node = |kind, inputs| Node { kind, inputs };
+    let graph = EvalGraph {
+        nodes: vec![
+            node(
+                NodeKind::Source {
+                    source: SourceRef::Solid(red),
+                },
+                vec![],
+            ),
+            node(NodeKind::Transform { layer: l_red }, vec![0]),
+            node(
+                NodeKind::Composite {
+                    layer: l_red,
+                    blend: lumit_core::model::BlendMode::Normal,
+                    has_matte: false,
+                },
+                vec![1],
+            ),
+            node(NodeKind::Adjust { layer: adj }, vec![2]),
+            node(
+                NodeKind::CompOutput {
+                    comp,
+                    width: 8,
+                    height: 8,
+                },
+                vec![3],
+            ),
+        ],
+        output: 4,
+    };
+    let token = Epoch::new().token();
+    let out = render_frame(
+        &graph,
+        0.0,
+        None,
+        &mut source,
+        &mut kernels,
+        &mut cache,
+        &token,
+    )
+    .expect("skeleton renders");
+    // Invert of red in linear light is cyan; a small tolerance covers the
+    // linear→display round-trip (as the linear-blend test uses).
+    let px = rig.readback(out);
+    let (r, g, b, a) = (i32::from(px[0]), i32::from(px[1]), i32::from(px[2]), px[3]);
+    assert!(
+        r <= 1 && (g - 255).abs() <= 1 && (b - 255).abs() <= 1 && a == 255,
+        "Invert adjustment over red should read back cyan ≈(0,255,255,255), got ({r},{g},{b},{a})"
+    );
 }
 
 #[test]
