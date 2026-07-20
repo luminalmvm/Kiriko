@@ -120,6 +120,25 @@ impl Shell {
         if self.app.selected_layer.is_some() && ctx.input_mut(|i| i.consume_shortcut(&DUPLICATE)) {
             self.app.duplicate_layer();
         }
+        // Timeline zoom (docs/07-UI-SPEC §4.6): `=`/`Shift+=` zoom in, `-` zooms
+        // out, `\` fits. Same 1.4× steps and 1..400% clamp as the bottom bar's
+        // zoom buttons. Read (not consumed) — no other reader claims these keys.
+        let (zoom_in, zoom_out, zoom_fit) = ctx.input(|i| {
+            (
+                i.key_pressed(Key::Equals) || i.key_pressed(Key::Plus),
+                i.key_pressed(Key::Minus),
+                i.key_pressed(Key::Backslash),
+            )
+        });
+        if zoom_in {
+            self.app.timeline_zoom = (self.app.timeline_zoom * 1.4).min(400.0);
+        }
+        if zoom_out {
+            self.app.timeline_zoom = (self.app.timeline_zoom / 1.4).max(1.0);
+        }
+        if zoom_fit {
+            self.app.timeline_zoom = 1.0;
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
