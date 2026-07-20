@@ -592,7 +592,7 @@ several binding rules are violated or their promised enforcement doesn't exist.
 | §4 | No panicking indexing in hot paths | Violated | `&self.nodes[id]` (`graph.rs:87`); realtime audio callback indexes `buffer.samples[…]` (`lumit-audio/src/lib.rs:146-147`) | ◑ Partial · `graph.rs` node accessor now returns `Option<&Node>` via `.get()` (eval builds + 46 tests green locally) — panic path removed. Audio-callback index still open (can't build lumit-audio here) |
 | §4 | `DeviceLost` recoverable, never a crash | Not implemented | No handling | — |
 | §5 | Pooled frame allocations accounted to the governor | Not implemented | Ad-hoc `Vec`s; no pool/governor | — |
-| §5 | No unbounded queues without a decision entry | Violated | `mpsc::channel()` (unbounded) for beats/audio/comp-audio (`playback.rs:151`, `previewing.rs:709,795`) — drained latest-wins, but unbounded and unlogged | — |
+| §5 | No unbounded queues without a decision entry | Violated | `mpsc::channel()` (unbounded) for beats/audio/comp-audio (`playback.rs:151`, `previewing.rs:709,795`) — drained latest-wins, but unbounded and unlogged | ✅ Done · logged as K-170: unbounded is deliberate (latest-wins mailboxes drained per frame + self-throttling work queues), with a documented bounded-`sync_channel` escape hatch if profiling shows growth. Rule now satisfied (decision entry exists) |
 | §5 | Journal compaction story | Partial | Undo journal is an ever-growing `Vec` (`store.rs:23-24`) | — |
 | §6 | Golden-frame EXR tests per platform | Not implemented | No EXR fixtures, no CI step | — |
 | §6 | cargo-fuzz on `.lum`/journal/OFX on a schedule | Not implemented | No fuzz dir or job | — |

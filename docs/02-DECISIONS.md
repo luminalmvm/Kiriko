@@ -2151,3 +2151,26 @@ occlusion, box-blurred confidence — is pinned in `docs/impl/optical-flow.md` a
 possible future FlowField producer behind the unchanged API (dense vectors + occlusion +
 confidence); motion blur would keep using DIS vectors. This records a choice the impl note and
 shipped code already made but the spec's open question still listed as pending.
+
+**K-170 · DECIDED · The UI's worker-result channels are unbounded `std::sync::mpsc` by
+deliberate choice; 14-ENGINEERING-RULES §5's "no unbounded queue without a decision entry" is
+satisfied here.** The `lumit-ui` shell talks to its background threads over plain unbounded
+`mpsc` channels — pre-mixed audio and comp-audio buffers, beat-detection results
+(`app_state/mod.rs`), disk-cache load commands and their loaded frames (`app_state/diskio.rs`),
+preview-render results (`app_state/preview.rs`), export-progress events (`export.rs`), and media
+decode results (`app_state/media.rs`). None of these grows without bound in practice, for two
+distinct reasons, and that — not oversight — is why they are unbounded:
+
+- **Latest-wins mailboxes** (audio / comp-audio / beats / preview results): the UI drains the
+  whole channel every frame and keeps only the newest message, so the standing depth is at most
+  the handful of items a producer can emit inside one ~16 ms frame. A bounded channel would add
+  `try_send`-and-drop plumbing to achieve the same effect the drain already gives for free.
+- **Self-throttling work queues** (disk IO commands, media decode, export events): the UI issues
+  at most one outstanding request per cache slot / per active job, so the number of in-flight
+  messages is capped by the caller's own concurrency, not by the channel.
+
+v1 therefore keeps the simpler unbounded type. The escape hatch: if profiling ever shows a
+channel accumulating (a producer outrunning a stalled UI thread), the fix is a bounded
+`sync_channel` with explicit latest-wins drop on the latest-wins ones, logged as a follow-up
+decision — not a silent swap. The realtime audio callback stays lock-free ring-buffer reads only
+and is unaffected by this entry.
