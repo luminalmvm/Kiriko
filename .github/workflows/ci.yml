@@ -30,6 +30,13 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Release-mode compile check: some deps expose fields/APIs only under
+      # `#[cfg(debug_assertions)]` (egui's `Style::debug` is one), so code that
+      # touches them builds in the debug jobs above but breaks the release
+      # build the owner actually runs. A cheap `cargo check --release` catches
+      # that class of bug without a full optimised build.
+      - name: Release-mode compile check (owner runs --release)
+        run: cargo check --workspace --release
 
   windows:
     name: tests (Windows — the shipping target, with media)
