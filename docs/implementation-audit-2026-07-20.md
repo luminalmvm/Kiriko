@@ -484,7 +484,7 @@ pervasive unknown-field preservation are genuinely implemented and tested. Delta
 | § | Claim | Status | Evidence / what's missing | Resolution / next step |
 |---|---|---|---|---|
 | 1 | `thumbs/` in the container | Not implemented | Only manifest + project.json ("Phase 0 scope", `lumit-project/src/lib.rs:2`) | — |
-| 1 | Two saves byte-identical (stable key order) | Partial/unverifiable | Pretty-printed, but no determinism guarantee or test | — |
+| 1 | Two saves byte-identical (stable key order) | Partial/unverifiable | Pretty-printed, but no determinism guarantee or test | ✅ Done · verified deterministic by construction (no `HashMap` in serialised structs; `extra` is a sorted `serde_json::Map`) and locked in with a regression test asserting two saves + open→save reproduce identical `project.json` bytes (7 project tests green locally) |
 | 1 | Newer reader **migrates** older files | Not implemented | Only refuse-too-new gating (`lib.rs:114`); no migration step | — |
 | 1.1 | Enums serialise lower-kebab | Contradicted | Default PascalCase/externally-tagged everywhere (e.g. `"channel":"Alpha"`) | ✅ Done · 5bb73ff (doc) |
 | 2 | Fingerprint + 4-step relink + sibling auto-relink | Partial / not implemented | No fingerprint on `MediaRef`; no relink resolver | — |

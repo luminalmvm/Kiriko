@@ -328,6 +328,43 @@ mod tests {
         }
     }
 
+    /// Reads one entry's bytes out of a `.lum` container.
+    fn entry_bytes(path: &Path, name: &str) -> Vec<u8> {
+        let mut zip = ZipArchive::new(File::open(path).unwrap()).unwrap();
+        let mut entry = zip.by_name(name).unwrap();
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn two_saves_of_the_same_doc_are_byte_identical(/* docs/10 §1 */) {
+        // Insert several out-of-order unknown keys: the serialised order must be
+        // stable (serde_json::Map is a sorted BTreeMap without preserve_order),
+        // so re-saving the same document reproduces the same project.json bytes.
+        let mut doc = doc_with_item();
+        doc.extra.insert("zebra".into(), serde_json::json!(1));
+        doc.extra.insert("alpha".into(), serde_json::json!(2));
+        doc.extra.insert("mike".into(), serde_json::json!(3));
+
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.lum");
+        let b = dir.path().join("b.lum");
+        save(&doc, &a).unwrap();
+        save(&doc, &b).unwrap();
+
+        let ja = entry_bytes(&a, "project.json");
+        let jb = entry_bytes(&b, "project.json");
+        assert_eq!(ja, jb, "two saves of the same document must be byte-identical");
+
+        // And a round-trip (open then save) reproduces those exact bytes, so
+        // unknown-field preservation is deterministic too.
+        let (reopened, _) = open(&a).unwrap();
+        let c = dir.path().join("c.lum");
+        save(&reopened, &c).unwrap();
+        assert_eq!(ja, entry_bytes(&c, "project.json"), "open+save must be stable");
+    }
+
     #[test]
     fn too_new_projects_are_refused_clearly() {
         let dir = tempfile::tempdir().unwrap();
