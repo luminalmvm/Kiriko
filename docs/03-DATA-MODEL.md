@@ -99,17 +99,19 @@ renders as a labelled placeholder slate, and never blocks project open. Relink f
 struct Composition {
     id: Uuid,
     name: String,
-    width: u32, height: u32,            // hard cap 16384×16384 in v1
-    pixel_aspect: Rational,             // 1:1 default
+    width: u32, height: u32,            // no hard cap enforced yet (16384² is the intended limit)
     frame_rate: FrameRate,
     duration: CompTime,
     background: LinearColour,
-    depth: CompDepth,                   // Fp16 (default) | Fp32   (K-026, per-comp)
-    motion_blur: MotionBlurSettings,    // shutter_angle (deg), shutter_phase, max_samples
-    work_area: (CompTime, CompTime),
+    motion_blur: MotionBlur,            // shutter_angle (deg), shutter_phase, samples; off by default
+    work_area: Option<(CompTime, CompTime)>,  // None = full comp
     markers: Vec<Marker>,
     layers: Vec<Layer>,                 // index 0 = top of the stack
 }
+// Future: `pixel_aspect` (v1 is square-pixel only), and working depth — K-069
+// made bit depth a project-wide switch (not the per-comp `CompDepth` of the
+// superseded K-026), and v1 renders fp16 only regardless. The 16384² dimension
+// cap is intended but not yet enforced.
 ```
 
 Comp frame rate is presentational (it defines frame boundaries for snapping and export);
@@ -230,41 +232,41 @@ A **property** is an animatable slot. Properties live in **property groups** for
 tree (transform group, each effect's parameters, each mask's geometry, retime).
 
 ```rust
-struct Property<T: PropValue> {
-    id: Uuid,
-    animation: Animation<T>,
-    expression: Option<Expression>,   // §6.4 — applied after keyframe evaluation
+// v1: a Property is a scalar f64.
+struct Property {
+    animation: Animation,            // Static(f64) | Keyframed(Vec<Keyframe>)
 }
 
-enum Animation<T> {
-    Static(T),
-    Keyframed(Vec<Keyframe<T>>),      // sorted by time, unique times
+enum Animation {
+    Static(f64),
+    Keyframed(Vec<Keyframe>),        // sorted by time, unique times
 }
 ```
 
-`PropValue` types: `f64`, `Vec2`, `Vec3`, `LinearColour`, `bool`, `enum` (hold-only
-interpolation for the last two), `BezierPath` (mask/shape geometry), `TextDocument`.
-
-Property addressing is by stable path of ids (not display names), so expressions and the AE
-Bridge survive renames: `layer(id).effect(id).param(id)`.
+A multi-dimensional value (a Vec2 position, a Vec3 scale, a colour) is stored in v1 as
+**separate per-dimension scalar properties** (`position_x`/`position_y`, …), not a generic
+`Property<T>`. The generic `Property<T: PropValue>` over `Vec2`/`Vec3`/`LinearColour`/`bool`/
+`enum`/`BezierPath`/`TextDocument`, the stable-`id` addressing, and the `expression` slot are
+**future** — they arrive with the expression engine (§6.4, [12-PLUGINS.md](12-PLUGINS.md)),
+which v1 does not have. There is no `PropValue` trait in v1.
 
 ### 6.2 Keyframes — AE-compatible maths (K-025)
 
 ```rust
-struct Keyframe<T> {
+// v1: value is f64 (see §6.1).
+struct Keyframe {
     time: OwnerTime,                  // timebase of the owning object
-    value: T,
+    value: f64,
     interp_in:  SideInterp,           // approaching this key
     interp_out: SideInterp,           // leaving this key
-    spatial: Option<SpatialTangents>, // Vec2/Vec3 positional properties only
-    roving: bool,                     // spatial properties only
-    label: Option<LabelColour>,
 }
+// Future: `spatial: SpatialTangents` and `roving` (Vec2/Vec3 motion paths) and a
+// per-keyframe `label` — they arrive with the motion-path unit.
 
 enum SideInterp {
     Hold,
     Linear,
-    Bezier { speed: f64, influence: f64 },   // speed: units/sec; influence: 0.1..=100.0 (%)
+    Bezier { speed: f64, influence: f64 },   // speed: value-units/sec; influence: a fraction in (0, 1]
 }
 ```
 
@@ -277,23 +279,28 @@ P2 = (t2 − influence_in·Δt,  v2 − speed_in·influence_in·Δt)      where 
 ```
 
 — exactly AE's model, so Bridge import ([11-AE-IMPORT.md](11-AE-IMPORT.md)) is lossless and
-the speed graph in the graph editor is the true derivative. Easy-ease presets are speed 0,
-influence 33.33%.
+the speed graph in the graph editor is the true derivative. `influence` is stored as a
+fraction in `(0, 1]` (AE's percentage ÷ 100); the easy-ease preset is speed 0, influence `1/3`
+(AE's 33.3%).
 
-Spatial properties additionally carry in/out tangents in value space defining the motion
-path; **roving** keyframes surrender their time and are repositioned to equalise speed along
-the path (recomputed whenever neighbours change).
+Spatial properties would additionally carry in/out tangents in value space defining the motion
+path, and **roving** keyframes would surrender their time to equalise speed along the path.
+Both are **future** (the motion-path unit); v1 animates scalar dimensions independently.
 
 ### 6.3 Evaluation order of one property
 
 ```
-keyframe/static evaluation → expression (may read the pre-expression value) → clamp/validate
+keyframe/static evaluation → [expression — FUTURE] → clamp/validate
 ```
 
-A property's evaluated value at a time is pure: same project, same time, same value —
-no wall clock, no external state ([14-ENGINEERING-RULES.md](14-ENGINEERING-RULES.md)).
+The **expression** stage is future (§6.4); v1 evaluates keyframes/static only. A property's
+evaluated value at a time is pure regardless: same project, same time, same value — no wall
+clock, no external state ([14-ENGINEERING-RULES.md](14-ENGINEERING-RULES.md)).
 
-### 6.4 Expressions
+### 6.4 Expressions (future — no engine in v1)
+
+The expression engine (JavaScript on QuickJS, K-063 / [12-PLUGINS.md](12-PLUGINS.md)) is not in
+v1: `Property` has no expression slot yet. The intended shape:
 
 ```rust
 struct Expression {
@@ -311,19 +318,20 @@ pre-expression value. It never fails the render.
 ## 7. Masks
 
 ```rust
+// v1: a static, Add-mode mask.
 struct Mask {
     id: Uuid,
-    path: Property<BezierPath>,       // closed or open; animatable
-    mode: MaskMode,                   // None|Add|Subtract|Intersect|Lighten|Darken|Difference
+    name: String,
+    path: BezierPath,                 // closed; static (not yet animatable)
     inverted: bool,
-    opacity: Property<f64>,           // 0..100
-    feather: Property<Vec2>,          // px at layer scale
-    expansion: Property<f64>,         // px, signed
+    opacity: f64,                     // 0..100, static
 }
 ```
 
 Masks apply in order before the effect stack ([06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md)).
-Variable-width feather is post-v1; the model reserves per-vertex feather data.
+**Future:** an animatable `path`/`opacity` (`Property<…>`), the full `mode` set
+(`None|Add|Subtract|Intersect|Lighten|Darken|Difference` — v1 is **Add only**), and `feather` /
+`expansion`. Variable-width feather is post-v1; the model will reserve per-vertex feather data.
 
 ## 8. Effects
 
