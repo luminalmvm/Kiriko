@@ -84,6 +84,7 @@ impl Shell {
                     }
                 }
                 MenuAction::ResetWorkspace => self.dock = default_layout(),
+                MenuAction::OpenSettings => self.settings_open = true,
             }
         }
     }
