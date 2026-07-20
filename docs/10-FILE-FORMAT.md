@@ -98,7 +98,7 @@ Rules, binding:
 
 ## 5. Presets and templates
 
-- **Preset** (`.kfxpreset`): a JSON document containing an effect stack (or single effect,
+- **Preset** (`.lumfx`): a JSON document containing an effect stack (or single effect,
   or animation) parameter tree — same conventions as project.json, shareable, importable by
   drag onto a layer.
 - **Template**: an ordinary `.lum` file opened in "new from template" mode (copy, not

@@ -11,6 +11,29 @@ is still to be implemented, so a pre-release worklist can be drawn from it. Alre
 implemented claims are deliberately omitted from the tables below (each section opens
 with a short note on what *is* solid); the tables list only the gaps.
 
+## Fixes applied (living log)
+
+Work resolving the findings below, newest first. The finding tables are left as the
+original snapshot; this log is the running record of what has since changed.
+
+- **Cross-cutting ① — CI red → fixed.** `Compositor::accumulate` now sums the
+  accumulation-motion-blur combine in fp32 (ping-ponged `Rgba32Float` targets, resolved to
+  the working format once), so the still-scene identity is bit-exact and the failing
+  `accumulation_still_scene_is_identity_and_moving_scene_smears` test passes. Verified
+  locally against a software Vulkan adapter (lavapipe) with a new fractional-coverage
+  regression test; end-to-end CI still pending a PR. Retires the accumulation-path half of
+  **06 §4** (per-layer `motion_blur_average` remains fp16 — the other half).
+- **Cross-cutting ⑥ / 00 §6 / 05 naming — fixed.** Code codenames reconciled to the decided
+  astral register (K-083): `Togi → Nova`, `Kura → Nebula`, `Hibiki → Pulsar` (comments and
+  boot-log strings only).
+- **08 §3.9 (Sharpen "radius-free") — doc-synced.** Doc updated: plain Sharpen carries an
+  adjustable Radius (T15), not a fixed 3×3.
+- **08 §5 / 10 §5 (preset `.kpreset`/`.kfxpreset`) — doc-synced.** Corrected to `.lumfx` (the
+  name already used in code, K-065/K-129, 07 and GUIDE); the "zipped with embedded assets"
+  claim reworded as a future extension (v1 is plain JSON).
+- **08 §3.1 (flow "variational/patch-match hybrid") — resolved.** Doc synced to the shipped
+  DIS engine; 08 Open Question 1 resolved and logged as **K-169**.
+
 ## Status legend
 
 | Status | Meaning |

@@ -2139,3 +2139,15 @@ theme's existing roles via `Theme::label_colour` (no new hex, docs/15 §4). Neit
 built yet, each blocked on machinery it would misrepresent without: **shy** (needs an outline
 filter row), **quality** (needs a bicubic sampler choice), **preserve underlying transparency**
 (needs compositor support), and the **pick-whip** parent drag (the dropdown stands in, K-103).
+
+**K-169 · DECIDED · The optical-flow engine is dense inverse search (DIS); resolves 08 Open
+Question 1.** The flow field that feeds Retime's flow interpolation and Fast motion blur is
+computed by **Dense Inverse Search** (Kroeger et al., ECCV 2016), not the "variational /
+patch-match hybrid" the 08 §3.1 sketch first floated. DIS is the studied sweet spot: fast,
+GPLv3-clean (no trained model to redistribute), and cheap enough to run per preview frame. The
+exact structure — 8×8 patches on a stride-4 grid, a few Newton steps per patch, forward-backward
+occlusion, box-blurred confidence — is pinned in `docs/impl/optical-flow.md` and implemented in
+`lumit-flow` as a CPU oracle plus WGSL twin (K-019). A learned RAFT-class backend stays a
+possible future FlowField producer behind the unchanged API (dense vectors + occlusion +
+confidence); motion blur would keep using DIS vectors. This records a choice the impl note and
+shipped code already made but the spec's open question still listed as pending.
