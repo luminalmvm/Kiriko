@@ -211,7 +211,12 @@ fn fs_layer_snapshot(in: VsOut) -> @location(0) vec4<f32> {
         let m = textureSample(matte, samp, comp_uv);
         var strength = m.a;
         if (layer.params.z > 0.5) {
-            strength = dot(m.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            // Luma matte: Rec.709 Y of the sRGB-ENCODED signal (perceptual luma,
+            // matching After Effects), not of linear light (docs/06 §3.5a).
+            strength = dot(
+                srgb_encode_c(clamp(m.rgb, vec3<f32>(0.0), vec3<f32>(1.0))),
+                vec3<f32>(0.2126, 0.7152, 0.0722),
+            );
         }
         if (layer.params.w > 0.5) {
             strength = 1.0 - strength;
@@ -248,8 +253,12 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
         let m = textureSample(matte, samp, comp_uv);
         var strength = m.a;
         if (layer.params.z > 0.5) {
-            // Luma matte (v0: luma of the premultiplied composite).
-            strength = dot(m.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            // Luma matte: Rec.709 Y of the sRGB-ENCODED signal (perceptual luma,
+            // matching After Effects), not of linear light (docs/06 §3.5a).
+            strength = dot(
+                srgb_encode_c(clamp(m.rgb, vec3<f32>(0.0), vec3<f32>(1.0))),
+                vec3<f32>(0.2126, 0.7152, 0.0722),
+            );
         }
         if (layer.params.w > 0.5) {
             strength = 1.0 - strength;

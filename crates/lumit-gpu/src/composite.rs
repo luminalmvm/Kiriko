@@ -1556,6 +1556,84 @@ mod tests {
         );
     }
 
+    /// docs/06 §3.5a: a luma matte gates by the Rec.709 luma of the
+    /// sRGB-ENCODED signal (perceptual luma, matching After Effects), not of
+    /// linear light. A mid-grey matte at linear ~0.5 therefore gates at its
+    /// perceptual luma ~0.735, not 0.5 — the two are far enough apart to tell.
+    #[test]
+    fn luma_matte_uses_perceptual_encoded_luminance() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let colour = ColourEngine::new(&ctx);
+        let compositor = Compositor::new(&ctx);
+        // sRGB 188 ≈ linear 0.5; a solid, fully-opaque grey fills the comp.
+        let grey = solid_linear(&ctx, &colour, [188, 188, 188, 255], 8, 8);
+        let matte_tex = compositor.composite(
+            &ctx,
+            8,
+            8,
+            [0.0, 0.0, 0.0, 0.0],
+            &[CompositeLayer {
+                texture: &grey,
+                size: (8.0, 8.0),
+                position: (0.0, 0.0),
+                anchor: (0.0, 0.0),
+                scale: (100.0, 100.0),
+                rotation_deg: 0.0,
+                opacity: 100.0,
+                matte: None,
+                blend: Blend::Normal,
+                z: 0.0,
+                rotation_x_deg: 0.0,
+                rotation_y_deg: 0.0,
+                three_d: false,
+                layer_mask: None,
+                pre: None,
+            }],
+        );
+        let red = solid_linear(&ctx, &colour, [255, 0, 0, 255], 8, 8);
+        let out = compositor.composite(
+            &ctx,
+            8,
+            8,
+            [0.0, 0.0, 0.0, 0.0],
+            &[CompositeLayer {
+                texture: &red,
+                size: (8.0, 8.0),
+                position: (0.0, 0.0),
+                anchor: (0.0, 0.0),
+                scale: (100.0, 100.0),
+                rotation_deg: 0.0,
+                opacity: 100.0,
+                matte: Some(MatteInput {
+                    texture: &matte_tex,
+                    luma: true,
+                    inverted: false,
+                }),
+                blend: Blend::Normal,
+                z: 0.0,
+                rotation_x_deg: 0.0,
+                rotation_y_deg: 0.0,
+                three_d: false,
+                layer_mask: None,
+                pre: None,
+            }],
+        );
+        let px = crate::fx::readback_linear_f32(&ctx, &out, 8, 8).unwrap();
+        // The premultiplied alpha of the matted red == the matte strength.
+        let a = px[(4 * 8 + 4) * 4 + 3];
+        assert!(
+            (a - 0.735).abs() < 0.03,
+            "perceptual luma of linear-0.5 grey is ~0.735; got {a}"
+        );
+        assert!(
+            a > 0.65,
+            "must gate by encoded (perceptual) luma, not linear ~0.5; got {a}"
+        );
+    }
+
     /// The AE camera model: at default placement the z=0 plane maps 1:1;
     /// pushing a 3D layer back in z shrinks it by zoom/(z+zoom).
     #[test]
