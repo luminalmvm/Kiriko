@@ -105,6 +105,9 @@ enum Message {
         frame: usize,
         jobs: Vec<CompJob>,
     },
+    /// Resize the decoded-frame cache (its slice of the one RAM budget,
+    /// Settings → Performance). Applied immediately, never latest-wins-dropped.
+    SetCacheBudget(usize),
 }
 
 impl Default for PreviewEngine {
@@ -124,13 +127,19 @@ impl Default for PreviewEngine {
             // (lumit-flow degrades by itself — never a fault).
             let mut flow_engine: Option<lumit_flow::FlowEngine> = None;
             loop {
-                // Block for one request, then drain to the newest (latest wins).
-                let mut req = match rx.recv() {
-                    Ok(r) => r,
-                    Err(_) => return,
+                // Block for one request, then drain to the newest (latest
+                // wins). Budget messages apply on the spot — they must never
+                // be dropped by the latest-wins replacement.
+                let mut req = loop {
+                    match rx.recv() {
+                        Ok(Message::SetCacheBudget(bytes)) => frame_cache.set_budget(bytes),
+                        Ok(r) => break r,
+                        Err(_) => return,
+                    }
                 };
                 loop {
                     match rx.try_recv() {
+                        Ok(Message::SetCacheBudget(bytes)) => frame_cache.set_budget(bytes),
                         Ok(newer) => req = newer,
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => return,
@@ -139,6 +148,7 @@ impl Default for PreviewEngine {
                 let generation = match &req {
                     Message::Footage(r) => r.generation,
                     Message::Comp { generation, .. } => *generation,
+                    Message::SetCacheBudget(_) => continue, // handled above
                 };
                 if generation != live.load(Ordering::Relaxed) {
                     continue; // superseded while queued
@@ -158,6 +168,7 @@ impl Default for PreviewEngine {
                         &jobs,
                     )
                     .map(PreviewResult::Comp),
+                    Message::SetCacheBudget(_) => continue, // handled above
                 };
                 let _ = result_tx.send(result);
             }
@@ -242,6 +253,11 @@ impl PreviewEngine {
     }
 
     /// Ask for every layer frame of a comp at one comp frame (latest wins).
+    /// Resize the decoded-frame cache (its slice of the RAM budget).
+    pub fn set_cache_budget(&self, bytes: usize) {
+        let _ = self.tx.send(Message::SetCacheBudget(bytes));
+    }
+
     pub fn request_comp(&self, comp: Uuid, frame: usize, jobs: Vec<CompJob>) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = self.tx.send(Message::Comp {

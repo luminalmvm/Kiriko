@@ -466,6 +466,16 @@ impl lumit_cache::ByteSized for CachedAudio {
     }
 }
 
+/// A background comp-audio delivery (see the `comp_audio_rx` field).
+#[cfg(feature = "media")]
+pub(crate) enum CompAudioMsg {
+    /// Waveform peaks computed off the live mix plan.
+    Peaks(Uuid, u64, Vec<(f32, f32)>),
+    /// A whole baked mix — the legacy path for sources the byte-budgeted
+    /// cache cannot hold (decode failed, or larger than the entire budget).
+    Baked(Uuid, u64, lumit_media::AudioBuffer),
+}
+
 /// See [`AppState::stamper`].
 #[cfg(feature = "media")]
 pub struct PreviewStamper<'a> {
@@ -706,12 +716,14 @@ pub struct AppState {
     /// bake being re-spawned every frame while it decodes.
     #[cfg(feature = "media")]
     audio_preparing: Option<(Uuid, u64)>,
-    /// Background-mixed comp audio arriving from the prepare thread, tagged with
-    /// the signature it was baked from so a superseded mix can be dropped.
+    /// Background comp-audio results, tagged with the signature they were
+    /// built from so a superseded delivery can be dropped. The live-mix path
+    /// only ships waveform peaks (the plan itself applies instantly on the UI
+    /// thread); the legacy path ships a whole baked buffer.
     #[cfg(feature = "media")]
-    comp_audio_rx: std::sync::mpsc::Receiver<(Uuid, u64, lumit_media::AudioBuffer)>,
+    comp_audio_rx: std::sync::mpsc::Receiver<CompAudioMsg>,
     #[cfg(feature = "media")]
-    comp_audio_tx: std::sync::mpsc::Sender<(Uuid, u64, lumit_media::AudioBuffer)>,
+    comp_audio_tx: std::sync::mpsc::Sender<CompAudioMsg>,
     /// Detected beats (comp id, bpm, (time_s, confidence)…) from the analysis
     /// thread.
     #[cfg(feature = "media")]

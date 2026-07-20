@@ -71,19 +71,18 @@ impl SettingsPage {
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct PerformanceSettings {
-    /// RAM frame-cache budget, in mebibytes (the `comp_frame_cache` LRU).
-    pub ram_cache_mb: u32,
+    /// The ONE application memory budget, in mebibytes (owner decision):
+    /// everything Lumit caches in RAM — rendered comp frames, decoded video
+    /// frames, and whole-file decoded audio — must fit inside this number,
+    /// apportioned in [`Shell::apply_cache_budgets`]. Base application
+    /// overhead (the UI, the document) sits outside it. Defaults to half the
+    /// machine's memory.
+    pub ram_budget_mb: u32,
     /// Disk frame-cache cap, in mebibytes (the `.lum-cache` sidecar).
     pub disk_cache_mb: u32,
     /// Video-memory (VRAM) frame-cache budget, in mebibytes (the GPU
     /// display-texture tier, `GpuViewer::vram`, docs/06 §5).
     pub vram_cache_mb: u32,
-    /// Decoded-audio budget, in mebibytes: how much RAM whole-file decoded
-    /// audio (the buffers playback mixes from) may hold. Defaults to half of
-    /// the machine's memory — a feature film's decoded audio runs to
-    /// gigabytes, and this cap is what stops it eating all of RAM (owner
-    /// decision after a real out-of-memory on a movie-length comp).
-    pub audio_cache_mb: u32,
     /// Whether Lumit fills the frame cache around the playhead while idle
     /// (docs/06 §5.4). On by default; off trades a colder cache for zero
     /// background decode/render work when the machine is busy elsewhere.
@@ -164,13 +163,11 @@ impl Default for AutosaveSettings {
 impl Default for PerformanceSettings {
     fn default() -> Self {
         Self {
-            // Matches `AppState`'s `ByteLru::new(512 * 1024 * 1024)`.
-            ram_cache_mb: 512,
+            ram_budget_mb: default_ram_budget_mb(),
             // Matches `AppState::DEFAULT_CAP_BYTES` (50 GiB).
             disk_cache_mb: 50 * 1024,
             // Matches `gpu::VRAM_TIER_CAP` (512 MiB).
             vram_cache_mb: 512,
-            audio_cache_mb: default_audio_cache_mb(),
             // Matches today's unconditional idle-fill behaviour.
             background_fill: true,
             // Matches today's unconditional beside-the-project behaviour.
@@ -179,15 +176,15 @@ impl Default for PerformanceSettings {
     }
 }
 
-/// Half of the machine's memory, in mebibytes — the decoded-audio budget's
-/// default (floored at 1 GiB so a small machine still plays something,
-/// capped so the u32 can't wrap on a huge one). Queried once when defaults
-/// are built; the user adjusts it in Settings → Performance thereafter.
-fn default_audio_cache_mb() -> u32 {
+/// Half of the machine's memory, in mebibytes — the application RAM budget's
+/// default (floored at 2 GiB so a small machine still works, capped so the
+/// u32 can't wrap on a huge one). Queried once when defaults are built; the
+/// user adjusts it in Settings → Performance thereafter.
+fn default_ram_budget_mb() -> u32 {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
     let half_mb = sys.total_memory() / 2 / (1024 * 1024);
-    u32::try_from(half_mb).unwrap_or(u32::MAX).max(1024)
+    u32::try_from(half_mb).unwrap_or(u32::MAX).max(2048)
 }
 
 /// Application-wide export settings (Settings → Export, docs/07-UI-SPEC §15,
@@ -534,19 +531,27 @@ impl Shell {
         page_heading(ui, theme, "Performance");
 
         settings_group(ui, theme, "Frame cache", |ui| {
-            let mut ram = self.settings.ram_cache_mb;
+            let mut ram = self.settings.ram_budget_mb;
             settings_row(
                 ui,
                 theme,
                 "Memory budget",
-                Some("How much RAM the frame cache may hold."),
+                Some(
+                    "The one cap on everything Lumit caches in RAM: rendered \
+                     frames, decoded video and decoded audio together. \
+                     Defaults to half the machine's memory.",
+                ),
                 |ui| {
                     ui.label(egui::RichText::new("MB").color(theme.text_muted));
-                    ui.add(egui::DragValue::new(&mut ram).speed(64).range(128..=32768));
+                    ui.add(
+                        egui::DragValue::new(&mut ram)
+                            .speed(512)
+                            .range(2048..=1_048_576),
+                    );
                 },
             );
-            if ram != self.settings.ram_cache_mb {
-                self.settings.ram_cache_mb = ram;
+            if ram != self.settings.ram_budget_mb {
+                self.settings.ram_budget_mb = ram;
                 self.apply_cache_budgets();
             }
 
@@ -585,30 +590,6 @@ impl Shell {
             );
             if vram != self.settings.vram_cache_mb {
                 self.settings.vram_cache_mb = vram;
-                self.apply_cache_budgets();
-            }
-
-            settings_divider(ui, theme);
-            let mut audio = self.settings.audio_cache_mb;
-            settings_row(
-                ui,
-                theme,
-                "Audio decode budget",
-                Some(
-                    "How much RAM whole-file decoded audio may hold. \
-                     Long films decode to gigabytes; this cap keeps them bounded.",
-                ),
-                |ui| {
-                    ui.label(egui::RichText::new("MB").color(theme.text_muted));
-                    ui.add(
-                        egui::DragValue::new(&mut audio)
-                            .speed(256)
-                            .range(1024..=1_048_576),
-                    );
-                },
-            );
-            if audio != self.settings.audio_cache_mb {
-                self.settings.audio_cache_mb = audio;
                 self.apply_cache_budgets();
             }
         });
@@ -732,8 +713,10 @@ impl Shell {
     /// remembers the cap across project switches). Called at start-up and
     /// whenever a Performance slider moves.
     pub(crate) fn apply_cache_budgets(&mut self) {
-        let ram = (self.settings.ram_cache_mb as usize).saturating_mul(1024 * 1024);
-        self.app.comp_frame_cache.set_budget(ram);
+        // One budget, apportioned: decoded audio is the heavyweight (half),
+        // rendered comp frames and decoded video frames a quarter each.
+        let budget = (self.settings.ram_budget_mb as usize).saturating_mul(1024 * 1024);
+        self.app.comp_frame_cache.set_budget(budget / 4);
         let disk = (self.settings.disk_cache_mb as u64).saturating_mul(1024 * 1024);
         if let Some(io) = &self.app.disk_io {
             let _ = io.tx.send(crate::app_state::diskio::Cmd::SetCap(disk));
@@ -744,8 +727,8 @@ impl Shell {
             if let Some(gpu) = &mut self.gpu {
                 gpu.set_vram_cap(vram);
             }
-            let audio = (self.settings.audio_cache_mb as usize).saturating_mul(1024 * 1024);
-            self.app.set_audio_cache_budget(audio);
+            self.app.set_audio_cache_budget(budget / 2);
+            self.app.preview_engine.set_cache_budget(budget / 4);
         }
     }
 
@@ -864,7 +847,7 @@ mod tests {
         let p = PerformanceSettings::default();
         // These must stay in step with AppState's constants, so a fresh
         // install behaves exactly as before the settings surface existed.
-        assert_eq!(p.ram_cache_mb, 512);
+        assert!(p.ram_budget_mb >= 2048);
         assert_eq!(p.disk_cache_mb, 50 * 1024);
         // Matches `gpu::VRAM_TIER_CAP`.
         assert_eq!(p.vram_cache_mb, 512);

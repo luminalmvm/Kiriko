@@ -92,6 +92,89 @@ pub fn place_on_timeline(
     Some((out_start, src_start, len))
 }
 
+/// One placed clip in a live [`MixPlan`]: a shared decoded buffer, where it
+/// lands on the comp strip, which slice of it plays, and its gain. The same
+/// placement triple [`place_on_timeline`] produces.
+#[derive(Clone)]
+pub struct PlacedClip {
+    pub buffer: std::sync::Arc<lumit_media::AudioBuffer>,
+    /// Output frame where `samples[src_start]` lands (may be negative).
+    pub start_frame: i64,
+    pub src_start: usize,
+    pub len: usize,
+    pub gain: f32,
+}
+
+/// A comp's audio as a *plan* rather than a baked buffer: the placed clips
+/// and the strip length. The realtime callback sums the covering clips per
+/// frame ([`MixPlan::frame_at`]) — a handful of multiply-adds — so editing
+/// audio (solo, mute, move, trim) is a plan swap, heard on the next
+/// callback, instead of a whole-comp re-bake. This is the live half of the
+/// docs/09 §2 lazy-decode direction; decoded buffers are shared `Arc`s from
+/// the byte-budgeted cache.
+#[derive(Clone, Default)]
+pub struct MixPlan {
+    pub clips: Vec<PlacedClip>,
+    pub total_frames: usize,
+}
+
+impl MixPlan {
+    /// The `(left, right)` of output frame `i`: every covering clip summed,
+    /// clamped to ±[`MASTER_CEILING`] like the baked mix. Allocation-free and
+    /// lock-free — callback-safe. O(clips) per frame, fine at layer counts.
+    #[must_use]
+    pub fn frame_at(&self, i: usize) -> (f32, f32) {
+        let (mut l, mut r) = (0.0f32, 0.0f32);
+        for clip in &self.clips {
+            let Ok(idx) = usize::try_from(i as i64 - clip.start_frame) else {
+                continue; // this clip starts later
+            };
+            if idx >= clip.len {
+                continue; // this clip has ended
+            }
+            let s = (clip.src_start + idx) * 2;
+            if let (Some(&sl), Some(&sr)) =
+                (clip.buffer.samples.get(s), clip.buffer.samples.get(s + 1))
+            {
+                l += sl * clip.gain;
+                r += sr * clip.gain;
+            }
+        }
+        (
+            l.clamp(-MASTER_CEILING, MASTER_CEILING),
+            r.clamp(-MASTER_CEILING, MASTER_CEILING),
+        )
+    }
+
+    /// Timeline waveform peaks straight off the plan — no whole-comp buffer
+    /// is ever materialised (that buffer was the memory blowup). Same bucket
+    /// shape as [`waveform_peaks`].
+    #[must_use]
+    pub fn waveform_peaks(&self, buckets: usize) -> Vec<(f32, f32)> {
+        if self.total_frames == 0 || buckets == 0 {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(buckets);
+        for b in 0..buckets {
+            let start = b * self.total_frames / buckets;
+            let end =
+                (((b + 1) * self.total_frames / buckets).max(start + 1)).min(self.total_frames);
+            let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+            for i in start..end {
+                let (l, r) = self.frame_at(i);
+                let m = 0.5 * (l + r);
+                lo = lo.min(m);
+                hi = hi.max(m);
+            }
+            if lo > hi {
+                (lo, hi) = (0.0, 0.0);
+            }
+            out.push((lo, hi));
+        }
+        out
+    }
+}
+
 /// Down-sample interleaved-stereo PCM to `buckets` `(min, max)` pairs of the
 /// mono mixdown — the timeline waveform. Each bucket spans an equal slice of
 /// the audio; empty input or zero buckets yields an empty result. Pure, so the
@@ -354,6 +437,90 @@ mod tests {
         );
         // 0.8 + 0.8 = 1.6, held at the master ceiling, not wrapped.
         assert!(out.iter().all(|v| (v - MASTER_CEILING).abs() < 1e-6));
+    }
+
+    /// The live plan must sound exactly like the baked mix: same placements,
+    /// same overlap summing, same ceiling — sample for sample. This is the
+    /// contract that lets the engine swap plans instead of re-baking.
+    #[test]
+    fn a_mix_plan_matches_the_baked_mix_sample_for_sample() {
+        use std::sync::Arc;
+        let buf = |frames: usize, v: f32| {
+            Arc::new(lumit_media::AudioBuffer {
+                rate: 48_000,
+                samples: vec![v; frames * 2],
+            })
+        };
+        let (a, b) = (buf(6, 0.6), buf(4, 0.7));
+        // a: frames 0..6 at 0.6; b: frames 4..8 at 0.7 → overlap sums and
+        // clamps to the master ceiling; head/tail come from one clip each.
+        let baked = mix_stereo(
+            &[
+                PlacedAudio {
+                    start_frame: 0,
+                    samples: &a.samples,
+                    gain: 1.0,
+                },
+                PlacedAudio {
+                    start_frame: 4,
+                    samples: &b.samples,
+                    gain: 1.0,
+                },
+            ],
+            10,
+        );
+        let plan = MixPlan {
+            clips: vec![
+                PlacedClip {
+                    buffer: a,
+                    start_frame: 0,
+                    src_start: 0,
+                    len: 6,
+                    gain: 1.0,
+                },
+                PlacedClip {
+                    buffer: b,
+                    start_frame: 4,
+                    src_start: 0,
+                    len: 4,
+                    gain: 1.0,
+                },
+            ],
+            total_frames: 10,
+        };
+        for i in 0..10 {
+            let (l, r) = plan.frame_at(i);
+            assert!(
+                (l - baked[i * 2]).abs() < 1e-6 && (r - baked[i * 2 + 1]).abs() < 1e-6,
+                "frame {i}: plan ({l},{r}) vs baked ({},{})",
+                baked[i * 2],
+                baked[i * 2 + 1]
+            );
+        }
+        // Trimmed clips read the right slice: src_start offsets into the source.
+        let c = Arc::new(lumit_media::AudioBuffer {
+            rate: 48_000,
+            samples: (0..8)
+                .flat_map(|n| [n as f32 * 0.1, n as f32 * 0.1])
+                .collect(),
+        });
+        let trimmed = MixPlan {
+            clips: vec![PlacedClip {
+                buffer: c,
+                start_frame: 0,
+                src_start: 3,
+                len: 2,
+                gain: 1.0,
+            }],
+            total_frames: 4,
+        };
+        assert!((trimmed.frame_at(0).0 - 0.3).abs() < 1e-6);
+        assert!((trimmed.frame_at(1).0 - 0.4).abs() < 1e-6);
+        assert_eq!(trimmed.frame_at(2), (0.0, 0.0), "past the trim: silence");
+        // And the waveform straight off the plan matches the buckets' extremes.
+        let peaks = trimmed.waveform_peaks(2);
+        assert_eq!(peaks.len(), 2);
+        assert!((peaks[0].1 - 0.4).abs() < 1e-6);
     }
 
     #[test]

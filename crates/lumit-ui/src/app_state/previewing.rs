@@ -863,18 +863,16 @@ impl AppState {
         if self.audio_preparing == Some((comp_id, sig)) {
             return; // this exact mix is already on its way
         }
-        // Fast path: mix from the byte-budgeted decoded-audio cache, so an
-        // audio edit (solo, mute, trim) re-sums in seconds instead of
-        // re-decoding whole files. Missing items kick off their one shared
-        // decode and the mix waits (sync_comp_audio retries every frame);
-        // items that can't be cached (decode failed, or bigger than the whole
-        // budget) drop to the legacy decode-per-bake path.
-        let mut decoded: Vec<(
-            std::sync::Arc<lumit_media::AudioBuffer>,
-            crate::export::AudioJob,
-        )> = Vec::with_capacity(jobs.len());
+        // Live-mix path: build a MixPlan over the byte-budgeted decoded-audio
+        // cache and hand it to the engine *now* — a solo/mute/move/trim edit
+        // is heard on the next audio callback, no re-bake. Missing items kick
+        // off their one shared decode and the plan waits (sync_comp_audio
+        // retries every frame); items the cache cannot hold (decode failed,
+        // or larger than the whole budget) drop to the legacy bake thread.
+        let mut clips: Vec<lumit_audio::mix::PlacedClip> = Vec::with_capacity(jobs.len());
         let mut fallback = false;
         let mut waiting = false;
+        let total_frames = (duration_s * f64::from(rate)).round().max(0.0) as usize;
         for job in &jobs {
             if self.audio_decode_failed.contains(&job.item) {
                 fallback = true;
@@ -888,7 +886,23 @@ impl AppState {
                 .filter(|c| c.0.rate == rate)
                 .map(|c| std::sync::Arc::clone(&c.0));
             match hit {
-                Some(buffer) => decoded.push((buffer, job.clone())),
+                Some(buffer) => {
+                    if let Some((start_frame, src_start, len)) = lumit_audio::mix::place_on_timeline(
+                        job.in_s,
+                        job.out_s,
+                        job.offset_s,
+                        buffer.samples.len() / 2,
+                        rate,
+                    ) {
+                        clips.push(lumit_audio::mix::PlacedClip {
+                            buffer,
+                            start_frame,
+                            src_start,
+                            len,
+                            gain: 1.0,
+                        });
+                    }
+                }
                 None => {
                     waiting = true;
                     self.request_footage_audio(job.item, job.path.clone());
@@ -900,66 +914,33 @@ impl AppState {
             self.audio_preparing = Some((comp_id, sig));
             std::thread::spawn(move || {
                 let samples = crate::export::mixdown(&jobs, rate, duration_s);
-                let _ = tx.send((comp_id, sig, lumit_media::AudioBuffer { rate, samples }));
+                let _ = tx.send(super::CompAudioMsg::Baked(
+                    comp_id,
+                    sig,
+                    lumit_media::AudioBuffer { rate, samples },
+                ));
             });
             return;
         }
         if waiting {
             return; // decodes in flight; retried next frame with the cache warmer
         }
-        self.audio_preparing = Some((comp_id, sig));
-        std::thread::spawn(move || {
-            let samples = crate::export::mixdown_prepared(&decoded, rate, duration_s);
-            let _ = tx.send((comp_id, sig, lumit_media::AudioBuffer { rate, samples }));
+        // Apply the plan immediately, preserving the clock and play state when
+        // this comp's audio is already running (the instant-edit contract).
+        let plan = std::sync::Arc::new(lumit_audio::mix::MixPlan {
+            clips,
+            total_frames,
         });
-    }
-
-    /// Drain any finished comp-audio mix; load it into the engine and, if the
-    /// comp is playing, start its clock at the current playhead. A delivery that
-    /// no longer matches the current comp (a newer edit changed it, or it fell
-    /// silent) is dropped — [`Self::sync_comp_audio`] handles the current state.
-    #[cfg(feature = "media")]
-    pub fn poll_comp_audio(&mut self) {
-        let mut newest = None;
-        while let Ok(msg) = self.comp_audio_rx.try_recv() {
-            newest = Some(msg);
-        }
-        let Some((comp_id, sig, buffer)) = newest else {
-            return;
-        };
-        if self.audio_preparing == Some((comp_id, sig)) {
-            self.audio_preparing = None;
-        }
-        if self.preview_comp != Some(comp_id) {
-            return; // the user moved on before the mix finished
-        }
-        let doc = self.store.snapshot();
-        let Some(comp) = doc.comp(comp_id) else {
-            return;
-        };
-        let fps = comp.frame_rate.fps().max(1.0);
-        // Only present a mix that still matches the document: an edit made while
-        // it decoded (mute, move, trim, delete) supersedes it, and `sync` will
-        // have queued the right one. Dropping it here avoids a stale blip.
-        let current = self.comp_audio_jobs(&doc, comp);
-        if current.is_empty()
-            || super::audio_jobs_signature(&current, comp.duration.0.to_f64()) != sig
-        {
-            return;
-        }
-        if self.ensure_audio_engine().is_none() {
-            return;
-        }
+        let start_s = self.preview_frame as f64 / comp.frame_rate.fps().max(1.0);
         let playing = self.comp_playback.is_some();
-        let start_s = self.preview_frame as f64 / fps;
-        // Waveform peaks for the timeline (computed before the buffer moves
-        // into the engine); ~2 buckets per horizontal pixel is plenty.
-        self.comp_waveform = Some((
-            comp_id,
-            lumit_audio::mix::waveform_peaks(&buffer.samples, 2048),
-        ));
-        if let Some(engine) = &self.audio_engine {
-            engine.load(std::sync::Arc::new(buffer));
+        let already = self.audio_loaded_comp == Some(comp_id);
+        let Some(engine) = self.ensure_audio_engine() else {
+            return;
+        };
+        if already {
+            engine.swap_plan(std::sync::Arc::clone(&plan));
+        } else {
+            engine.load_plan(std::sync::Arc::clone(&plan));
             engine.seek_seconds(start_s);
             if playing {
                 engine.play();
@@ -967,7 +948,77 @@ impl AppState {
         }
         self.audio_loaded_comp = Some(comp_id);
         self.audio_loaded_sig = Some(sig);
-        self.audio_loaded = None; // the footage buffer is no longer loaded
+        self.audio_loaded = None;
+        // The waveform strip is cosmetic and O(comp length): computed off the
+        // plan on a background thread (never materialising a whole-comp
+        // buffer — that buffer was the memory blowup) and delivered as peaks.
+        self.audio_preparing = Some((comp_id, sig));
+        std::thread::spawn(move || {
+            let peaks = plan.waveform_peaks(2048);
+            let _ = tx.send(super::CompAudioMsg::Peaks(comp_id, sig, peaks));
+        });
+    }
+
+    /// Drain background comp-audio deliveries. Waveform peaks (the live-mix
+    /// path — the plan itself was applied instantly by
+    /// [`Self::prepare_comp_audio`]) just update the strip; a legacy baked
+    /// mix loads into the engine. Deliveries that no longer match the
+    /// document are dropped — [`Self::sync_comp_audio`] keeps state current.
+    #[cfg(feature = "media")]
+    pub fn poll_comp_audio(&mut self) {
+        while let Ok(msg) = self.comp_audio_rx.try_recv() {
+            match msg {
+                super::CompAudioMsg::Peaks(comp_id, sig, peaks) => {
+                    if self.audio_preparing == Some((comp_id, sig)) {
+                        self.audio_preparing = None;
+                    }
+                    // Show the strip only while it still describes the loaded
+                    // mix (an edit mid-compute supersedes it; sync re-spawns).
+                    if self.preview_comp == Some(comp_id) && self.audio_loaded_sig == Some(sig) {
+                        self.comp_waveform = Some((comp_id, peaks));
+                    }
+                }
+                super::CompAudioMsg::Baked(comp_id, sig, buffer) => {
+                    if self.audio_preparing == Some((comp_id, sig)) {
+                        self.audio_preparing = None;
+                    }
+                    if self.preview_comp != Some(comp_id) {
+                        continue; // the user moved on before the bake finished
+                    }
+                    let doc = self.store.snapshot();
+                    let Some(comp) = doc.comp(comp_id) else {
+                        continue;
+                    };
+                    let fps = comp.frame_rate.fps().max(1.0);
+                    // Only present a bake that still matches the document.
+                    let current = self.comp_audio_jobs(&doc, comp);
+                    if current.is_empty()
+                        || super::audio_jobs_signature(&current, comp.duration.0.to_f64()) != sig
+                    {
+                        continue;
+                    }
+                    if self.ensure_audio_engine().is_none() {
+                        continue;
+                    }
+                    let playing = self.comp_playback.is_some();
+                    let start_s = self.preview_frame as f64 / fps;
+                    self.comp_waveform = Some((
+                        comp_id,
+                        lumit_audio::mix::waveform_peaks(&buffer.samples, 2048),
+                    ));
+                    if let Some(engine) = &self.audio_engine {
+                        engine.load(std::sync::Arc::new(buffer));
+                        engine.seek_seconds(start_s);
+                        if playing {
+                            engine.play();
+                        }
+                    }
+                    self.audio_loaded_comp = Some(comp_id);
+                    self.audio_loaded_sig = Some(sig);
+                    self.audio_loaded = None;
+                }
+            }
+        }
     }
 
     /// Keep the loaded comp mix in step with the document. Runs each UI frame:

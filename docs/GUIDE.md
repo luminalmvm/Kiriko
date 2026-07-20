@@ -1136,6 +1136,20 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   had no effect on what you heard (the GEN-4 audio fixes). The fingerprint is a plain,
   tested function, so "a muted layer is silent" and "a moved layer's sound moves with it"
   are checked without needing a sound card.
+- **The live mix plan (`lumit-audio::mix::MixPlan`)** — how audio edits became instant, and
+  how a feature film stopped eating all the memory. Originally, playing a comp *baked* one
+  giant pre-mixed track the length of the whole comp — for a two-hour film that single
+  track is gigabytes, and every solo/mute/move re-decoded and re-baked the lot (minutes of
+  waiting, and the out-of-memory the owner hit). Now each footage file is decoded **once**
+  into a shared, byte-budgeted store (it stays within the one Memory budget in Settings →
+  Performance, half your machine's RAM by default), and the comp's audio is just a *plan*:
+  "this file's samples play here, that file's there". The sound card's callback adds up the
+  few numbers it needs for each moment as it goes — a handful of multiplications, nothing a
+  sound card notices. Soloing, muting, moving or trimming a layer swaps in a new plan and is
+  heard on the very next callback, about ten milliseconds later, with the clock untouched.
+  A test proves the plan sounds *sample-for-sample identical* to the old baked mix, another
+  proves a mid-play swap keeps the clock running, and the timeline waveform is now computed
+  straight off the plan without ever materialising the giant track.
 - **Beat detection** (`lumit-audio::beat`) — the groundwork for cutting to the music. It
   slides a short window along the track and, at each step, measures how much *new* energy
   appeared since the last step (the "spectral flux"); a kick or snare makes that number
