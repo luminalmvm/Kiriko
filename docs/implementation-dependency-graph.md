@@ -286,7 +286,7 @@ flowchart TD
   end
 
   subgraph SDIST["Distribution"]
-    FLATPAK["✅ Linux Flatpak bundle — CI-green (TF-3): every run publishes<br/>an installable lumit-x86_64.flatpak (~15 MB) carrying its own<br/>FFmpeg 7.1, so it runs on any distribution"]
+    FLATPAK["✅ Linux Flatpak bundle — CI-green (TF-3): every run publishes<br/>an installable lumit-x86_64.flatpak (~15 MB) carrying its own<br/>FFmpeg 7.1, so it runs on any distribution.<br/>Ran + fixed: window opens resizable at working size (TF-5),<br/>Wayland ignoring the grow-from-splash viewport commands"]
     LINUXCI["✅ Linux CI green — clippy, tests, GPU oracles on lavapipe<br/>(64 of them, first time they run in CI at all),<br/>release compile check (TF-3)"]
     MACAPP["macOS .app bundle + signing/notarisation"]
     WINPKG["Windows installer (MSI/MSIX) + code signing"]

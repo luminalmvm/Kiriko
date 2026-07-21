@@ -2112,6 +2112,14 @@ The sandbox is granted the GPU (the whole compositor is GPU work), audio out, an
 your files — a video editor has to read footage from wherever you keep it, external drives
 included.
 
+One Linux-only difference worth knowing, because it looks like a bug otherwise: on Windows
+and macOS Lumit *starts as* the little splash card — that small frameless window you see
+during boot is the real window, and it grows into the editor when loading finishes. On Linux
+it can't. Under Wayland an application isn't allowed to resize its own window (the desktop
+decides), so the "now grow to full size" instruction was simply ignored and the editor stayed
+trapped at splash size, unable to be dragged bigger. So on Linux the window opens at working
+size straight away and the splash card is drawn in the middle of it.
+
 ### What the robots check
 
 Every push, CI rebuilds and retests everything on **macOS, Windows and Linux**, media

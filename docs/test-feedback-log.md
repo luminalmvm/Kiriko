@@ -368,6 +368,16 @@ Four notes relayed by the owner; the tester started on main, then switched to th
   workspace suite, the GPU oracles under lavapipe, a release compile check) and the Flatpak
   bundle, which publishes `lumit-x86_64.flatpak` (~15 MB) per run. Both were the tester's own
   suggestion, verbatim.
+- [x] TF-5 **Flatpak window could not be resized — the editor was stuck tiny** (first run of
+  the bundle, on Wayland). The window was created as the splash card itself: 460×300,
+  frameless, `resizable(false)`, becoming the application window through runtime viewport
+  commands once boot finished. Wayland ignores those — a client cannot resize itself there,
+  and toggling resizability after creation is unreliable — so the app was left in a frame
+  nothing could stretch. On Linux the window now opens decorated, resizable and at working
+  size (1440×900, min 720×480), and the splash draws its card centred inside it; Windows and
+  macOS keep the grow-from-splash behaviour. The Linux `app_id` also becomes
+  `io.github.luminalmvm.Lumit` so a compositor can pair the window with its desktop file
+  (icon and name in the dock). Regression test on the viewport builder.
   Two things Linux CI caught on its first runs, both now fixed: the upstream LLVM 18 tarball
   links `libtinfo.so.5` (an ncurses ABI Ubuntu 24.04 dropped) so bindgen could not load it —
   the distro's own clang 18 is used instead; and the accumulation still-scene bit-identity

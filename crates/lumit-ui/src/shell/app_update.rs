@@ -108,10 +108,20 @@ impl Shell {
     pub fn ui(&mut self, ctx: &egui::Context) {
         if let Some(splash) = &self.splash {
             if crate::splash::show(ctx, &self.theme, splash) {
-                // Boot finished: the splash window becomes the application window.
-                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1440.0, 900.0)));
+                // Boot finished: the splash window becomes the application
+                // window — on the platforms where it *was* a splash-sized
+                // window. Linux already opened at working size, decorated and
+                // resizable, because Wayland ignores these commands (a client
+                // cannot resize itself there); re-sending them would at best
+                // do nothing and at worst shrink a window the user has since
+                // arranged. See `lumit-app`'s `splash_viewport`.
+                if !cfg!(target_os = "linux") {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                        1440.0, 900.0,
+                    )));
+                }
                 self.splash = None;
             }
             return;

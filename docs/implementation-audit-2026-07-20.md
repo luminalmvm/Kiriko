@@ -73,7 +73,12 @@ locally (fmt, clippy `-D warnings`, 638 + 64 GPU tests). Tracked as TF-1..4 / OD
   tree needs; the upstream LLVM tarball's libclang wants an ncurses ABI modern distributions
   dropped; that runtime has no llvm18 extension, so libclang is pinned at llvm20; and bindgen
   needs clang's *own* builtin headers pointed at explicitly (`BINDGEN_EXTRA_CLANG_ARGS`),
-  since the resource directory does not travel with `LIBCLANG_PATH`. **A finding it produced immediately:** the
+  since the resource directory does not travel with `LIBCLANG_PATH`. **And one the build
+  could not catch (TF-5):** the first person to *run* the bundle found the editor stuck in a
+  460×300 frame. Boot opens the splash card as the window itself and grows it afterwards
+  through viewport commands, which Wayland ignores — a client cannot resize itself there. On
+  Linux the window now opens decorated, resizable and at working size with the splash card
+  drawn centred inside it, and carries the app id its desktop file uses. **A finding it produced immediately:** the
   accumulation motion-blur *still-scene bit-identity* (docs/08 §3.26, impl/temporal-rerender
   §3) holds on GPUs but not on lavapipe, where the sum-and-divide rounds one 8-bit step away
   from the single composite. Not a Lumit bug — two mathematically identical paths, and fp16
