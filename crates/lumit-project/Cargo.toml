@@ -5,6 +5,7 @@ edition = "2021"
 license = "GPL-3.0-only"
 
 [dependencies]
+blake3 = "1"
 directories = "6"
 lumit-core = { path = "../lumit-core" }
 serde = { version = "1", features = ["derive"] }

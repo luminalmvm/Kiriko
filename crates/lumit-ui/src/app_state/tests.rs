@@ -877,6 +877,7 @@ fn app_with_audio_layer() -> (AppState, Uuid, Uuid) {
             media: MediaRef {
                 relative_path: "clip.wav".into(),
                 absolute_path: "/tmp/clip.wav".into(),
+                fingerprint: None,
                 extra: serde_json::Map::new(),
             },
         })),
@@ -1139,6 +1140,7 @@ fn a_long_import_keeps_its_full_media_duration() {
             media: MediaRef {
                 relative_path: "long.mp4".into(),
                 absolute_path: "/tmp/long.mp4".into(),
+                fingerprint: None,
                 extra: serde_json::Map::new(),
             },
         })),

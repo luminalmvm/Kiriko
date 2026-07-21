@@ -201,6 +201,7 @@ mod tests {
             media: MediaRef {
                 relative_path: "footage/capture.mp4".into(),
                 absolute_path: "/tmp/capture.mp4".into(),
+                fingerprint: None,
                 extra: serde_json::Map::new(),
             },
         };

@@ -33,6 +33,7 @@ impl AppState {
                 media: MediaRef {
                     relative_path: name,
                     absolute_path: file.to_string_lossy().into_owned(),
+                    fingerprint: None,
                     extra: serde_json::Map::new(),
                 },
             };

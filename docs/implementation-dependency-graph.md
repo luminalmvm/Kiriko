@@ -185,7 +185,7 @@ flowchart TD
   RATEEYE --> DRIFTB
 
   subgraph SFILE["File format and relink"]
-    FPRINT["MediaRef content fingerprint (10 §2, 03 §3)"]
+    FPRINT["✅ MediaRef content fingerprint (10 §2, 03 §3) — Fingerprint type<br/>(size + mtime + blake3 head/tail hash) on MediaRef, optional + skipped<br/>when unset so old projects round-trip byte-identical; lumit-project::<br/>fingerprint_path computes it (≤2×64 KiB read, cheap on huge footage);<br/>likely_same_content matches a moved/copied file by content. Tested.<br/>Unblocks the relink resolver (step 3)"]
     RELINK["Relink resolver: 4-step + sibling auto-relink (10 §2)"]
     RELINKUI["Missing-footage badge + relink flow (07 §3.3)"]
     COLLECT["Collect-for-sharing command (10 §2)"]

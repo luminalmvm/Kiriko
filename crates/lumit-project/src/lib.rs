@@ -1,11 +1,12 @@
 //! The `.lum` project container, autosave, and the crash-recovery journal —
 //! docs/10-FILE-FORMAT.md, Phase 0 scope (no thumbnails yet).
 
+use lumit_core::model::Fingerprint;
 use lumit_core::ops::Op;
 use lumit_core::Document;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
@@ -203,6 +204,51 @@ pub fn presets_dir() -> Option<PathBuf> {
     Some(dirs.data_dir().join("presets"))
 }
 
+/// Bytes hashed from each of the head and tail of a file for its fingerprint.
+/// 64 KiB catches format headers, codec tables and trailing indexes cheaply;
+/// files smaller than two samples are hashed whole (the windows would overlap).
+const FINGERPRINT_SAMPLE: usize = 64 * 1024;
+
+/// Compute a [`Fingerprint`] for the file at `path` (docs/10 §2): its size,
+/// last-modified time, and a blake3 hash of `size ++ head ++ tail`. Reads at
+/// most two [`FINGERPRINT_SAMPLE`] windows regardless of file size, so it stays
+/// cheap for multi-gigabyte footage — the relink resolver (step 3) calls it to
+/// recognise a moved file by content rather than path.
+pub fn fingerprint_path(path: &Path) -> std::io::Result<Fingerprint> {
+    let mut file = File::open(path)?;
+    let meta = file.metadata()?;
+    let size = meta.len();
+    let mtime_secs = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&size.to_le_bytes());
+    let sample = FINGERPRINT_SAMPLE as u64;
+    if size <= sample * 2 {
+        // Small file: hash all of it (head and tail would overlap).
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+        hasher.update(&buf);
+    } else {
+        let mut head = vec![0u8; FINGERPRINT_SAMPLE];
+        file.read_exact(&mut head)?;
+        hasher.update(&head);
+        file.seek(SeekFrom::End(-(FINGERPRINT_SAMPLE as i64)))?;
+        let mut tail = vec![0u8; FINGERPRINT_SAMPLE];
+        file.read_exact(&mut tail)?;
+        hasher.update(&tail);
+    }
+    Ok(Fingerprint {
+        size,
+        mtime_secs,
+        head_tail_hash: hasher.finalize().to_hex().to_string(),
+    })
+}
+
 /// Append-only op log between saves; truncated on successful save.
 pub struct JournalFile {
     path: PathBuf,
@@ -279,6 +325,7 @@ mod tests {
             media: MediaRef {
                 relative_path: format!("footage/{name}"),
                 absolute_path: format!("/tmp/{name}"),
+                fingerprint: None,
                 extra: serde_json::Map::new(),
             },
         }
@@ -292,6 +339,85 @@ mod tests {
         };
         apply(&mut doc, &op).unwrap();
         doc
+    }
+
+    /// docs/10 §2: the fingerprint is stable, matches a byte-identical copy by
+    /// content (mtime aside), and detects a change in either sampled window or a
+    /// size change — the properties relink step 3 depends on.
+    #[test]
+    fn fingerprint_is_stable_and_content_addressed() {
+        let dir = tempfile::tempdir().unwrap();
+        // Larger than two sample windows, to exercise the head+tail path.
+        let data: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+        let a = dir.path().join("a.bin");
+        fs::write(&a, &data).unwrap();
+
+        let f1 = fingerprint_path(&a).unwrap();
+        let f2 = fingerprint_path(&a).unwrap();
+        assert_eq!(f1.head_tail_hash, f2.head_tail_hash, "stable across calls");
+        assert_eq!(f1.size, data.len() as u64);
+
+        // A byte-identical copy at a new path matches by content.
+        let moved = dir.path().join("moved.bin");
+        fs::write(&moved, &data).unwrap();
+        assert!(f1.likely_same_content(&fingerprint_path(&moved).unwrap()));
+
+        // A change in the head window is detected.
+        let mut head_changed = data.clone();
+        head_changed[0] ^= 0xFF;
+        let c = dir.path().join("head.bin");
+        fs::write(&c, &head_changed).unwrap();
+        assert!(!f1.likely_same_content(&fingerprint_path(&c).unwrap()));
+
+        // A change in the tail window is detected.
+        let mut tail_changed = data.clone();
+        *tail_changed.last_mut().unwrap() ^= 0xFF;
+        let d = dir.path().join("tail.bin");
+        fs::write(&d, &tail_changed).unwrap();
+        assert!(!f1.likely_same_content(&fingerprint_path(&d).unwrap()));
+
+        // A different size never matches.
+        let e = dir.path().join("short.bin");
+        fs::write(&e, &data[..data.len() - 1]).unwrap();
+        assert!(!f1.likely_same_content(&fingerprint_path(&e).unwrap()));
+    }
+
+    /// Files smaller than two sample windows are hashed whole and still compare
+    /// by content.
+    #[test]
+    fn fingerprint_handles_small_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("tiny.bin");
+        fs::write(&p, b"hello").unwrap();
+        let f = fingerprint_path(&p).unwrap();
+        assert_eq!(f.size, 5);
+
+        let same = dir.path().join("tiny2.bin");
+        fs::write(&same, b"hello").unwrap();
+        assert!(f.likely_same_content(&fingerprint_path(&same).unwrap()));
+
+        let diff = dir.path().join("tiny3.bin");
+        fs::write(&diff, b"world").unwrap();
+        assert!(!f.likely_same_content(&fingerprint_path(&diff).unwrap()));
+    }
+
+    /// A MediaRef with no fingerprint serialises without the field, so projects
+    /// saved before fingerprints round-trip byte-for-byte (docs/10 §1.1).
+    #[test]
+    fn absent_fingerprint_is_not_serialised() {
+        let m = lumit_core::model::MediaRef {
+            relative_path: "footage/x.mp4".into(),
+            absolute_path: "/tmp/x.mp4".into(),
+            fingerprint: None,
+            extra: serde_json::Map::new(),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            !json.contains("fingerprint"),
+            "unset fingerprint must not appear in the file: {json}"
+        );
+        let back: lumit_core::model::MediaRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
     }
 
     #[test]
