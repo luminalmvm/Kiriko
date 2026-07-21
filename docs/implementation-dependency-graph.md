@@ -112,7 +112,7 @@ flowchart TD
   subgraph SAUDIO["Audio"]
     GAIN["✅ Per-layer gain / volume keyframes (09 §3.1, §6) —<br/>shipped K-172 (desk session): Layer.volume_db, dB with a −∞ knee,<br/>envelope-baked fades identical in playback + export"]
     FADES["Fade-in/out commands (09 §6)"]
-    AUDLAYER["Audio layer kind + detach-audio (09 §6)<br/>(precomp audio + carrier-volume chains shipped OD-5;<br/>audio-only rows already drop the eye)"]
+    AUDLAYER["Audio layer kind + detach-audio (09 §6)<br/>(precomp audio + carrier-volume chains shipped OD-5;<br/>precomp speakers + engine-mix sync scoping OD-8;<br/>audio-only rows already drop the eye)"]
     RINGBUF["Streaming decode + latency compensation (09 §3.1)<br/>(live per-callback mixing now ships via MixPlan;<br/>remaining: decode windows instead of whole files)"]
     SCRUBAUD["Audio scrubbing, windowed grain (09 §3.4)"]
     DEVCHG["Device-change stream rebuild (09 §3.2)"]

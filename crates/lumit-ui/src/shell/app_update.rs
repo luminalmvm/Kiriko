@@ -318,7 +318,15 @@ impl Shell {
                 }
                 ctx.request_repaint_after(std::time::Duration::from_millis(16));
             }
-            self.app.media.poll();
+            if self.app.media.poll()
+                && (self.app.preview_comp.is_some() || self.app.preview_item.is_some())
+            {
+                // A probe just finished: the shown frame was rendered without
+                // that footage (unprobed layers contribute nothing), so
+                // re-render it — a restored project's first frame fills in as
+                // probes land instead of waiting for a playhead move (owner).
+                self.app.refresh_preview();
+            }
             if self.app.media.any_probing() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(150));
             }

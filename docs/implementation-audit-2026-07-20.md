@@ -54,6 +54,12 @@ locally (fmt, clippy `-D warnings`, 638 + 64 GPU tests). Tracked as TF-1..4 / OD
   walk), and precomp carriers get the Audio group's Volume row; **audio-only rows draw no
   eye** (nothing to show or hide); the **per-layer waveform lane rides a live bar drag**
   (reads `move_edit`, the same preview the bar draws from).
+- **Round 3 (owner re-test, OD-8/OD-9):** the GEN-4 sync's scoping hole — `sync_comp_audio`
+  managed only the fronted comp, so an edit inside a fronted precomp stale-played the
+  PARENT's loaded mix; it now also reconciles whichever comp's mix sits in the engine
+  (regression: `precomp_audio_follows_nested_and_carrier_mutes`). Precomp rows with nested
+  audio carry the speaker. And the restored project's first frame re-renders as probes land
+  (`MediaRegistry::poll` reports arrivals) instead of waiting for a playhead move.
 
 ### Second pass (autonomous, CI-verified on PR #3)
 

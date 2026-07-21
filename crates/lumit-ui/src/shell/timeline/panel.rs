@@ -864,10 +864,25 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                     motion_blur_control(ui, theme, comp_id, layer, &mut pending)
                 });
                 let is_precomp = matches!(layer.kind, lumit_core::model::LayerKind::Precomp { .. });
-                if is_footage {
+                // The speaker: footage rows always carry it; a precomp row
+                // carries it when its nested comp holds audio anywhere
+                // (owner) — its mute silences everything inside.
+                #[cfg(feature = "media")]
+                let precomp_audio = match &layer.kind {
+                    lumit_core::model::LayerKind::Precomp { comp: nested } => {
+                        let mut visited = vec![comp_id, *nested];
+                        app.comp_has_audio(&doc, *nested, &mut visited)
+                    }
+                    _ => false,
+                };
+                #[cfg(not(feature = "media"))]
+                let precomp_audio = false;
+                if is_footage || precomp_audio {
                     place(ui, vol_r, &mut |ui| {
                         mute_control(ui, theme, comp_id, layer, &mut pending)
                     });
+                }
+                if is_footage {
                     place(ui, flow_r, &mut |ui| {
                         flow_control(ui, theme, comp_id, layer, &mut pending)
                     });

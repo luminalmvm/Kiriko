@@ -1153,20 +1153,38 @@ impl AppState {
     /// comp that has fallen silent (every audio layer muted or deleted) is
     /// unloaded so it stops sounding. This is what makes muting, moving,
     /// trimming and deleting an audio layer take effect on playback (GEN-4).
+    ///
+    /// Two comps can need managing: the fronted one, and the one whose mix is
+    /// actually sitting in the engine when they differ — editing inside a
+    /// fronted precomp stales the PARENT's loaded mix (its jobs walk the
+    /// nesting), and gating on the fronted tab alone left that mix playing
+    /// stale (owner: a mute inside the precomp changed nothing).
     #[cfg(feature = "media")]
     pub fn sync_comp_audio(&mut self) {
-        let Some(comp_id) = self.preview_comp else {
-            return;
-        };
-        // Only manage audio we are already responsible for: a mix loaded for
-        // this comp, a bake in flight for it, or active playback of it. This
-        // keeps a comp with audio from decoding just because it is on screen.
-        let managing = self.comp_playback.is_some()
-            || self.audio_loaded_comp == Some(comp_id)
-            || self.audio_preparing.map(|(c, _)| c) == Some(comp_id);
-        if !managing {
-            return;
+        if let Some(comp_id) = self.preview_comp {
+            // Only manage audio we are already responsible for: a mix loaded
+            // for this comp, a bake in flight for it, or active playback of
+            // it. This keeps a comp with audio from decoding just because it
+            // is on screen.
+            let managing = self.comp_playback.is_some()
+                || self.audio_loaded_comp == Some(comp_id)
+                || self.audio_preparing.map(|(c, _)| c) == Some(comp_id);
+            if managing {
+                self.sync_one_comp_audio(comp_id);
+            }
         }
+        // The engine's mix is always managed, fronted or not.
+        if let Some(loaded) = self.audio_loaded_comp {
+            if self.preview_comp != Some(loaded) {
+                self.sync_one_comp_audio(loaded);
+            }
+        }
+    }
+
+    /// Reconcile one comp's audio against the document (the body of
+    /// [`Self::sync_comp_audio`], per comp).
+    #[cfg(feature = "media")]
+    fn sync_one_comp_audio(&mut self, comp_id: Uuid) {
         let doc = self.store.snapshot();
         let Some(comp) = doc.comp(comp_id) else {
             return;

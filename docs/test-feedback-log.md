@@ -413,3 +413,21 @@ Four notes relayed by the owner; the tester started on main, then switched to th
 - [x] OD-7 **Waveform lane now rides a live bar drag**: it reads `move_edit`'s raw in-point
   during the drag (the same preview the bar itself draws from), so the transients move with
   the mouse instead of jumping at drop.
+
+## Owner desk-testing, round 3 — 2026-07-21
+
+- [x] OD-8 **Precomp rows had no speaker, and a mute inside the precomp kept playing in the
+  parent.** Two bugs: (a) the speaker was drawn only for footage rows — a precomp whose
+  nested comp holds audio anywhere now carries it (its mute silences everything inside,
+  `comp_has_audio` gate); (b) the real silencer bug was scoping, not the jobs walk (the walk
+  was already correct — regression-proven): `sync_comp_audio` managed only the FRONTED comp,
+  so editing inside a fronted precomp stale-played the parent's loaded mix for ever. The sync
+  now also reconciles whichever comp's mix actually sits in the engine
+  (`sync_one_comp_audio`), so a nested mute is heard immediately, mid-play, from any tab.
+  Regression: `precomp_audio_follows_nested_and_carrier_mutes` (nested mute, carrier mute,
+  and the fronted-precomp/loaded-parent staling).
+- [x] OD-9 **Restored project's Viewer stayed blank until a frame change.** The restore's
+  first render ran before the media probes finished (unprobed layers contribute nothing) and
+  nothing re-rendered when they landed. `MediaRegistry::poll` now reports when results
+  arrive, and the shell re-renders the shown frame — the first frame fills in as probes
+  complete, no playhead nudge needed.
