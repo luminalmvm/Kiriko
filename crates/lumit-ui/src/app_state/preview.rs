@@ -87,6 +87,14 @@ pub struct CompLayerPixels {
 pub struct CompFrame {
     pub comp: Uuid,
     pub frame: usize,
+    /// The request generation this frame was rendered for. The receiver
+    /// compares it with the live generation and drops anything older: a
+    /// result computed before the document (or a media status) moved on
+    /// describes a picture that no longer exists, and banking it under a key
+    /// derived from the *current* state files the wrong pixels under the
+    /// right name — which is exactly how a missing-footage slate could be
+    /// replaced by an empty frame for the rest of the session.
+    pub generation: u64,
     /// Top-of-stack first (document order); the renderer draws bottom-up.
     pub layers: Vec<CompLayerPixels>,
     /// Wall time this frame's layers took to decode on the worker thread — the
@@ -96,6 +104,14 @@ pub struct CompFrame {
     /// otherwise every frame would appear to cost one repaint (~16 ms) and the
     /// resolution would walk down even on comps that play fine at Full.
     pub render_cost: std::time::Duration,
+}
+
+impl PreviewEngine {
+    /// The newest request generation. A [`CompFrame`] carrying anything less
+    /// was superseded before it finished.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
 }
 
 pub enum PreviewResult {
@@ -170,7 +186,10 @@ impl Default for PreviewEngine {
                         decode(&mut decoders, &mut frame_cache, &r).map(PreviewResult::Footage)
                     }
                     Message::Comp {
-                        comp, frame, jobs, ..
+                        comp,
+                        frame,
+                        jobs,
+                        generation,
                     } => decode_comp(
                         &mut decoders,
                         &mut frame_cache,
@@ -178,6 +197,7 @@ impl Default for PreviewEngine {
                         comp,
                         frame,
                         &jobs,
+                        generation,
                     )
                     .map(PreviewResult::Comp),
                     Message::SetCacheBudget(_) => continue, // handled above
@@ -288,6 +308,7 @@ fn decode_comp(
     comp: Uuid,
     frame: usize,
     jobs: &[CompJob],
+    generation: u64,
 ) -> Result<CompFrame, String> {
     let decode_started = std::time::Instant::now();
     let mut layers = Vec::with_capacity(jobs.len());
@@ -406,6 +427,7 @@ fn decode_comp(
     Ok(CompFrame {
         comp,
         frame,
+        generation,
         layers,
         render_cost: decode_started.elapsed(),
     })

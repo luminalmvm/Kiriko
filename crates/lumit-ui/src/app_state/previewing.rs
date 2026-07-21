@@ -438,7 +438,7 @@ impl AppState {
     /// Recursively collect decode jobs for a comp at time `t`
     /// (docs/06-RENDER-PIPELINE.md: Precomp evaluation).
     #[cfg(feature = "media")]
-    fn collect_comp_jobs(
+    pub(crate) fn collect_comp_jobs(
         &self,
         doc: &Document,
         comp: &Composition,
@@ -685,6 +685,26 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Throw away every rendered frame of every comp, because something
+    /// outside the document changed what they look like — today only a media
+    /// probe landing (found, missing, or unreadable).
+    ///
+    /// The frame key describes the *document*, so it cannot tell those apart:
+    /// a frame rendered while a file's state was still unknown, then banked
+    /// once it became known, is filed under a key that promises different
+    /// pixels. That is what left a missing-footage comp showing the slate
+    /// until the playhead moved and then an empty frame for ever after — the
+    /// slate's key is the same on every frame, so one bad entry answered them
+    /// all. Probes land rarely (open, import, relink), and mostly before much
+    /// is cached, so dropping the lot is cheap and leaves nothing to reason
+    /// about.
+    #[cfg(feature = "media")]
+    pub fn invalidate_rendered_frames(&mut self) {
+        self.comp_frame_cache.clear();
+        self.cached_present = None;
+        self.cache_epoch += 1;
     }
 
     /// Re-request the current preview frame (selection/scrub/resolution change).

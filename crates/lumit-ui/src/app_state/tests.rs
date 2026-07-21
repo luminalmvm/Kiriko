@@ -1433,3 +1433,158 @@ fn a_retime_time_drag_registers_as_a_live_edit() {
     );
     assert!(app.is_interacting(), "a Time drag pauses background fills");
 }
+
+/// Repro (owner): the missing-footage slate showed on the first frame and
+/// vanished the moment the playhead moved. The job that carries it must be
+/// emitted at EVERY time in the layer's span, not just the first one.
+#[cfg(feature = "media")]
+#[test]
+fn missing_footage_emits_a_slate_job_at_every_frame() {
+    use lumit_core::model::{FootageItem, MediaRef, ProjectItem};
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+    let comp_id = app.selected_comp.unwrap();
+    let item_id = Uuid::now_v7();
+    app.commit(Op::AddItem {
+        index: app.store.snapshot().items.len(),
+        item: Box::new(ProjectItem::Footage(FootageItem {
+            id: item_id,
+            name: "gone.mp4".into(),
+            extra: serde_json::Map::new(),
+            media: MediaRef {
+                relative_path: "gone.mp4".into(),
+                absolute_path: "/nowhere/gone.mp4".into(),
+                fingerprint: None,
+                extra: serde_json::Map::new(),
+            },
+        })),
+    });
+    // Ready first, so the layer lands with a real span, then lose the file.
+    app.media.map.insert(
+        item_id,
+        media::MediaStatus::Ready {
+            probe: lumit_media::MediaProbe {
+                duration_seconds: 10.0,
+                container: "mp4".into(),
+                video: Some(lumit_media::VideoInfo {
+                    width: 640,
+                    height: 360,
+                    fps_num: 30,
+                    fps_den: 1,
+                    codec: "h264".into(),
+                }),
+                audio: None,
+            },
+            frames: 300,
+            vfr: false,
+        },
+    );
+    app.preview_comp = Some(comp_id);
+    app.add_footage_to_comp(item_id);
+    app.media.map.insert(item_id, media::MediaStatus::Missing);
+
+    let doc = app.store.snapshot();
+    let comp = doc.comp(comp_id).unwrap();
+    let layer_id = comp.layers[0].id;
+    for t in [0.0, 0.5, 1.0, 5.0] {
+        let mut jobs = Vec::new();
+        let mut visited = vec![comp_id];
+        app.collect_comp_jobs(&doc, comp, t, &mut jobs, &mut visited);
+        let slate = jobs.iter().find(|j| j.layer == layer_id);
+        assert!(
+            slate.is_some_and(|j| j.slate),
+            "no slate job at t={t}: the layer would vanish there"
+        );
+    }
+}
+
+/// The frame key for a comp whose footage is missing must exist (so its
+/// frames cache at all) and must not wobble frame to frame — the slate is a
+/// pure function of the comp size, so every frame is the same picture.
+#[cfg(feature = "media")]
+#[test]
+fn missing_footage_frames_are_keyable_and_stable() {
+    use lumit_core::model::{FootageItem, MediaRef, ProjectItem};
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+    let comp_id = app.selected_comp.unwrap();
+    let item_id = Uuid::now_v7();
+    app.commit(Op::AddItem {
+        index: app.store.snapshot().items.len(),
+        item: Box::new(ProjectItem::Footage(FootageItem {
+            id: item_id,
+            name: "gone.mp4".into(),
+            extra: serde_json::Map::new(),
+            media: MediaRef {
+                relative_path: "gone.mp4".into(),
+                absolute_path: "/nowhere/gone.mp4".into(),
+                fingerprint: None,
+                extra: serde_json::Map::new(),
+            },
+        })),
+    });
+    app.media.map.insert(
+        item_id,
+        media::MediaStatus::Ready {
+            probe: lumit_media::MediaProbe {
+                duration_seconds: 10.0,
+                container: "mp4".into(),
+                video: Some(lumit_media::VideoInfo {
+                    width: 640,
+                    height: 360,
+                    fps_num: 30,
+                    fps_den: 1,
+                    codec: "h264".into(),
+                }),
+                audio: None,
+            },
+            frames: 300,
+            vfr: false,
+        },
+    );
+    app.preview_comp = Some(comp_id);
+    app.add_footage_to_comp(item_id);
+    app.media.map.insert(item_id, media::MediaStatus::Missing);
+
+    let k0 = app.frame_key_for(comp_id, 0);
+    let k7 = app.frame_key_for(comp_id, 7);
+    assert!(k0.is_some(), "a missing-footage comp must still be keyable");
+    assert_eq!(k0, k7, "the slate is identical on every frame");
+}
+
+/// Regression (owner): the missing-footage slate showed, then any playhead
+/// move left the comp empty *for ever*. A frame rendered while the file's
+/// state was still unknown got banked once the probe landed — under the
+/// slate's key, which is identical on every frame, so that one bad entry
+/// answered every later frame. A probe landing must therefore throw away
+/// what was rendered before it.
+#[cfg(feature = "media")]
+#[test]
+fn a_landing_probe_discards_frames_rendered_before_it() {
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+    // A frame banked before the probe landed, plus a present queued off it.
+    app.comp_frame_cache.insert(
+        42,
+        crate::app_state::CachedCompFrame {
+            width: 4,
+            height: 4,
+            rgba: vec![0u8; 4 * 4 * 4],
+        },
+    );
+    app.cached_present = Some(42);
+    let epoch = app.cache_epoch;
+
+    app.invalidate_rendered_frames();
+
+    assert!(
+        !app.comp_frame_cache.contains_key(&42),
+        "a frame rendered before the probe must not survive it — it is filed \
+         under a key describing a state its pixels never saw"
+    );
+    assert_eq!(app.cached_present, None, "and must not be presented either");
+    assert!(app.cache_epoch > epoch, "the cache bar re-reads");
+}

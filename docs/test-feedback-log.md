@@ -573,3 +573,16 @@ hotkeys, and their absence makes testing feel clunky).
   now allocates a chip and paints, rather than typesetting a glyph). Test:
   `drawn_icons_paint_without_the_pack_and_have_no_text_form` counts the shapes `paint` adds
   with no fonts installed — verified to fail if the drawing is skipped.
+
+- [x] TF-40 **Missing-footage slate vanished the moment the playhead moved, and stayed gone**
+  (owner). A cache-poisoning race, not a slate bug. While a probe is still in flight the
+  layer contributes nothing (its state is unknown), so the frame renders empty; when the
+  probe lands as *Missing*, that already-computed result arrives and is banked under a key
+  computed from the **new** state. The slate's key is identical on every frame (it is a pure
+  function of the comp size), so that single bad entry answered every later frame — hence
+  "vanishes on any move, and stays gone", while the first view looked right because it was
+  rendered live. Two fixes: `CompFrame` now carries the request generation and the receiver
+  drops anything superseded (a stale render is neither shown nor banked), and a landing
+  probe calls `invalidate_rendered_frames` — a media probe changes what a comp looks like
+  without changing the document, which the frame key alone cannot express. Regression:
+  `a_landing_probe_discards_frames_rendered_before_it`, verified to fail without the fix.

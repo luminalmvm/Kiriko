@@ -69,6 +69,15 @@ locally (fmt, clippy `-D warnings`, 638 + 64 GPU tests). Tracked as TF-1..4 / OD
   layer that rendered black could otherwise reach a delivered file unnoticed. Relinking one
   item takes its siblings in the same folder with it. Closes the graph's RELINKUI node;
   the *Find missing footage* filter and an unreadable-file slate remain.
+- **Round 6 (TF-40): a cache-key honesty bug the audit's own checklist is for.** The frame
+  key describes the *document*, so it cannot distinguish "this file's state was still
+  unknown when we drew this" from "we drew it knowing the file is missing". A frame rendered
+  during the first and banked during the second is filed under a key promising different
+  pixels — and because a slate frame's key is time-invariant, one such entry poisoned every
+  frame of the comp. Fixed by tagging `CompFrame` with its request generation (stale results
+  are neither presented nor banked) and by dropping rendered frames when a probe lands.
+  Worth remembering when adding any future state that changes the picture without changing
+  the document.
 - **Round 3 (owner re-test, OD-8/OD-9):** the GEN-4 sync's scoping hole — `sync_comp_audio`
   managed only the fronted comp, so an edit inside a fronted precomp stale-played the
   PARENT's loaded mix; it now also reconciles whichever comp's mix sits in the engine

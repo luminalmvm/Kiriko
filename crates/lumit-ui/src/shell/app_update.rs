@@ -328,14 +328,18 @@ impl Shell {
                 }
                 ctx.request_repaint_after(std::time::Duration::from_millis(16));
             }
-            if self.app.media.poll()
-                && (self.app.preview_comp.is_some() || self.app.preview_item.is_some())
-            {
-                // A probe just finished: the shown frame was rendered without
-                // that footage (unprobed layers contribute nothing), so
-                // re-render it — a restored project's first frame fills in as
-                // probes land instead of waiting for a playhead move (owner).
-                self.app.refresh_preview();
+            if self.app.media.poll() {
+                // A probe just finished, so every frame rendered before it is
+                // stale — including any already banked, whose key was computed
+                // from a state the pixels never saw.
+                self.app.invalidate_rendered_frames();
+                if self.app.preview_comp.is_some() || self.app.preview_item.is_some() {
+                    // The shown frame was rendered without that footage
+                    // (unprobed layers contribute nothing), so re-render it —
+                    // a restored project's first frame fills in as probes land
+                    // instead of waiting for a playhead move (owner).
+                    self.app.refresh_preview();
+                }
             }
             if self.app.media.any_probing() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(150));
@@ -401,7 +405,14 @@ impl Shell {
             }
             use crate::app_state::preview::PreviewResult;
             match newest {
-                Some(Ok(PreviewResult::Comp(cf))) if Some(cf.comp) == self.app.preview_comp => {
+                // A result older than the newest request describes a picture
+                // that has since changed — showing it flickers, and banking it
+                // files the wrong pixels under the right key (see
+                // `invalidate_rendered_frames`). Drop it.
+                Some(Ok(PreviewResult::Comp(cf)))
+                    if Some(cf.comp) == self.app.preview_comp
+                        && cf.generation == self.app.preview_engine.generation() =>
+                {
                     // Only the frame under the playhead is presented; any other
                     // frame (a background fill, or a stale render that arrived
                     // after an edit moved on) is banked, never shown — otherwise
