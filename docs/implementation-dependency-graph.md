@@ -189,7 +189,7 @@ flowchart TD
     RELINK["✅ Relink resolver: 4-step + sibling auto-relink (10 §2) —<br/>lumit-project::resolve_media tries relative → absolute →<br/>fingerprint search (size-filtered walk of search roots + project<br/>tree) → Missing; path_mapping/apply_mapping relink siblings that<br/>moved the same way. Pure/tested (5 tests). Remaining: the relink<br/>dialogue UI (RELINKUI) + calling this from open()"]
     RELINKUI["Missing-footage badge + relink flow (07 §3.3)"]
     COLLECT["✅ Collect-for-sharing (10 §2, K-065) — lumit-project::<br/>collect_for_sharing copies every located reference into<br/>dest/media/ (colliding names disambiguated), rewrites refs<br/>project-relative with nothing machine-specific, reports<br/>unlocatable media instead of failing. Tested (3). Remaining:<br/>the menu command + save-into-dest wiring (lumit-ui)"]
-    MIGRATE["Format migration framework (10 §1, 03 §12)"]
+    MIGRATE["✅ Format migration framework (10 §1, 03 §12) — an ordered<br/>Migration chain transforms raw project.json (as serde Value, before<br/>typing) version→version; open() walks an older file up to the current<br/>schema, current files take the direct path unchanged. Bounded (never<br/>loops on a malformed chain). Chain empty today (0.1.0 is first);<br/>each schema bump appends one step. Tested (3, synthetic chain)"]
     RISKYOPS["Autosave before risky ops (10 §4)"]
     TEMPLATEO["New-from-template open mode (10 §5)"]
     FPRINT --> RELINK

@@ -64,6 +64,52 @@ fn semver_triple(s: &str) -> Option<(u64, u64, u64)> {
     }
 }
 
+/// One schema migration (docs/10-FILE-FORMAT.md §1): an in-place transform of
+/// the raw `project.json` value that upgrades a document from one schema version
+/// to the next. Migrations operate on `serde_json::Value` — before the typed
+/// `Document` exists — precisely so a shape that no longer deserialises can be
+/// reshaped first.
+struct Migration {
+    /// The schema version this migration reads.
+    from: &'static str,
+    /// The schema version it produces.
+    to: &'static str,
+    /// The in-place transform.
+    apply: fn(&mut serde_json::Value),
+}
+
+/// The ordered migration chain. Empty today: `0.1.0` is the first schema, so no
+/// older document exists to upgrade. Each future schema bump appends one
+/// `Migration` here (from the previous version to the new one); [`run_migrations`]
+/// then walks a file up the chain to the current schema on open.
+static MIGRATIONS: &[Migration] = &[];
+
+/// Walk `value` (raw `project.json` at schema `version`) up `chain` to the
+/// current schema, applying each migration whose `from` matches the running
+/// version. Bounded by `chain.len()` steps and stops if a migration fails to
+/// advance the version, so a malformed chain can never loop. Pure — the real
+/// chain is [`MIGRATIONS`]; tests pass a synthetic one.
+fn run_migrations(
+    chain: &[Migration],
+    mut value: serde_json::Value,
+    mut version: (u64, u64, u64),
+) -> serde_json::Value {
+    for _ in 0..chain.len() {
+        let Some(m) = chain
+            .iter()
+            .find(|m| semver_triple(m.from) == Some(version))
+        else {
+            break;
+        };
+        (m.apply)(&mut value);
+        match semver_triple(m.to) {
+            Some(next) if next != version => version = next,
+            _ => break, // no forward progress — stop rather than spin
+        }
+    }
+    value
+}
+
 /// Atomic save: temp file in the destination directory, fsync, rename over
 /// the target (docs/10-FILE-FORMAT.md §4).
 pub fn save(doc: &Document, path: &Path) -> Result<(), ProjectError> {
@@ -130,7 +176,16 @@ pub fn open(path: &Path) -> Result<(Document, Manifest), ProjectError> {
             .map_err(|_| ProjectError::NotALumitProject)?;
         let mut s = String::new();
         entry.read_to_string(&mut s)?;
-        serde_json::from_str(&s)?
+        // A file at an older schema is migrated up before it is typed (docs/10
+        // §1). A current-schema file takes the direct path unchanged, so nothing
+        // routes through `Value` needlessly.
+        match semver_triple(&manifest.schema_version) {
+            Some(v) if manifest.schema_version != SCHEMA_VERSION && !MIGRATIONS.is_empty() => {
+                let value = run_migrations(MIGRATIONS, serde_json::from_str(&s)?, v);
+                serde_json::from_value(value)?
+            }
+            _ => serde_json::from_str(&s)?,
+        }
     };
     Ok((doc, manifest))
 }
@@ -823,6 +878,76 @@ mod tests {
             media_of(&collected.doc.items[0]).relative_path,
             "footage/ghost.mp4",
             "an unlocatable reference is left unchanged"
+        );
+    }
+
+    fn add_a(v: &mut serde_json::Value) {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("a".into(), serde_json::json!(1));
+        }
+    }
+    fn add_b(v: &mut serde_json::Value) {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("b".into(), serde_json::json!(2));
+        }
+    }
+    fn bump_n(v: &mut serde_json::Value) {
+        if let Some(o) = v.as_object_mut() {
+            let n = o.get("n").and_then(serde_json::Value::as_i64).unwrap_or(0);
+            o.insert("n".into(), serde_json::json!(n + 1));
+        }
+    }
+
+    /// An empty chain (today's real [`MIGRATIONS`]) is a no-op.
+    #[test]
+    fn no_migrations_leaves_json_unchanged() {
+        let v = serde_json::json!({ "x": 5 });
+        assert_eq!(run_migrations(&[], v.clone(), (0, 1, 0)), v);
+        assert_eq!(run_migrations(MIGRATIONS, v.clone(), (0, 1, 0)), v);
+    }
+
+    /// docs/10 §1: a file is walked up the chain from its own version — earlier
+    /// migrations are skipped, and every step from the file version onward runs
+    /// in order.
+    #[test]
+    fn migrations_apply_in_order_from_the_file_version() {
+        let chain = [
+            Migration {
+                from: "0.1.0",
+                to: "0.2.0",
+                apply: add_a,
+            },
+            Migration {
+                from: "0.2.0",
+                to: "0.3.0",
+                apply: add_b,
+            },
+        ];
+        // From the oldest version: both steps run.
+        assert_eq!(
+            run_migrations(&chain, serde_json::json!({}), (0, 1, 0)),
+            serde_json::json!({ "a": 1, "b": 2 })
+        );
+        // From the middle version: only the later step runs.
+        assert_eq!(
+            run_migrations(&chain, serde_json::json!({}), (0, 2, 0)),
+            serde_json::json!({ "b": 2 })
+        );
+    }
+
+    /// A malformed chain whose migration does not advance the version applies
+    /// once and stops, rather than looping forever.
+    #[test]
+    fn a_non_advancing_migration_does_not_loop() {
+        let chain = [Migration {
+            from: "0.1.0",
+            to: "0.1.0",
+            apply: bump_n,
+        }];
+        assert_eq!(
+            run_migrations(&chain, serde_json::json!({}), (0, 1, 0)),
+            serde_json::json!({ "n": 1 }),
+            "applied exactly once, then stopped"
         );
     }
 
