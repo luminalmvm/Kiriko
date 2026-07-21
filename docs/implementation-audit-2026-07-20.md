@@ -65,7 +65,13 @@ locally (fmt, clippy `-D warnings`, 638 + 64 GPU tests). Tracked as TF-1..4 / OD
   workspace tests, the GPU oracles under Mesa's lavapipe, and a release compile check — plus
   **Flatpak packaging** (`packaging/flatpak/`) that bundles its own FFmpeg 7.1 and publishes
   an installable `lumit.flatpak` artifact per run. K-082 said Linux is supported; it is now
-  continuously proven rather than asserted.
+  continuously proven rather than asserted. **A finding it produced immediately:** the
+  accumulation motion-blur *still-scene bit-identity* (docs/08 §3.26, impl/temporal-rerender
+  §3) holds on GPUs but not on lavapipe, where the sum-and-divide rounds one 8-bit step away
+  from the single composite. Not a Lumit bug — two mathematically identical paths, and fp16
+  intermediate rounding is implementation-defined — so `GpuContext::software` now records
+  whether the adapter is a CPU rasteriser and the test asserts exactly on hardware, within
+  one step on software. The impl note carries the qualification.
 
 ### Second pass (autonomous, CI-verified on PR #3)
 

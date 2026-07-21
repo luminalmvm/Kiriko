@@ -365,6 +365,12 @@ Four notes relayed by the owner; the tester started on main, then switched to th
   a CI job generates the offline cargo sources from Cargo.lock (a Flatpak build has no
   network) and publishes `lumit.flatpak` as a run artifact, which is what a Linux tester
   installs on any distribution. Both were the tester's own suggestion, verbatim.
+  Two things Linux CI caught on its first runs, both now fixed: the upstream LLVM 18 tarball
+  links `libtinfo.so.5` (an ncurses ABI Ubuntu 24.04 dropped) so bindgen could not load it —
+  the distro's own clang 18 is used instead; and the accumulation still-scene bit-identity
+  test fails under lavapipe, where fp16 intermediates round differently — it now asserts
+  exactly on hardware adapters and within one 8-bit step on software ones
+  (`GpuContext::software`).
 - [ ] TF-4 **Decode speed hunch (GOP walk)** — half true, half already done. The decoder
   already keeps per-item persistent decoders with a sequential fast path (`next_sequential`:
   playing frame N+1 after N decodes exactly one frame — no re-walk from the keyframe), so
