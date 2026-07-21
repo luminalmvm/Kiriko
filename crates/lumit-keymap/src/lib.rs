@@ -41,10 +41,14 @@ impl fmt::Display for ActionId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeyContext {
     Global,
+    /// Tool selection (the toolbar): V/H/Z/… (docs/07 §15 "Tools").
+    Tools,
     Project,
     Timeline,
     Viewer,
     Graph,
+    /// Panel focus/search shortcuts (docs/07 §15 "Panels").
+    Panels,
     Effects,
 }
 
@@ -297,32 +301,106 @@ fn row(context: KeyContext, chord: &str, action: &str) -> Option<Binding> {
     })
 }
 
-/// Lumit's default keymap — a representative subset of docs/07 §15 today; the
-/// full table fills in as the actions land. Chosen to exercise every rule
-/// (Global transport, context-scoped edits, the J/K/L shuttle deviation).
+/// Lumit's default keymap — the docs/07 §15 table. Global transport and
+/// navigation, tool selection, timeline reveals/edits, graph, viewer and panel
+/// shortcuts. `Ctrl` here is the platform-neutral primary (`Mod`); the UI maps
+/// it to Cmd on macOS. Ships conflict-free (proven in tests).
 #[must_use]
 pub fn default_keymap() -> Keymap {
-    use KeyContext::{Global, Timeline};
+    use KeyContext::{Global, Graph, Panels, Timeline, Tools, Viewer};
     let rows = [
+        // --- Global: transport, navigation, app-wide commands ---
         row(Global, "Space", "playback.toggle"),
         row(Global, "J", "playback.shuttle.reverse"),
         row(Global, "K", "playback.shuttle.pause"),
         row(Global, "L", "playback.shuttle.forward"),
         row(Global, "PageDown", "playback.frame.next"),
         row(Global, "PageUp", "playback.frame.prev"),
+        row(Global, "Shift+PageDown", "playback.frame.next10"),
+        row(Global, "Shift+PageUp", "playback.frame.prev10"),
+        row(Global, "Home", "playback.comp.start"),
+        row(Global, "End", "playback.comp.end"),
+        row(Global, "Shift+Home", "playback.workarea.start"),
+        row(Global, "Shift+End", "playback.workarea.end"),
+        row(Global, "I", "playback.layer.in"),
+        row(Global, "O", "playback.layer.out"),
+        row(Global, ",", "keyframe.prev"),
+        row(Global, ".", "keyframe.next"),
+        row(Global, "Mod+,", "edit.point.prev"),
+        row(Global, "Mod+.", "edit.point.next"),
+        row(Global, "B", "workarea.set.start"),
+        row(Global, "N", "workarea.set.end"),
+        row(Global, "*", "marker.add"),
+        row(Global, "Mod+Shift+P", "palette.open"),
+        row(Global, "Mod+M", "export.queue.add"),
+        row(Global, "Mod+K", "comp.settings"),
         row(Global, "Mod+Z", "edit.undo"),
         row(Global, "Mod+Shift+Z", "edit.redo"),
         row(Global, "Mod+S", "file.save"),
-        row(Global, "Mod+D", "layer.duplicate"),
+        row(Global, "`", "panel.maximise"),
         row(Global, "Shift+F3", "graph.toggle"),
-        // Keyframe navigation moved off J/K/L (the shuttle deviation, §15).
-        row(Timeline, ",", "keyframe.prev"),
-        row(Timeline, ".", "keyframe.next"),
-        row(Timeline, "Mod+Shift+D", "clip.cut"),
+        // --- Tools ---
+        row(Tools, "V", "tool.select"),
+        row(Tools, "H", "tool.hand"),
+        row(Tools, "Z", "tool.zoom"),
+        row(Tools, "Y", "tool.anchor"),
+        row(Tools, "C", "tool.razor"),
+        row(Tools, "Q", "tool.shape"),
+        row(Tools, "G", "tool.pen"),
+        // --- Timeline: reveals and edits ---
+        row(Timeline, "P", "reveal.position"),
+        row(Timeline, "S", "reveal.scale"),
+        row(Timeline, "R", "reveal.rotation"),
+        row(Timeline, "T", "reveal.opacity"),
+        row(Timeline, "A", "reveal.anchor"),
+        row(Timeline, "E", "reveal.effects"),
+        row(Timeline, "M", "reveal.masks"),
+        row(Timeline, "U", "reveal.animated"),
+        row(Timeline, "Shift+L", "reveal.volume"),
+        row(Timeline, "[", "layer.move.in"),
+        row(Timeline, "]", "layer.move.out"),
+        row(Timeline, "Alt+[", "layer.trim.in"),
+        row(Timeline, "Alt+]", "layer.trim.out"),
+        row(Timeline, "Mod+Shift+D", "layer.split"),
+        row(Timeline, "Mod+D", "layer.duplicate"),
+        row(Timeline, "Mod+Shift+C", "layer.precompose"),
+        row(Timeline, "Mod+Alt+T", "layer.retime.enable"),
+        row(Timeline, "=", "timeline.zoom.in"),
+        row(Timeline, "-", "timeline.zoom.out"),
+        row(Timeline, "\\", "timeline.zoom.fit"),
+        row(Timeline, "Enter", "layer.rename"),
+        row(Timeline, "X", "layer.toggle.visible"),
+        // --- Graph editor ---
+        row(Graph, "F9", "graph.ease"),
+        row(Graph, "Shift+F9", "graph.ease.in"),
+        row(Graph, "Mod+Shift+F9", "graph.ease.out"),
+        row(Graph, "F", "graph.fit"),
+        // --- Viewer ---
+        row(Viewer, "Shift+/", "viewer.zoom.fit"),
+        row(Viewer, "Mod+=", "viewer.zoom.in"),
+        row(Viewer, "Mod+-", "viewer.zoom.out"),
+        row(Viewer, "Mod+J", "viewer.res.full"),
+        row(Viewer, "Mod+Shift+J", "viewer.res.half"),
+        row(Viewer, "Mod+Alt+J", "viewer.res.quarter"),
+        row(Viewer, "Mod+R", "viewer.rulers.toggle"),
+        row(Viewer, "Mod+'", "viewer.grid.toggle"),
+        // --- Panels ---
+        row(Panels, "Mod+F6", "panel.focus.next"),
+        row(Panels, "Mod+Shift+F6", "panel.focus.prev"),
+        row(Panels, "Mod+F", "panel.search.focus"),
     ];
-    Keymap {
-        bindings: rows.into_iter().flatten().collect(),
+    let mut bindings: Vec<Binding> = rows.into_iter().flatten().collect();
+    // Alt+Shift+1…9 switch workspace.
+    for d in 1..=9u8 {
+        if let Some(b) = row(
+            Global,
+            &format!("Alt+Shift+{d}"),
+            &format!("workspace.switch.{d}"),
+        ) {
+            bindings.push(b);
+        }
     }
+    Keymap { bindings }
 }
 
 /// The "After Effects" muscle-memory preset (docs/07 §15): starts from the
@@ -458,6 +536,43 @@ mod tests {
             .iter()
             .any(|b| b.action.0 == "graph.toggle"));
         assert!(km.search("nonexistent-xyz").is_empty());
+    }
+
+    #[test]
+    fn the_default_keymap_covers_the_contexts_and_resolves() {
+        let km = default_keymap();
+        // A representative binding from each context resolves as expected.
+        assert_eq!(
+            km.lookup(KeyContext::Global, &chord("Space")),
+            Some(&"playback.toggle".into())
+        );
+        assert_eq!(
+            km.lookup(KeyContext::Tools, &chord("V")),
+            Some(&"tool.select".into())
+        );
+        assert_eq!(
+            km.lookup(KeyContext::Timeline, &chord("Mod+D")),
+            Some(&"layer.duplicate".into())
+        );
+        assert_eq!(
+            km.lookup(KeyContext::Viewer, &chord("Mod+=")),
+            Some(&"viewer.zoom.in".into())
+        );
+        assert_eq!(
+            km.lookup(KeyContext::Graph, &chord("F9")),
+            Some(&"graph.ease".into())
+        );
+        assert_eq!(
+            km.lookup(KeyContext::Panels, &chord("Mod+F")),
+            Some(&"panel.search.focus".into())
+        );
+        // All nine workspace switches are present.
+        for d in 1..=9u8 {
+            assert!(km
+                .search(&format!("workspace.switch.{d}"))
+                .iter()
+                .any(|b| b.context == KeyContext::Global));
+        }
     }
 
     #[test]
