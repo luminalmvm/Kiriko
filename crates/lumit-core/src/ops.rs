@@ -36,6 +36,13 @@ pub enum Op {
     RemoveItem {
         id: Uuid,
     },
+    /// Point a footage item at a different file (docs/07 §3.3 relink, docs/10
+    /// §2). Carries the whole `MediaRef` — path pair and fingerprint — so it
+    /// is trivially invertible and a relink is one undo step.
+    SetMediaRef {
+        id: Uuid,
+        media: Box<crate::model::MediaRef>,
+    },
     RenameItem {
         id: Uuid,
         name: String,
@@ -287,6 +294,18 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Op, OpError> {
             Ok(Op::AddItem {
                 index,
                 item: Box::new(item),
+            })
+        }
+        Op::SetMediaRef { id, media } => {
+            let crate::model::ProjectItem::Footage(f) =
+                doc.item_mut(*id).ok_or(OpError::UnknownItem)?
+            else {
+                return Err(OpError::UnknownItem);
+            };
+            let previous = std::mem::replace(&mut f.media, (**media).clone());
+            Ok(Op::SetMediaRef {
+                id: *id,
+                media: Box::new(previous),
             })
         }
         Op::RenameItem { id, name } => {

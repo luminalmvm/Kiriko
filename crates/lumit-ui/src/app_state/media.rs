@@ -13,6 +13,14 @@ pub enum MediaStatus {
         frames: usize,
         vfr: bool,
     },
+    /// The file is not there (docs/07 §3.3): moved, renamed, or on a drive
+    /// that is not mounted. Distinct from `Failed` — nothing is wrong with
+    /// the media, so the answer is the relink flow and a test-bar slate,
+    /// not an error. Reported after the open-time resolver has already
+    /// tried the relative path, any legacy absolute one, and a fingerprint
+    /// search (K-173).
+    Missing,
+    /// The file is there but unreadable — a corrupt or unsupported file.
     Failed(String),
 }
 
@@ -65,6 +73,11 @@ impl MediaRegistry {
 }
 
 fn probe_and_index(path: &std::path::Path) -> MediaStatus {
+    // Absent is not the same as broken: it has its own status, its own
+    // badge, and a slate rather than an error (docs/07 §3.3).
+    if !path.is_file() {
+        return MediaStatus::Missing;
+    }
     let probe = match lumit_media::probe::probe(path) {
         Ok(p) => p,
         Err(e) => return MediaStatus::Failed(e.to_string()),

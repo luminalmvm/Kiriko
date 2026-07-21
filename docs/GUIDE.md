@@ -1174,6 +1174,34 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   remembers the timeline column width: small notes in the app's own settings store, keyed by
   the project's file path — nothing is written into the project file itself, so sharing a
   `.lum` never leaks your window arrangement.
+- **Project files carry no absolute paths (K-173)** — a tester about to share a project
+  noticed their username sitting inside it: every media reference stored a full path like
+  `/home/Their Name/projects/clip.mp4`. No longer. A saved project stores each file's
+  location *relative to the project folder* (recomputed every save, with forward slashes so
+  a Windows save opens on Linux) plus a small **content fingerprint** — the file's size and
+  a hash of its first and last chunks. Where the file sits on *your* machine lives only in
+  memory while the app runs. Opening a project finds each file by walking: is it where the
+  relative path says? (This is why moving the whole project folder now just works.) If not,
+  does an old save's absolute path still point somewhere real? If not, the fingerprint
+  search combs the project's folder tree for a file with the same content — so footage that
+  was reorganised into a subfolder is found by what it *is*, not where it was. Anything
+  still missing is named in a notice and its reference kept intact.
+- **When footage goes missing, you see colour bars** — the broadcast test pattern, the same
+  one a television shows with no signal. The reasoning is that the alternative is worse: a
+  missing layer that renders *black* looks exactly like a deliberate edit, so the mistake
+  can survive all the way into an exported file. Bars cannot be mistaken for anything but
+  "there is nothing here". They appear in the Viewer and in exports alike, for the same
+  reason. In the Project panel the item wears a crossed-link icon and a **Relink…** button;
+  pointing it at the file's new home also relinks every *other* missing file sitting in that
+  same folder, in one undo step — losing a folder of footage is then one dialogue rather
+  than twenty. The pattern itself is drawn by arithmetic at whatever size is needed, not
+  loaded from a bundled image, so it is crisp at any resolution and adds nothing to the
+  download. When something *is* missing, a toggle appears beside the Project panel's search
+  box (and on any footage row's right-click menu) that filters the panel down to just the
+  broken files and the folders leading to them — the "what else is broken?" view. It works
+  alongside the search box rather than replacing it, so you can hunt for one missing clip by
+  name; and when nothing is missing it tells you so plainly instead of showing an empty
+  panel that looks like a fault.
 - **Beat detection** (`lumit-audio::beat`) — the groundwork for cutting to the music. It
   slides a short window along the track and, at each step, measures how much *new* energy
   appeared since the last step (the "spectral flux"); a kick or snare makes that number
@@ -1712,6 +1740,26 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   Lumit spends the spare moment decoding the next uncached frame a short way in front of the
   clock (about a dozen frames' lookahead). That's why the first pass over a cold section can
   stutter but the work-area loop settles into perfectly smooth playback once round.
+- **The cache has to know when a file's *identity* changed, not just the project.** Every
+  cached frame is filed under a "frame key" — a short fingerprint of everything that
+  decides what the picture looks like, worked out from the project. Ask for the same frame
+  again, get the same key, and Lumit can hand back the picture it already has instead of
+  re-rendering. That works because the project is the whole story… almost. Checking a file
+  is really on disk happens on a background thread, so for a moment after opening a project
+  Lumit genuinely does not know whether a clip exists, and draws that layer as nothing. The
+  project hasn't changed when the answer arrives — but the picture has: the layer now shows
+  colour bars. Same key, different picture, which is exactly the thing a cache must never
+  allow.
+  Throwing away the cached frames when the answer lands is half the fix, and the half that
+  isn't enough: the pre-cacher above has *already sent off* renders of the neighbouring
+  frames, and those come back a moment later, drawn without the colour bars, and get filed
+  under keys that now promise colour bars. That was a real bug — the missing-footage bars
+  showed on the frame you were sitting on and every other frame in the composition went
+  black. So Lumit keeps a counter, the *media epoch*, which ticks whenever an answer changes
+  what a file is. Every render request is stamped with the counter's value, the finished
+  frame carries the stamp home, and anything stamped with an old value is thrown away rather
+  than shown or filed. It is the render-queue equivalent of binning work that was started
+  from an out-of-date brief.
 - **Mask editing in the Viewer** — select a layer with masks and its outlines draw
   over the picture in clay, with a square handle on every vertex. Drag a handle and
   the outline follows your cursor live; let go and the pixels update — one undo step

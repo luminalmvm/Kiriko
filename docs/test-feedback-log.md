@@ -460,3 +460,164 @@ Four notes relayed by the owner; the tester started on main, then switched to th
   nothing re-rendered when they landed. `MediaRegistry::poll` now reports when results
   arrive, and the shell re-renders the shown frame — the first frame fills in as probes
   complete, no playhead nudge needed.
+
+# Tester feedback round 2 (owner's friend) — 2026-07-21, post-merge
+
+Owner's inline directions are folded into the items. Work is picked from the dependency
+graph, where these are wired in; the shortcuts group goes first (owner: users default to
+hotkeys, and their absence makes testing feel clunky).
+
+## Usability
+- [x] TF-6 Delete key deletes the selection — layers and keyframes both. Done: Delete and
+  Backspace (Global, added to the §15 table — the spec had no delete binding at all) remove
+  the selected keyframes when any are selected (lane or graph selection, linked pairs carry
+  their partner, one Batch/undo; a property losing its last key goes Static at its playhead
+  value), else the selected layer. Focus-gated, so it can never fire from a value field —
+  the concern that had kept the key unbound.
+- [x] TF-7 A hotkey inserts a marker at the playhead, and works during playback. Done: `*`
+  per the §15 table — read from the text events (the asterisk never arrives as a key event:
+  it is Shift+8 or numpad-multiply depending on layout), so it is layout-independent; it
+  only commits a marker, so the transport never pauses.
+- [ ] TF-8 (owner) **The full shortcut pass**: bind everything — including actions not yet
+  implemented where sensible — or document precisely which 07 §15 bindings are not wired
+  yet; must be thorough. With it, **start the first-run onboarding screen**: a settings-like
+  modal (expandable later), v1 content = choose AE or Vegas key-binding style, with a small
+  note that this can be changed later. (Supersedes K-006's post-v1 stance for the first-run
+  screen — log the K-decision when it lands. Needs a Vegas preset table in lumit-keymap
+  beside the shipped AE one.)
+- [ ] TF-9 Markers cannot be moved after creation.
+- [ ] TF-10 Markers cannot be given a label.
+- [ ] TF-11 Timeline property rows with a link/unlink axes button clip at the bottom.
+- [ ] TF-12 Project view: Shift-select acts like Ctrl-select (toggles clicked items) —
+  Shift should range-select from the previous selection; Ctrl toggles.
+- [ ] TF-13 Project view: dragging a multi-selection into a folder moves only one item.
+- [ ] TF-14 Folders cannot be renamed.
+- [ ] TF-15 Dragging from the Project tab into a comp shows no indicator of where the item
+  will land.
+- [ ] TF-16 Retime: the first and last keyframe cannot be deleted.
+- [ ] TF-17 Alt-scroll timeline zoom also scrolls the timeline vertically.
+- [ ] TF-18 Consider Ctrl-scroll as the (or an) intuitive zoom gesture.
+- [ ] TF-19 Keyframe markers do not align to the playhead / snap to frames correctly; layer
+  start/end times show the same misalignment.
+- [ ] TF-20 Click targets on layers, files and effects only cover the text, not the row
+  space containing it.
+- [ ] TF-21 The effects list needs hover/drag feedback making it read as clickable.
+- [ ] TF-22 Icons in the effects list.
+- [ ] TF-23 Retime continues advancing past the last keyframe — should hold.
+- [ ] TF-24 (owner) Retime's graph must, for now, be **identical to every other property's**,
+  with one exception: enabling it seeds a keyframe at the first and last frame. The bigger
+  split — identical in AE mode, entirely different in Vegas mode — comes with the mode work.
+- [ ] TF-25 Graph editor: keyframes are not aligned to their timeline positions (the
+  playhead position does not match the comp).
+- [ ] TF-26 Graph editor: cannot scroll left of the first keyframe (it sits pinned against
+  the panel edge).
+- [ ] TF-27 Retime behaves oddly with exactly two keyframes (tester video pending).
+
+## Bugs
+- [ ] TF-28 Shake: Amplitude does not affect rotation — Rotation amount should be
+  multiplied by amplitude.
+- [ ] TF-29 Linked Scale squishes the aspect ratio when animated with bezier curves,
+  despite the axis link being on.
+- [ ] TF-30 Keyframes on an adjustment layer are invisible in the graph view.
+- [ ] TF-31 Posterize Time on a zero-opacity adjustment still fully posterizes what is
+  below. The held composite must blend back by the adjustment's coverage (mask × opacity) —
+  which is what docs/08 §3.25 already promises, so this is code contradicting spec.
+
+## Effect wishes
+- [ ] TF-32 General lens-distortion effect.
+- [ ] TF-33 GPU-accelerated pixel sorter.
+- [ ] TF-34 Dithering / Bayer filters (one combined effect).
+- [ ] TF-35 Edge detection.
+
+- [x] TF-36 **Absolute paths in saved projects leak usernames; a moved project stopped
+  loading its files.** (Tester, flagged sensitive.) Fixed as K-173: `MediaRef.absolute_path`
+  is session-state — never serialized (legacy files still load theirs as a fallback); saves
+  rebase every located reference relative to the project folder (forward slashes,
+  cross-platform) and stamp missing fingerprints; opening runs the docs/10 §2 resolver
+  (relative → legacy absolute → fingerprint search over the project tree) before anything
+  probes, so a moved project folder opens intact and moved-within-the-tree footage is found
+  by content. Missing files are named in a notice and keep their reference untouched; the
+  interactive relink dialogue remains future work. Tests at the serde, rebase, and
+  resolve-all levels; docs/10 §2's self-contradiction ("stores the absolute path" vs "no
+  local usernames ever") resolved in privacy's favour.
+
+- [x] TF-37 **Missing footage: badge, slate, and the relink flow** (owner, closing the
+  graph's RELINKUI). `MediaStatus::Missing` is now distinct from `Failed` (absent ≠ broken):
+  the project tree row shows a crossed-link glyph in the warning tint, the info header reads
+  "missing" beside a *Relink…* button, and the layer renders **generated colour bars**
+  instead of vanishing — `lumit_media::slate`, pure arithmetic at comp size rather than a
+  bundled image, in preview and export both so a missing layer cannot silently reach a
+  delivered file (K-031). *Relink…* opens a picker on the item's own name and batch-relinks
+  every other missing item found beside the chosen file (07 §3.3), one undo step, each
+  rebased relative and re-fingerprinted (K-173). Slate frames stay cacheable and keyed on
+  the missing state, so a relink retires them. New `Op::SetMediaRef`. Tests: slate geometry
+  (4), op undo symmetry, plus the existing suite. Remaining: the *Find missing footage*
+  and an unreadable-file slate (that state shows the row note but no picture).
+- [x] TF-38 **Find missing footage** (owner): a toggle beside the Project search — visible
+  only while files *are* missing, with a count — plus a right-click entry on any footage
+  row. Filters the tree to missing items and the folders leading to them; combines with the
+  search text (both must match) and is deliberately NOT relaxed by a matching folder name,
+  since every visible row under it should be something to fix. Empty result reads "Every
+  file is where the project expects it". Threaded as a `ProjectFilter` rather than more
+  loose parameters. Test:
+  `missing_only_filter_keeps_the_path_to_broken_items`.
+
+- [x] TF-39 **Motion-blur icon replaced with the owner's own artwork.** Iconoir has no
+  motion-blur glyph — the stand-in was `fast-arrow-right`, which reads as "next", not
+  "blur". The new mark (a ring with speed streaks running into it, two rows broken by a
+  second dash) is *drawn* rather than typeset: `icons::draw_motion_blur` maps the SVG's own
+  24×24 coordinates onto whatever rect the caller gives, so it stays sharp at any size and
+  weight-matches the stroked Iconoir set around it without adding an asset or an SVG
+  rasteriser. `Icon::drawn()` marks such icons: they are exempt from the pack-resolution
+  test, and `icons::text` returns empty for them (the timeline's motion-blur master toggle
+  now allocates a chip and paints, rather than typesetting a glyph). Test:
+  `drawn_icons_paint_without_the_pack_and_have_no_text_form` counts the shapes `paint` adds
+  with no fonts installed — verified to fail if the drawing is skipped.
+
+- [x] TF-40 **Missing-footage slate vanished the moment the playhead moved, and stayed gone**
+  (owner). A cache-poisoning race, not a slate bug. While a probe is still in flight the
+  layer contributes nothing (its state is unknown), so the frame renders empty; when the
+  probe lands as *Missing*, that already-computed result arrives and is banked under a key
+  computed from the **new** state. The slate's key is identical on every frame (it is a pure
+  function of the comp size), so that single bad entry answered every later frame — hence
+  "vanishes on any move, and stays gone", while the first view looked right because it was
+  rendered live. Two fixes: `CompFrame` now carries the request generation and the receiver
+  drops anything superseded (a stale render is neither shown nor banked), and a landing
+  probe calls `invalidate_rendered_frames` — a media probe changes what a comp looks like
+  without changing the document, which the frame key alone cannot express. Regression:
+  `a_landing_probe_discards_frames_rendered_before_it`, verified to fail without the fix.
+  **Follow-up — the above did not fix it.** Two further findings. (1) The generation gate was
+  itself wrong and is reverted: *every* request bumps the generation, background fills
+  included, so a fill queued behind a display render would supersede it and the Viewer would
+  simply stop updating. Staleness belongs where it already was — the worker drops superseded
+  requests, and a landing probe drops banked frames. (2) The likely culprit: **clicking a
+  footage item in the Project panel sets `preview_comp = None`**, switching the Viewer out of
+  comp mode, and that footage path had no missing-media branch at all — it returned without
+  requesting anything, leaving a black panel that never recovers, because nothing later
+  triggers a render. It now answers with the same slate (`request_slate`, 1920×1080 — a file
+  we cannot open has no size to report). Reproduced through the real `open_path` +
+  probe-thread flow in `a_reopened_project_with_missing_media_slates_at_every_frame`, which
+  proves the comp path emits a slate job at every time, so the comp render was never the
+  problem.
+  **Resolved — and neither theory above was the cause.** Two rounds of inference failed, so
+  the third measured: a temporary trace in the Viewer's corner reported what each frame
+  actually did. It read `f889 CACHED key…51b215 | got f889 lay1 draws1 fill0` on the good
+  frame and `f890 CACHED key…551b215` on the black one — *cached, with no render behind it*.
+  That settled two things at once. Frame keys are **not** time-invariant for a slate (they
+  differ per frame, so the "one bad entry answers every frame" story was wrong), and the
+  black frames were being served from the cache rather than rendered. Something had banked
+  black pixels under keys that promise a slate.
+  The something is the **background fill**. While the probe is in flight the fill is already
+  queueing renders of the frames around the playhead, and those renders draw the layer as
+  nothing. Clearing the cache when the probe lands throws away what is *banked* — it cannot
+  touch what is still *in flight*, and those results land a moment later and re-poison the
+  cache it just cleared. Hence colour bars on the frame you were sitting on (rendered live,
+  after the probe) and black on every frame you moved to.
+  Fixed with `AppState::media_epoch`: bumped whenever a landing probe changes what a source
+  *is*, stamped onto every comp request, carried back on the `CompFrame`, and checked by
+  `accepts_comp_frame` before the result is shown or banked (a refused fill also releases
+  its slot so filling resumes). Deliberately the media epoch and **not** the request
+  generation, for the reason (1) records. Regressions:
+  `a_frame_rendered_before_a_probe_landed_is_refused_when_it_finishes` and
+  `a_comp_frame_comes_back_stamped_with_the_epoch_it_was_asked_for`, the latter driving the
+  real preview engine and verified to fail when the stamp is dropped in transit.

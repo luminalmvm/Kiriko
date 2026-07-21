@@ -22,6 +22,11 @@ struct Request {
     path: PathBuf,
     frame: usize,
     target_width: Option<u32>,
+    /// The file is missing (docs/07 §3.3): answer with the test-bar slate at
+    /// this size instead of decoding. Viewing a lost clip on its own must
+    /// show the same bars a comp shows for it — the Viewer previously drew
+    /// nothing at all here, which looks identical to a broken application.
+    slate: Option<(u32, u32)>,
 }
 
 /// One layer's decode job inside a comp render request.
@@ -56,6 +61,11 @@ pub struct CompJob {
     /// stamps it onto [`CompLayerPixels::flow_field`]. See
     /// [`lumit_core::fx::stack_flow_neighbour`].
     pub flow_neighbour: Option<i32>,
+    /// The file could not be found (docs/07 §3.3): the worker synthesises the
+    /// test-bar slate at the layer's size instead of decoding, so a comp with
+    /// missing footage shows unmistakably-absent bars rather than silent
+    /// black — and never fails the whole frame.
+    pub slate: bool,
 }
 
 pub struct CompLayerPixels {
@@ -82,6 +92,18 @@ pub struct CompLayerPixels {
 pub struct CompFrame {
     pub comp: Uuid,
     pub frame: usize,
+    /// The media epoch this frame was rendered under — see
+    /// `AppState::media_epoch`. A render started before a probe landed drew a
+    /// layer whose state was still unknown (so it drew nothing); if its
+    /// result arrives afterwards it is banked under a key derived from the
+    /// *new* state, filing black pixels under the slate's name. Clearing the
+    /// cache when the probe lands cannot help — these frames are still in
+    /// flight at that moment — so the receiver drops them by epoch instead.
+    ///
+    /// Deliberately not the request generation: every request bumps that,
+    /// background fills included, so gating on it would let a fill supersede
+    /// a display render and the Viewer would stop updating.
+    pub media_epoch: u64,
     /// Top-of-stack first (document order); the renderer draws bottom-up.
     pub layers: Vec<CompLayerPixels>,
     /// Wall time this frame's layers took to decode on the worker thread — the
@@ -111,6 +133,7 @@ enum Message {
         comp: Uuid,
         frame: usize,
         jobs: Vec<CompJob>,
+        media_epoch: u64,
     },
     /// Resize the decoded-frame cache (its slice of the one RAM budget,
     /// Settings → Performance). Applied immediately, never latest-wins-dropped.
@@ -165,7 +188,11 @@ impl Default for PreviewEngine {
                         decode(&mut decoders, &mut frame_cache, &r).map(PreviewResult::Footage)
                     }
                     Message::Comp {
-                        comp, frame, jobs, ..
+                        comp,
+                        frame,
+                        jobs,
+                        media_epoch,
+                        ..
                     } => decode_comp(
                         &mut decoders,
                         &mut frame_cache,
@@ -173,6 +200,7 @@ impl Default for PreviewEngine {
                         comp,
                         frame,
                         &jobs,
+                        media_epoch,
                     )
                     .map(PreviewResult::Comp),
                     Message::SetCacheBudget(_) => continue, // handled above
@@ -205,6 +233,16 @@ fn decode(
     cache: &mut lumit_cache::ByteLru<(Uuid, usize, Option<u32>), CachedFrame>,
     req: &Request,
 ) -> Result<FramePixels, String> {
+    if let Some((w, h)) = req.slate {
+        let (w, h) = (w.max(1), h.max(1));
+        return Ok(FramePixels {
+            width: w,
+            height: h,
+            rgba: lumit_media::slate::colour_bars(w, h),
+            frame: req.frame,
+            item: req.item,
+        });
+    }
     let cache_key = (req.item, req.frame, req.target_width);
     if let Some(hit) = cache.get(&cache_key) {
         return Ok(FramePixels {
@@ -249,6 +287,23 @@ fn decode(
 impl PreviewEngine {
     /// Ask for a frame; any not-yet-decoded older request is abandoned.
     pub fn request(&self, item: Uuid, path: PathBuf, frame: usize, target_width: Option<u32>) {
+        self.request_inner(item, path, frame, target_width, None);
+    }
+
+    /// As [`Self::request`], but answers with the missing-footage slate at
+    /// `size` rather than decoding (docs/07 §3.3).
+    pub fn request_slate(&self, item: Uuid, size: (u32, u32)) {
+        self.request_inner(item, PathBuf::new(), 0, None, Some(size));
+    }
+
+    fn request_inner(
+        &self,
+        item: Uuid,
+        path: PathBuf,
+        frame: usize,
+        target_width: Option<u32>,
+        slate: Option<(u32, u32)>,
+    ) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = self.tx.send(Message::Footage(Request {
             generation,
@@ -256,6 +311,7 @@ impl PreviewEngine {
             path,
             frame,
             target_width,
+            slate,
         }));
     }
 
@@ -265,12 +321,13 @@ impl PreviewEngine {
         let _ = self.tx.send(Message::SetCacheBudget(bytes));
     }
 
-    pub fn request_comp(&self, comp: Uuid, frame: usize, jobs: Vec<CompJob>) {
+    pub fn request_comp(&self, comp: Uuid, frame: usize, jobs: Vec<CompJob>, media_epoch: u64) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = self.tx.send(Message::Comp {
             generation,
             comp,
             frame,
+            media_epoch,
             jobs,
         });
     }
@@ -283,6 +340,7 @@ fn decode_comp(
     comp: Uuid,
     frame: usize,
     jobs: &[CompJob],
+    media_epoch: u64,
 ) -> Result<CompFrame, String> {
     let decode_started = std::time::Instant::now();
     let mut layers = Vec::with_capacity(jobs.len());
@@ -293,8 +351,22 @@ fn decode_comp(
             path: job.path.clone(),
             frame: job.source_frame,
             target_width: job.target_width,
+            slate: None, // the comp path builds its slate below, from natural size
         };
-        let px = decode(decoders, cache, &req)?;
+        // Missing media renders the slate; nothing else about the layer
+        // changes, so transforms, effects and blending all still apply.
+        let px = if job.slate {
+            let (w, h) = (job.natural_w.max(1), job.natural_h.max(1));
+            FramePixels {
+                width: w,
+                height: h,
+                rgba: lumit_media::slate::colour_bars(w, h),
+                frame: job.source_frame,
+                item: job.item,
+            }
+        } else {
+            decode(decoders, cache, &req)?
+        };
         // Neighbour frames for a temporal effect (job.temporal is empty
         // for a plain layer, so this loop does nothing then). A neighbour
         // that fails to decode is simply dropped — a missing echo tap
@@ -309,6 +381,7 @@ fn decode_comp(
                     path: job.path.clone(),
                     frame,
                     target_width: job.target_width,
+                    slate: None,
                 };
                 decode(decoders, cache, &nreq)
                     .ok()
@@ -350,6 +423,7 @@ fn decode_comp(
                 path: job.path.clone(),
                 frame: ceil,
                 target_width: req.target_width,
+                slate: None,
             };
             let px2 = decode(decoders, cache, &req2)?;
             if job.flow {
@@ -388,6 +462,7 @@ fn decode_comp(
     Ok(CompFrame {
         comp,
         frame,
+        media_epoch,
         layers,
         render_cost: decode_started.elapsed(),
     })

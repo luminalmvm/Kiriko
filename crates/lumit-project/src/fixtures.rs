@@ -273,6 +273,14 @@ mod tests {
         let path = dir.path().join("stress.lum");
         crate::save(&doc, &path).unwrap();
         let (loaded, _) = crate::open(&path).unwrap();
-        assert_eq!(loaded, doc);
+        // Absolute paths are session-state and never saved (K-173): the
+        // reopened document differs exactly there and nowhere else.
+        let mut expected = doc;
+        for item in &mut expected.items {
+            if let lumit_core::model::ProjectItem::Footage(f) = item {
+                f.media.absolute_path = String::new();
+            }
+        }
+        assert_eq!(loaded, expected);
     }
 }

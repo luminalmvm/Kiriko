@@ -103,8 +103,33 @@ pub(crate) fn timeline_top_row(
         .map(|c| c.motion_blur)
         .unwrap_or_default();
     rc.add_space(4.0);
-    if rc
-        .selectable_label(mb.enabled, crate::icons::text(Icon::MotionBlur, 13.0))
+    // The motion-blur mark is drawn, not typeset (see `icons::draw_motion_blur`),
+    // so this toggle allocates its own chip and paints into it rather than
+    // handing a glyph to `selectable_label`.
+    let (mb_rect, mb_resp) = rc.allocate_exact_size(egui::vec2(22.0, 18.0), egui::Sense::click());
+    if mb.enabled || mb_resp.hovered() {
+        rc.painter().rect_filled(
+            mb_rect,
+            theme.tokens.control_radius,
+            if mb.enabled {
+                theme.accent.gamma_multiply(0.25)
+            } else {
+                theme.surface_2
+            },
+        );
+    }
+    crate::icons::paint(
+        rc.painter(),
+        mb_rect.shrink(2.0),
+        Icon::MotionBlur,
+        if mb.enabled {
+            theme.accent
+        } else {
+            theme.text_muted
+        },
+        1.4,
+    );
+    if mb_resp
         .on_hover_text(
             "Composition motion blur (master): layers with their own motion-blur switch on then blur",
         )

@@ -2206,3 +2206,18 @@ waveform strip under the ruler is removed outright, along with its T25 toggles a
 background peaks bake (its `CompAudioMsg::Peaks` delivery). Lane keyframe diamonds for
 Volume await the shared PropRow widening (the UI-11 note); fade commands and detach-audio
 remain future §6 work.
+
+**K-173 · DECIDED · A saved project never contains an absolute path; the absolute location is
+session-state (TF-36, tester privacy report).** docs/10 §2 contradicted itself: it said every
+reference stores "the last absolute path" AND that nothing machine-specific — "no local
+usernames" — is ever written. The tester sharing a project found their username inside
+(`/home/<name>/...` in every reference), which settles which half wins. `MediaRef.absolute_path`
+is now `#[serde(skip_serializing)]`: it lives for the running session (probing, the resolver's
+step-2 fallback) and never reaches the file; projects saved before K-173 still *load* theirs.
+What the file carries instead: a **relative path rebased against the project's folder on every
+save** (forward slashes, so a Windows save resolves on Linux; a cross-drive reference falls back
+to the bare file name) and a **fingerprint stamped at save time** where one is missing. On open,
+the previously built-but-unwired docs/10 §2 resolver now actually runs: relative path → legacy
+absolute → fingerprint search across the project tree; found files repoint the session path
+(this is what makes a moved project folder open intact — the tester's other half of the report),
+and missing ones are named in a notice, the relink dialogue remaining future work.

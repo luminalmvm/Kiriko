@@ -12,6 +12,7 @@ pub mod decode;
 pub mod encode;
 pub mod index;
 pub mod probe;
+pub mod slate;
 
 use std::path::Path;
 

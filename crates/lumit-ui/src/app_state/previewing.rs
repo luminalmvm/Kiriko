@@ -140,7 +140,8 @@ impl AppState {
         let mut visited = vec![comp_id];
         self.collect_comp_jobs(&doc, comp, t, &mut jobs, &mut visited);
         self.fill_in_flight = Some((comp_id, frame));
-        self.preview_engine.request_comp(comp_id, frame, jobs);
+        self.preview_engine
+            .request_comp(comp_id, frame, jobs, self.media_epoch);
     }
 
     /// The next work-area frame worth filling (forward-biased from the
@@ -317,7 +318,6 @@ impl AppState {
 
     #[cfg(feature = "media")]
     pub fn refresh_comp_preview(&mut self) {
-        use lumit_core::model::LayerKind;
         let Some(comp_id) = self.preview_comp else {
             return;
         };
@@ -351,12 +351,8 @@ impl AppState {
         let mut jobs = Vec::new();
         let mut visited = vec![comp_id];
         self.collect_comp_jobs(&doc, comp, t, &mut jobs, &mut visited);
-        let _ = LayerKind::Footage {
-            item: Uuid::now_v7(),
-            retime: None,
-        }; // keep the import used in both cfg modes
         self.preview_engine
-            .request_comp(comp_id, self.preview_frame, jobs);
+            .request_comp(comp_id, self.preview_frame, jobs, self.media_epoch);
     }
 
     /// Decode target width for a source of `natural_w` px under the current
@@ -438,7 +434,7 @@ impl AppState {
     /// Recursively collect decode jobs for a comp at time `t`
     /// (docs/06-RENDER-PIPELINE.md: Precomp evaluation).
     #[cfg(feature = "media")]
-    fn collect_comp_jobs(
+    pub(crate) fn collect_comp_jobs(
         &self,
         doc: &Document,
         comp: &Composition,
@@ -547,6 +543,7 @@ impl AppState {
                                     // resolution); footage layers first.
                                     temporal: Vec::new(),
                                     flow_neighbour: None,
+                                    slate: false,
                                 });
                             }
                         }
@@ -577,6 +574,28 @@ impl AppState {
                     let Some(ProjectItem::Footage(f)) = doc.item(*item) else {
                         continue;
                     };
+                    // Missing media still draws (docs/07 §3.3): a slate job at
+                    // comp size, so the layer shows test bars in place of the
+                    // picture instead of silently vanishing. Sized to the comp
+                    // because a file we cannot open has no size to report.
+                    if matches!(self.media.map.get(item), Some(media::MediaStatus::Missing)) {
+                        jobs.push(preview::CompJob {
+                            layer: layer.id,
+                            item: *item,
+                            path: PathBuf::from(&f.media.absolute_path),
+                            source_frame: 0,
+                            target_width: None,
+                            natural_w: comp.width,
+                            natural_h: comp.height,
+                            blend: None,
+                            flow: false,
+                            flow_full: false,
+                            temporal: Vec::new(),
+                            flow_neighbour: None,
+                            slate: true,
+                        });
+                        continue;
+                    }
                     let Some(media::MediaStatus::Ready {
                         probe,
                         frames: src_frames,
@@ -657,10 +676,47 @@ impl AppState {
                             &layer.effects,
                             layer.switches.fx,
                         ),
+                        slate: false,
                     });
                 }
             }
         }
+    }
+
+    /// Throw away every rendered frame of every comp, because something
+    /// outside the document changed what they look like — today only a media
+    /// probe landing (found, missing, or unreadable).
+    ///
+    /// The frame key describes the *document*, so it cannot tell those apart:
+    /// a frame rendered while a file's state was still unknown, then banked
+    /// once it became known, is filed under a key that promises different
+    /// pixels. That is what left a missing-footage comp showing the slate on
+    /// the frame you were sitting on and black on every other — the frames
+    /// either side had already been banked empty by the background fill.
+    ///
+    /// This clears what is *banked*; it cannot touch what is still in flight,
+    /// so it is only half the guard. [`AppState::media_epoch`] is the other
+    /// half, and the two are always bumped together. Probes land rarely
+    /// (open, import, relink), and mostly before much is cached, so dropping
+    /// the lot is cheap and leaves nothing to reason about.
+    /// Whether a comp frame that finished rendering may still be used, given
+    /// the [`media_epoch`](AppState::media_epoch) it was rendered under.
+    ///
+    /// False means a probe landed while it was in flight, so it drew a source
+    /// whose state was still unknown — an empty layer where there is now a
+    /// slate. Such a frame must be neither shown nor banked: the key it would
+    /// be filed under is computed from the *current* document and promises
+    /// the picture the render never drew.
+    #[cfg(feature = "media")]
+    pub fn accepts_comp_frame(&self, media_epoch: u64) -> bool {
+        media_epoch == self.media_epoch
+    }
+
+    #[cfg(feature = "media")]
+    pub fn invalidate_rendered_frames(&mut self) {
+        self.comp_frame_cache.clear();
+        self.cached_present = None;
+        self.cache_epoch += 1;
     }
 
     /// Re-request the current preview frame (selection/scrub/resolution change).
@@ -675,6 +731,16 @@ impl AppState {
         let Some(ProjectItem::Footage(f)) = doc.item(id) else {
             return;
         };
+        // A lost file previewed on its own shows the same bars a comp shows
+        // for it (docs/07 §3.3). Without this the Viewer drew nothing at all —
+        // a black panel that looks exactly like a broken application, and
+        // never recovers, because nothing further triggers a render. Sized
+        // 1920×1080: a file we cannot open has no size to report.
+        if matches!(self.media.map.get(&id), Some(media::MediaStatus::Missing)) {
+            self.preview_frame = 0;
+            self.preview_engine.request_slate(id, (1920, 1080));
+            return;
+        }
         let (width, frames) = match self.media.map.get(&id) {
             Some(media::MediaStatus::Ready { probe, frames, .. }) => {
                 (probe.video.as_ref().map(|v| v.width).unwrap_or(0), *frames)

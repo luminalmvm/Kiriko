@@ -49,13 +49,22 @@ Rules:
 
 ## 2. Media references and relinking
 
-Per `MediaRef` in [03-DATA-MODEL.md](03-DATA-MODEL.md) §3, every reference stores a
-project-relative path (preferred), the last absolute path, and a fingerprint
-(size + mtime + head/tail hash). On open:
+Per `MediaRef` in [03-DATA-MODEL.md](03-DATA-MODEL.md) §3, a saved reference carries a
+**project-relative path** (rebased against the project's folder on every save; forward
+slashes, so a save from any OS resolves on any other) and a **fingerprint**
+(size + mtime + head/tail hash, stamped at save time). The file's absolute location is
+**session-state only** (K-173): it is held in memory while the app runs and is never
+serialized — an absolute path embeds the local username, which this section has always
+promised the file never contains. Projects saved before K-173 may still carry one; it is
+read and honoured as a fallback, and disappears on their next save. On open:
 
-1. Try relative path → 2. absolute path → 3. fingerprint search in user-configured search
-   roots and the project's folder tree → 4. mark **missing** (placeholder slate, never a
-   blocking error), offer the relink dialogue.
+1. Try relative path → 2. a legacy file's absolute path, if present → 3. fingerprint search
+   in user-configured search roots and the project's folder tree → 4. mark **missing**
+   (placeholder slate, never a blocking error), offer the relink dialogue.
+
+Steps 1–3 are wired (`resolve_all_media`, run before anything probes); step 4's dialogue is
+future work — today missing files are named in a notice and keep their reference untouched,
+so a later relink loses nothing.
 
 Relinking one file automatically relinks siblings that resolve under the same path mapping.
 

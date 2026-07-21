@@ -64,7 +64,22 @@ impl AppState {
         }
     }
 
-    fn install(&mut self, doc: Document, path: Option<PathBuf>, dirty: bool) {
+    fn install(&mut self, mut doc: Document, path: Option<PathBuf>, dirty: bool) {
+        // Locate every media reference before anything probes (docs/10 §2,
+        // K-173, TF-36): relative to the project first, then a legacy
+        // absolute path, then the fingerprint search across the project
+        // tree. This is what lets a moved project folder open with its
+        // footage intact — the file stores no absolute paths any more, so
+        // the relative-first walk is the real path, not an optimisation.
+        if let Some(dir) = path.as_deref().and_then(|p| p.parent()) {
+            let (_relinked, missing) = lumit_project::resolve_all_media(&mut doc, dir, &[]);
+            if !missing.is_empty() {
+                self.error = Some(format!(
+                    "media not found (drop the files back or reimport): {}",
+                    missing.join(", ")
+                ));
+            }
+        }
         #[cfg(feature = "media")]
         for item in &doc.items {
             if let ProjectItem::Footage(f) = item {
@@ -201,7 +216,11 @@ impl AppState {
                 .save_file(),
         };
         let Some(path) = path else { return };
-        let doc = self.store.snapshot();
+        // The file carries relative paths and fingerprints only (docs/10 §2,
+        // K-173): the written clone is rebased against the project's folder;
+        // the in-memory document is untouched (no ops, no dirty flip).
+        let dir = path.parent().unwrap_or(Path::new(""));
+        let doc = lumit_project::rebase_for_save(&self.store.snapshot(), dir);
         if self.report(lumit_project::save(&doc, &path)).is_some() {
             if let Some(journal) = &self.journal {
                 let _ = journal.clear();
@@ -222,6 +241,8 @@ impl AppState {
             self.last_autosave = Instant::now();
             if let Some(path) = self.path.clone() {
                 let doc = self.store.snapshot();
+                let dir = path.parent().unwrap_or(Path::new(""));
+                let doc = lumit_project::rebase_for_save(&doc, dir);
                 let _ = self.report(lumit_project::autosave(&doc, &path, keep.max(1)));
             }
         }

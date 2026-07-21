@@ -511,6 +511,97 @@ impl AppState {
         false
     }
 
+    /// Point a missing footage item at its new file (docs/07 §3.3): a picker
+    /// opens on the item's own name, and — the part that makes relinking a
+    /// project bearable rather than a chore — every OTHER missing item found
+    /// beside the chosen file, by name, is relinked in the same undo step.
+    /// Losing a folder full of footage is one dialogue, not twenty.
+    ///
+    /// Each relinked reference is rebased relative to the project (K-173) and
+    /// re-fingerprinted from the file actually chosen, so the new location
+    /// survives the next move by content as well as by path.
+    #[cfg(feature = "media")]
+    pub fn relink_item_dialog(&mut self, item: Uuid) {
+        let doc = self.store.snapshot();
+        let Some(ProjectItem::Footage(f)) = doc.item(item) else {
+            return;
+        };
+        let want = std::path::Path::new(&f.media.relative_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| f.name.clone());
+        let Some(picked) = rfd::FileDialog::new()
+            .set_title(format!("Relink “{}”", f.name))
+            .set_file_name(&want)
+            .pick_file()
+        else {
+            return; // cancelled — nothing changes
+        };
+        let Some(folder) = picked.parent().map(std::path::Path::to_path_buf) else {
+            return;
+        };
+
+        // The chosen file, then every other missing item whose name turns up
+        // in the same folder.
+        let mut ops: Vec<Op> = Vec::new();
+        let mut relinked = 0usize;
+        for pi in &doc.items {
+            let ProjectItem::Footage(other) = pi else {
+                continue;
+            };
+            let is_target = other.id == item;
+            if !is_target
+                && !matches!(
+                    self.media.map.get(&other.id),
+                    Some(media::MediaStatus::Missing)
+                )
+            {
+                continue;
+            }
+            let path = if is_target {
+                picked.clone()
+            } else {
+                let name = std::path::Path::new(&other.media.relative_path)
+                    .file_name()
+                    .map(|n| n.to_owned())
+                    .unwrap_or_else(|| std::ffi::OsString::from(&other.name));
+                let candidate = folder.join(name);
+                if !candidate.is_file() {
+                    continue;
+                }
+                candidate
+            };
+            let mut media = other.media.clone();
+            media.absolute_path = path.to_string_lossy().into_owned();
+            if let Some(dir) = self.path.as_deref().and_then(|p| p.parent()) {
+                if let Some(rel) = lumit_project::relative_between(dir, &path) {
+                    media.relative_path = rel;
+                }
+            }
+            media.fingerprint = lumit_project::fingerprint_path(&path).ok();
+            ops.push(Op::SetMediaRef {
+                id: other.id,
+                media: Box::new(media),
+            });
+            self.media.spawn_probe(other.id, path);
+            relinked += 1;
+        }
+        if ops.is_empty() {
+            return;
+        }
+        // One undo step for the whole relink, siblings included.
+        let op = if ops.len() == 1 {
+            ops.remove(0)
+        } else {
+            Op::Batch { ops }
+        };
+        self.commit(op);
+        if relinked > 1 {
+            self.error = Some(format!("relinked {relinked} files from that folder",));
+        }
+        self.refresh_preview();
+    }
+
     /// Move an item into a folder (None = the panel root): one undo step
     /// removing it from every folder that lists it, then filing it. Dropping
     /// a folder into itself or its own subtree is refused quietly.

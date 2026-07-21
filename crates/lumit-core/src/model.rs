@@ -52,7 +52,17 @@ impl Fingerprint {
 /// Media reference (docs/03-DATA-MODEL.md §3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaRef {
+    /// Path relative to the project file's directory — the one path a saved
+    /// project carries (docs/10 §2, K-173). Rebased against the project's
+    /// location on every save.
     pub relative_path: String,
+    /// The file's location on THIS machine, this session. Never serialized
+    /// (K-173): an absolute path embeds the local username — the exact thing
+    /// docs/10 §2 promises the file never contains — and the tester sharing
+    /// a project found theirs inside. Projects saved before K-173 still
+    /// carry one, so it still *deserializes* and serves as the resolver's
+    /// step-2 fallback; it simply never gets written again.
+    #[serde(default, skip_serializing)]
     pub absolute_path: String,
     /// Content fingerprint for path-independent relink (docs/10 §2). Optional:
     /// absent in projects saved before fingerprints, and skipped on save when

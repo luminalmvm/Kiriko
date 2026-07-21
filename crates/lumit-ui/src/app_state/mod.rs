@@ -572,7 +572,16 @@ impl lumit_eval::SourceStamper for PreviewStamper<'_> {
         let Some(ProjectItem::Footage(f)) = self.doc.item(item) else {
             return None;
         };
-        let media::MediaStatus::Ready { probe, frames, .. } = self.media.map.get(&item)? else {
+        let status = self.media.map.get(&item)?;
+        // Missing media renders the slate (docs/07 §3.3), which is perfectly
+        // cacheable: it is a pure function of the size. Key it on the state
+        // and the path so relinking retires those frames — returning None
+        // here would instead make every frame of the comp unkeyable, so a
+        // project with one lost file would cache nothing at all.
+        if matches!(status, media::MediaStatus::Missing) {
+            return Some((format!("missing#{}", f.media.relative_path), 0));
+        }
+        let media::MediaStatus::Ready { probe, frames, .. } = status else {
             return None;
         };
         let video = probe.video.as_ref()?;
@@ -826,6 +835,22 @@ pub struct AppState {
     /// contain this (case-insensitive) are hidden from the outline. Empty shows
     /// all. A view preference.
     pub timeline_layer_search: String,
+    /// Project panel: show only footage whose file is missing (docs/07 §3.3's
+    /// *Find missing footage*). Reached from the toolbar toggle or a row's
+    /// right-click menu; combines with the search box rather than replacing
+    /// it. A view preference, not project data.
+    pub project_missing_only: bool,
+    /// Bumped whenever a media probe lands and changes what a source *is* —
+    /// notably footage turning out to be missing. A comp render started
+    /// before the bump drew that layer as nothing (its state was still
+    /// unknown); if the result arrives afterwards it must be thrown away
+    /// rather than banked, because the frame key it would be filed under now
+    /// describes a picture with a slate in it. Clearing the frame cache when
+    /// the probe lands is not enough on its own: the offending renders are
+    /// still in flight at that moment and would re-poison the cache the
+    /// instant they finish, which is precisely how a missing-footage comp
+    /// showed colour bars at the frame on screen and black everywhere else.
+    pub media_epoch: u64,
     /// Hide switched-off (invisible) layers from the outline (TL4): the top
     /// row's hide toggle declutters the list to just the live layers. The layers
     /// still render/exist — this is a view filter. Off by default.
@@ -1283,6 +1308,8 @@ impl Default for AppState {
             selected_item: None,
             selected_items: Vec::new(),
             timeline_layer_search: String::new(),
+            project_missing_only: false,
+            media_epoch: 0,
             timeline_hide_invisible: false,
             mask_drag: None,
             tool: ToolMode::default(),

@@ -245,6 +245,20 @@ touching the file (K-024):
   on relinking one item, Lumit MUST scan the chosen folder for the project's other missing
   items by filename and offer to batch-relink the matches. A *Find missing footage* search
   filter lists all missing items in one view.
+  **Shipped:** `MediaStatus::Missing` is its own state, distinct from an unreadable file —
+  the project row wears a crossed-link glyph in the warning tint, the info header reads
+  "missing" with a *Relink…* button, and the layer renders **generated colour bars**
+  (`lumit_media::slate`, drawn at comp size, never a bundled image) in preview *and* export,
+  so the mistake cannot hide in a delivered file (K-031). Relinking one item batch-relinks
+  every other missing item whose name is found beside the chosen file, in a single undo step,
+  each rebased relative and re-fingerprinted (K-173). **Find missing footage** is a toggle
+  beside the search box — shown only while something *is* missing, with a count — and a
+  right-click entry on any footage row; it narrows *with* the search text rather than
+  replacing it, and unlike the plain search it is never widened by a folder whose own name
+  matches, so every visible row is something to fix. An empty result reads "Every file is
+  where the project expects it" rather than an error (§13's no-punishment rule). Still to
+  build: a dedicated slate for a file that is present but **unreadable** — that state shows
+  the row's "unreadable" note and no picture.
 
 ---
 
@@ -768,6 +782,7 @@ navigation moves to `,`/`.`; Viewer zoom therefore lives on `Ctrl+=`/`Ctrl+-` an
 | Global | `Ctrl+,` / `Ctrl+.` | Previous / next edit point or layer boundary |
 | Global | `B` / `N` | Set work area start / end at playhead |
 | Global | `*` (numpad or `Shift+8`) | Add marker at playhead (`8` during playback: beat tap, §10) |
+| Global | `Delete` / `Backspace` | Delete the selection — keyframes when any are selected, else the layer (TF-6) |
 | Global | `Ctrl+Shift+P` | Command palette |
 | Global | `Ctrl+M` | Add active comp to export queue |
 | Global | `Ctrl+K` | Composition settings |

@@ -269,7 +269,8 @@ pub(crate) fn three_d_control(
 }
 
 /// Per-layer motion-blur subcolumn (K-120, docs/06 §4): the motion-blur glyph
-/// (an arrow with speed lines — [`Icon::MotionBlur`], owner) as a toggle in the
+/// (a ring with speed streaks — [`Icon::MotionBlur`], the owner's own
+/// artwork, drawn rather than taken from the icon pack) as a toggle in the
 /// layer's far-right switch slot. Accent when on, secondary otherwise, and
 /// bright under the cursor like the other switches. The hover note reminds that
 /// it only shows once the comp's motion-blur master is on.

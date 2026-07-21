@@ -50,6 +50,15 @@ pub struct ItemInfo {
     pub path: PathBuf,
     pub fps: f64,
     pub frames: usize,
+    /// The file could not be found (docs/07 §3.3): render the test-bar slate
+    /// at this size rather than decoding. `Some((w, h))` carries the comp's
+    /// dimensions — the preview sizes a missing layer the same way, since a
+    /// file we cannot open has no size of its own, and the two must agree or
+    /// the layer's geometry would differ between them. Export must match the
+    /// preview (K-031): an export that quietly dropped a missing layer to
+    /// black while the Viewer showed bars would hide the mistake in the
+    /// delivered file, which is precisely what the slate prevents.
+    pub missing: Option<(u32, u32)>,
 }
 
 /// One audio-bearing layer, as the export thread needs it: where its file
@@ -405,6 +414,10 @@ impl Renderer<'_> {
         let Some(info) = self.items.get(&item) else {
             return Ok(None);
         };
+        if let Some((w, h)) = info.missing {
+            let (w, h) = (w.max(1), h.max(1));
+            return Ok(Some((lumit_media::slate::colour_bars(w, h), w, h)));
+        }
         // Same frame-pick + interpolation the preview uses, so export matches
         // (K-031).
         let (source_frame, blend_frame) =
@@ -1925,26 +1938,44 @@ pub fn camera_mat(
 }
 
 /// Collect the ItemInfo map from probed media (UI thread, cheap).
+/// `slate_size` is the exported comp's dimensions, used to size the
+/// missing-footage slate exactly as the preview does.
 pub fn item_infos(
     doc: &Document,
     media: &crate::app_state::media::MediaRegistry,
+    slate_size: (u32, u32),
 ) -> HashMap<Uuid, ItemInfo> {
     let mut map = HashMap::new();
     for item in &doc.items {
         if let ProjectItem::Footage(f) = item {
-            if let Some(crate::app_state::media::MediaStatus::Ready { probe, frames, .. }) =
-                media.map.get(&f.id)
-            {
-                if let Some(v) = &probe.video {
+            match media.map.get(&f.id) {
+                Some(crate::app_state::media::MediaStatus::Ready { probe, frames, .. }) => {
+                    if let Some(v) = &probe.video {
+                        map.insert(
+                            f.id,
+                            ItemInfo {
+                                path: PathBuf::from(&f.media.absolute_path),
+                                fps: v.fps(),
+                                frames: *frames,
+                                missing: None,
+                            },
+                        );
+                    }
+                }
+                // Missing media is carried, not skipped, so export renders the
+                // same slate the Viewer shows (K-031).
+                Some(crate::app_state::media::MediaStatus::Missing) => {
                     map.insert(
                         f.id,
                         ItemInfo {
                             path: PathBuf::from(&f.media.absolute_path),
-                            fps: v.fps(),
-                            frames: *frames,
+                            fps: 1.0,
+                            frames: 1,
+                            missing: Some(slate_size),
                         },
                     );
                 }
+                _ => {}
             }
         }
     }

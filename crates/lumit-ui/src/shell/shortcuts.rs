@@ -123,6 +123,32 @@ impl Shell {
         if ctx.input_mut(|i| i.consume_shortcut(&GRAPH)) {
             self.app.timeline_graph_mode = !self.app.timeline_graph_mode;
         }
+        // Delete / Backspace (TF-6): selected keyframes first, else the
+        // selected layer. The Delete key was previously withheld on the worry
+        // it could fire from a value field — but the focus gate at the top of
+        // this fn is the fix for that, not avoidance; every shortcut here
+        // already relies on it.
+        const DELETE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Delete);
+        const BACKSPACE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Backspace);
+        if ctx.input_mut(|i| i.consume_shortcut(&DELETE) || i.consume_shortcut(&BACKSPACE))
+            && !self.app.delete_selected_keyframes()
+            && self.app.selected_layer.is_some()
+        {
+            self.app.delete_selected_layer();
+        }
+        // `*` drops a marker at the playhead (07 §15 `marker.add`), during
+        // playback too — it is only a commit, so the transport never pauses.
+        // The asterisk never arrives as an egui Key (it is Shift+8, or the
+        // numpad multiply, depending on layout), so it is read from the text
+        // events instead — which also makes it layout-independent.
+        let star = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Text(t) if t == "*"))
+        });
+        if star {
+            self.app.add_marker_at_playhead();
+        }
         // Cmd/Ctrl+D duplicates the selected layer (docs/07-UI-SPEC §4.7, the AE
         // convention). Only consumed when a layer is selected, so it is a clean
         // no-op otherwise rather than flashing an error. Razor is Ctrl+Shift+D,

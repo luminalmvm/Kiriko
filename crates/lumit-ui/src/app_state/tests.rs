@@ -277,6 +277,84 @@ fn duplicate_layer_makes_a_fresh_copy_above_the_original_and_undoes() {
     assert_eq!(app.store.snapshot().comp(comp_id).unwrap().layers.len(), 1);
 }
 
+/// TF-6 (the Delete key's keyframe half): deleting the lane selection removes
+/// exactly those keys, one undo step; removing a property's last key leaves it
+/// static at its playhead value, never `Keyframed(vec![])`.
+#[test]
+fn delete_selected_keyframes_removes_keys_then_goes_static() {
+    use lumit_core::anim::{Animation, Keyframe, SideInterp};
+    use lumit_core::model::TransformProp;
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+    app.add_solid_layer();
+    let comp_id = app.selected_comp.unwrap();
+    let layer = app.store.snapshot().comp(comp_id).unwrap().layers[0].id;
+    let key = |t: i64, v: f64| Keyframe {
+        time: lumit_core::Rational::new(t, 1).unwrap(),
+        value: v,
+        interp_in: SideInterp::Linear,
+        interp_out: SideInterp::Linear,
+    };
+    app.commit(Op::SetTransformProperty {
+        comp: comp_id,
+        layer,
+        prop: TransformProp::Opacity,
+        animation: Animation::Keyframed(vec![key(0, 100.0), key(2, 40.0)]),
+    });
+    let sel = |t: i64| super::LaneKeySel {
+        layer,
+        row: super::PropRow::Transform(TransformProp::Opacity),
+        time: lumit_core::Rational::new(t, 1).unwrap(),
+    };
+
+    // Delete one of the two keys.
+    app.lane_selection = vec![sel(2)];
+    assert!(app.delete_selected_keyframes(), "one key deleted");
+    let opacity = |app: &AppState| {
+        app.store.snapshot().comp(comp_id).unwrap().layers[0]
+            .transform
+            .opacity
+            .clone()
+    };
+    match opacity(&app).animation {
+        Animation::Keyframed(keys) => {
+            assert_eq!(keys.len(), 1, "only the selected key went");
+            assert_eq!(keys[0].value, 100.0);
+        }
+        Animation::Static(_) => panic!("one key must remain keyframed"),
+    }
+    assert!(
+        app.lane_selection.is_empty(),
+        "selection cleared — keys gone"
+    );
+
+    // Delete the last key: static at the playhead value (frame 0 → 100).
+    app.preview_frame = 0;
+    app.lane_selection = vec![sel(0)];
+    assert!(app.delete_selected_keyframes());
+    match opacity(&app).animation {
+        Animation::Static(v) => assert_eq!(v, 100.0, "static at the playhead value"),
+        Animation::Keyframed(_) => panic!("last key removed must leave a Static, never []"),
+    }
+
+    // Nothing selected: reports false so the Delete key can fall through to
+    // the layer.
+    assert!(!app.delete_selected_keyframes());
+
+    // Each delete was one undo step.
+    app.undo();
+    assert!(matches!(
+        opacity(&app).animation,
+        Animation::Keyframed(ref k) if k.len() == 1
+    ));
+    app.undo();
+    assert!(matches!(
+        opacity(&app).animation,
+        Animation::Keyframed(ref k) if k.len() == 2
+    ));
+}
+
 #[test]
 fn delete_selected_layer_removes_it_and_undoes() {
     let mut app = AppState::default();
@@ -1354,4 +1432,346 @@ fn a_retime_time_drag_registers_as_a_live_edit() {
         "a Time drag must force the decode path on a cache-hit frame"
     );
     assert!(app.is_interacting(), "a Time drag pauses background fills");
+}
+
+/// Repro (owner): the missing-footage slate showed on the first frame and
+/// vanished the moment the playhead moved. The job that carries it must be
+/// emitted at EVERY time in the layer's span, not just the first one.
+#[cfg(feature = "media")]
+#[test]
+fn missing_footage_emits_a_slate_job_at_every_frame() {
+    use lumit_core::model::{FootageItem, MediaRef, ProjectItem};
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+    let comp_id = app.selected_comp.unwrap();
+    let item_id = Uuid::now_v7();
+    app.commit(Op::AddItem {
+        index: app.store.snapshot().items.len(),
+        item: Box::new(ProjectItem::Footage(FootageItem {
+            id: item_id,
+            name: "gone.mp4".into(),
+            extra: serde_json::Map::new(),
+            media: MediaRef {
+                relative_path: "gone.mp4".into(),
+                absolute_path: "/nowhere/gone.mp4".into(),
+                fingerprint: None,
+                extra: serde_json::Map::new(),
+            },
+        })),
+    });
+    // Ready first, so the layer lands with a real span, then lose the file.
+    app.media.map.insert(
+        item_id,
+        media::MediaStatus::Ready {
+            probe: lumit_media::MediaProbe {
+                duration_seconds: 10.0,
+                container: "mp4".into(),
+                video: Some(lumit_media::VideoInfo {
+                    width: 640,
+                    height: 360,
+                    fps_num: 30,
+                    fps_den: 1,
+                    codec: "h264".into(),
+                }),
+                audio: None,
+            },
+            frames: 300,
+            vfr: false,
+        },
+    );
+    app.preview_comp = Some(comp_id);
+    app.add_footage_to_comp(item_id);
+    app.media.map.insert(item_id, media::MediaStatus::Missing);
+
+    let doc = app.store.snapshot();
+    let comp = doc.comp(comp_id).unwrap();
+    let layer_id = comp.layers[0].id;
+    for t in [0.0, 0.5, 1.0, 5.0] {
+        let mut jobs = Vec::new();
+        let mut visited = vec![comp_id];
+        app.collect_comp_jobs(&doc, comp, t, &mut jobs, &mut visited);
+        let slate = jobs.iter().find(|j| j.layer == layer_id);
+        assert!(
+            slate.is_some_and(|j| j.slate),
+            "no slate job at t={t}: the layer would vanish there"
+        );
+    }
+}
+
+/// The frame key for a comp whose footage is missing must exist (so its
+/// frames cache at all) and must not wobble frame to frame — the slate is a
+/// pure function of the comp size, so every frame is the same picture.
+#[cfg(feature = "media")]
+#[test]
+fn missing_footage_frames_are_keyable_and_stable() {
+    use lumit_core::model::{FootageItem, MediaRef, ProjectItem};
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+    let comp_id = app.selected_comp.unwrap();
+    let item_id = Uuid::now_v7();
+    app.commit(Op::AddItem {
+        index: app.store.snapshot().items.len(),
+        item: Box::new(ProjectItem::Footage(FootageItem {
+            id: item_id,
+            name: "gone.mp4".into(),
+            extra: serde_json::Map::new(),
+            media: MediaRef {
+                relative_path: "gone.mp4".into(),
+                absolute_path: "/nowhere/gone.mp4".into(),
+                fingerprint: None,
+                extra: serde_json::Map::new(),
+            },
+        })),
+    });
+    app.media.map.insert(
+        item_id,
+        media::MediaStatus::Ready {
+            probe: lumit_media::MediaProbe {
+                duration_seconds: 10.0,
+                container: "mp4".into(),
+                video: Some(lumit_media::VideoInfo {
+                    width: 640,
+                    height: 360,
+                    fps_num: 30,
+                    fps_den: 1,
+                    codec: "h264".into(),
+                }),
+                audio: None,
+            },
+            frames: 300,
+            vfr: false,
+        },
+    );
+    app.preview_comp = Some(comp_id);
+    app.add_footage_to_comp(item_id);
+    app.media.map.insert(item_id, media::MediaStatus::Missing);
+
+    let k0 = app.frame_key_for(comp_id, 0);
+    let k7 = app.frame_key_for(comp_id, 7);
+    assert!(k0.is_some(), "a missing-footage comp must still be keyable");
+    assert_eq!(k0, k7, "the slate is identical on every frame");
+}
+
+/// Regression (owner): the missing-footage slate showed, then any playhead
+/// move left the comp empty *for ever*. A frame rendered while the file's
+/// state was still unknown got banked once the probe landed — under the
+/// slate's key, which is identical on every frame, so that one bad entry
+/// answered every later frame. A probe landing must therefore throw away
+/// what was rendered before it.
+#[cfg(feature = "media")]
+#[test]
+fn a_landing_probe_discards_frames_rendered_before_it() {
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+    // A frame banked before the probe landed, plus a present queued off it.
+    app.comp_frame_cache.insert(
+        42,
+        crate::app_state::CachedCompFrame {
+            width: 4,
+            height: 4,
+            rgba: vec![0u8; 4 * 4 * 4],
+        },
+    );
+    app.cached_present = Some(42);
+    let epoch = app.cache_epoch;
+
+    app.invalidate_rendered_frames();
+
+    assert!(
+        !app.comp_frame_cache.contains_key(&42),
+        "a frame rendered before the probe must not survive it — it is filed \
+         under a key describing a state its pixels never saw"
+    );
+    assert_eq!(app.cached_present, None, "and must not be presented either");
+    assert!(app.cache_epoch > epoch, "the cache bar re-reads");
+}
+
+/// TF-40 take three, and the one that was actually wrong. Clearing the frame
+/// cache when a probe lands (above) throws away what is *banked*; it cannot
+/// touch what is still *in flight*. The background fill had already queued
+/// renders of the frames either side of the playhead while the footage's
+/// state was unknown, so those renders drew nothing for that layer — and when
+/// they finished, a moment after the probe, they were banked under keys
+/// computed from the new state, keys that promise a slate. The result was
+/// exactly what the owner saw and what two rounds of inference missed: colour
+/// bars on the frame you were sitting on, black on every frame you moved to,
+/// served from cache without rendering anything (the trace read `CACHED` with
+/// no render behind it).
+///
+/// So a landing probe must move the epoch, and a frame stamped with an older
+/// one must be refused.
+#[cfg(feature = "media")]
+#[test]
+fn a_frame_rendered_before_a_probe_landed_is_refused_when_it_finishes() {
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+
+    let before = app.media_epoch;
+    assert!(
+        app.accepts_comp_frame(before),
+        "a frame rendered under the live epoch is fine"
+    );
+
+    // What a landing probe does (see the `media.poll()` handler).
+    app.media_epoch += 1;
+    app.invalidate_rendered_frames();
+
+    assert!(
+        !app.accepts_comp_frame(before),
+        "a render that started before the probe landed drew the layer as          nothing; banking it would file black pixels under the slate's key"
+    );
+    assert!(
+        app.accepts_comp_frame(app.media_epoch),
+        "renders started after it are the ones we want"
+    );
+}
+
+/// The epoch is only a guard if it survives the trip through the worker, so
+/// this drives the real preview engine rather than trusting the field.
+#[cfg(feature = "media")]
+#[test]
+fn a_comp_frame_comes_back_stamped_with_the_epoch_it_was_asked_for() {
+    let app = AppState::default();
+    let comp = Uuid::now_v7();
+    app.preview_engine.request_comp(comp, 0, Vec::new(), 7);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match app.preview_engine.results.try_recv() {
+            Ok(Ok(crate::app_state::preview::PreviewResult::Comp(cf))) => {
+                assert_eq!(cf.comp, comp);
+                assert_eq!(
+                    cf.media_epoch, 7,
+                    "the epoch must ride along with the frame — the receiver                      has nothing else to judge staleness by"
+                );
+                return;
+            }
+            Ok(_) => continue,
+            Err(_) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the preview engine never answered"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+/// TF-40 take two, through the REAL open path: save a project whose footage
+/// then disappears, open it, and check the slate job survives a playhead move.
+/// The artificial version of this test passed while the app still failed, so
+/// this one uses `open_path` + the actual probe threads.
+#[cfg(feature = "media")]
+#[test]
+fn a_reopened_project_with_missing_media_slates_at_every_frame() {
+    use lumit_core::model::{FootageItem, MediaRef, ProjectItem};
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("clip.mp4");
+    std::fs::write(&media, vec![0u8; 2048]).unwrap();
+
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+    let comp_id = app.selected_comp.unwrap();
+    let item_id = Uuid::now_v7();
+    app.commit(Op::AddItem {
+        index: app.store.snapshot().items.len(),
+        item: Box::new(ProjectItem::Footage(FootageItem {
+            id: item_id,
+            name: "clip.mp4".into(),
+            extra: serde_json::Map::new(),
+            media: MediaRef {
+                relative_path: "clip.mp4".into(),
+                absolute_path: media.to_string_lossy().into_owned(),
+                fingerprint: None,
+                extra: serde_json::Map::new(),
+            },
+        })),
+    });
+    // A layer spanning the comp, as a real one would be.
+    app.media.map.insert(
+        item_id,
+        media::MediaStatus::Ready {
+            probe: lumit_media::MediaProbe {
+                duration_seconds: 10.0,
+                container: "mp4".into(),
+                video: Some(lumit_media::VideoInfo {
+                    width: 640,
+                    height: 360,
+                    fps_num: 30,
+                    fps_den: 1,
+                    codec: "h264".into(),
+                }),
+                audio: None,
+            },
+            frames: 300,
+            vfr: false,
+        },
+    );
+    app.preview_comp = Some(comp_id);
+    app.add_footage_to_comp(item_id);
+
+    // Save the way the app does (this also clears the crash journal, so the
+    // reopen takes the ordinary path rather than offering recovery).
+    let project = dir.path().join("p.lum");
+    app.path = Some(project.clone());
+    app.save();
+
+    // The file goes away, and the project is reopened exactly as the app does.
+    std::fs::remove_file(&media).unwrap();
+    let mut app = AppState::default();
+    app.open_path(&project);
+
+    // Wait for the probe threads (they are real).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        app.media.poll();
+        if app
+            .media
+            .map
+            .values()
+            .any(|s| matches!(s, media::MediaStatus::Missing))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let statuses: Vec<&'static str> = app
+        .media
+        .map
+        .values()
+        .map(|s| match s {
+            media::MediaStatus::Probing => "probing",
+            media::MediaStatus::Ready { .. } => "ready",
+            media::MediaStatus::Missing => "missing",
+            media::MediaStatus::Failed(_) => "failed",
+        })
+        .collect();
+    assert_eq!(statuses, vec!["missing"], "the lost file reads as missing");
+
+    let doc = app.store.snapshot();
+    let comp_id = doc
+        .items
+        .iter()
+        .find_map(|i| match i {
+            ProjectItem::Composition(c) => Some(c.id),
+            _ => None,
+        })
+        .unwrap();
+    let comp = doc.comp(comp_id).unwrap();
+    let layer_id = comp.layers[0].id;
+    for t in [0.0, 0.25, 1.0, 3.0] {
+        let mut jobs = Vec::new();
+        let mut visited = vec![comp_id];
+        app.collect_comp_jobs(&doc, comp, t, &mut jobs, &mut visited);
+        assert!(
+            jobs.iter().any(|j| j.layer == layer_id && j.slate),
+            "no slate job at t={t} — the layer would go black there"
+        );
+    }
 }

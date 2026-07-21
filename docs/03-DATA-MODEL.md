@@ -72,20 +72,21 @@ are future (audio is currently only a footage layer's stream, §5.2):
 ### 3. Media references and interpretation
 
 ```rust
-// v1 stores only the path pair.
 struct MediaRef {
-    relative_path: String,     // relative to project file where possible
-    absolute_path: String,     // last known absolute location
+    relative_path: String,     // what the FILE stores: rebased on save, / slashes (K-173)
+    absolute_path: String,     // session-state: where the file is on THIS machine —
+                               // never serialized (it embeds the username; K-173)
+    fingerprint: Option<Fingerprint>, // stamped on save; drives relink step 3 (10 §2)
 }
 ```
 
-**Future** — none of this is in v1 yet:
+**Future** — not in v1 yet:
 
-- a `fingerprint` (size + mtime + head/tail content hash) for reliable relinking (a
-  `Fingerprint` type exists in `lumit-media` but is not stored on the reference);
 - a `FootageInterpretation` (frame-rate override, alpha mode, colour-space tag, loop count,
   timecode policy) — v1 treats every source as sRGB with no per-item overrides;
-- the **missing**-footage state (placeholder slate + relink flow, [07-UI-SPEC.md](07-UI-SPEC.md)).
+(The **missing**-footage state is built: the automatic resolver runs on open, a lost file
+gets a project badge and a generated colour-bar slate in comps, and *Relink…* re-points it
+along with its siblings — [07-UI-SPEC.md](07-UI-SPEC.md) §3.3.)
 
 ---
 

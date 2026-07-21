@@ -3,7 +3,7 @@
 
 pub mod fixtures;
 
-use lumit_core::model::{Fingerprint, MediaRef};
+use lumit_core::model::{Fingerprint, MediaRef, ProjectItem};
 use lumit_core::ops::Op;
 use lumit_core::Document;
 use serde::{Deserialize, Serialize};
@@ -399,6 +399,109 @@ fn search_by_fingerprint(root: &Path, fp: &Fingerprint) -> Option<PathBuf> {
     None
 }
 
+/// The path of `target` relative to `base` (both taken as-is, no filesystem
+/// access): the shared prefix is stripped and each remaining `base` component
+/// becomes a `..`. None when no relative path exists at all — different
+/// Windows drives — where the caller keeps the bare file name instead (the
+/// footage-beside-the-project convention, and the fingerprint search covers
+/// the rest). Always forward slashes, so a project saved on Windows resolves
+/// on Linux and macOS unchanged.
+#[must_use]
+pub fn relative_between(base: &Path, target: &Path) -> Option<String> {
+    use std::path::Component;
+    let mut b: Vec<Component> = base.components().collect();
+    let mut t: Vec<Component> = target.components().collect();
+    // Cross-drive on Windows: no relative path exists.
+    if let (Some(Component::Prefix(pb)), Some(Component::Prefix(pt))) = (b.first(), t.first()) {
+        if pb.as_os_str() != pt.as_os_str() {
+            return None;
+        }
+    }
+    let common = b.iter().zip(t.iter()).take_while(|(x, y)| x == y).count();
+    b.drain(..common);
+    t.drain(..common);
+    let mut parts: Vec<String> = b.iter().map(|_| "..".to_string()).collect();
+    parts.extend(
+        t.iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+    Some(parts.join("/"))
+}
+
+/// A saved project carries relative paths and fingerprints, nothing
+/// machine-specific (docs/10 §2, K-173): clone `doc` for writing with every
+/// located media reference rebased against `project_dir` — the relative path
+/// recomputed from the session's absolute path (or, failing that, wherever
+/// the current relative path resolves) — and a fingerprint stamped where one
+/// is missing, so the saved file can be found again by content after any
+/// move. References whose file cannot be found right now are left exactly
+/// as they are: saving must never lose the information a later relink needs.
+/// The in-memory document is untouched (no ops, no dirty, no undo entries);
+/// `absolute_path` never reaches the file regardless (it is serde-skipped).
+#[must_use]
+pub fn rebase_for_save(doc: &Document, project_dir: &Path) -> Document {
+    let mut doc = doc.clone();
+    for item in &mut doc.items {
+        let ProjectItem::Footage(f) = item else {
+            continue;
+        };
+        // Where is the file, right now? The session's absolute path first,
+        // else wherever the stored relative path points.
+        let abs = Path::new(&f.media.absolute_path);
+        let located: Option<PathBuf> = if !f.media.absolute_path.is_empty() && abs.is_file() {
+            Some(abs.to_path_buf())
+        } else {
+            let rel = project_dir.join(&f.media.relative_path);
+            rel.is_file().then_some(rel)
+        };
+        let Some(located) = located else {
+            continue; // missing: keep the reference untouched for relinking
+        };
+        if let Some(rel) = relative_between(project_dir, &located) {
+            f.media.relative_path = rel;
+        } else if let Some(name) = located.file_name() {
+            // No relative path exists (another drive): the bare name — the
+            // footage-beside-the-project convention — plus the fingerprint.
+            f.media.relative_path = name.to_string_lossy().into_owned();
+        }
+        if f.media.fingerprint.is_none() {
+            f.media.fingerprint = fingerprint_path(&located).ok();
+        }
+    }
+    doc
+}
+
+/// Wire the docs/10 §2 resolver over a whole opened document: every footage
+/// reference is resolved against the project's directory (relative → legacy
+/// absolute → fingerprint search), the session `absolute_path` is pointed at
+/// whatever was found, and the count of references that moved (found
+/// somewhere other than their stored relative path) is returned alongside
+/// the names of those still missing. The caller probes the updated paths;
+/// missing items keep their reference untouched for the relink dialogue.
+pub fn resolve_all_media(
+    doc: &mut Document,
+    project_dir: &Path,
+    search_roots: &[PathBuf],
+) -> (usize, Vec<String>) {
+    let mut relinked = 0;
+    let mut missing = Vec::new();
+    for item in &mut doc.items {
+        let ProjectItem::Footage(f) = item else {
+            continue;
+        };
+        match resolve_media(&f.media, project_dir, search_roots) {
+            Resolved::Found { path, how } => {
+                if how != ResolveStep::RelativePath {
+                    relinked += 1;
+                }
+                f.media.absolute_path = path.to_string_lossy().into_owned();
+            }
+            Resolved::Missing => missing.push(f.name.clone()),
+        }
+    }
+    (relinked, missing)
+}
+
 /// The directory remapping implied by one file moving from `old` to `new`,
 /// used to relink siblings that moved the same way (docs/10 §2). Defined only
 /// for a pure relocation — same file name, different directory; None for a
@@ -595,6 +698,163 @@ mod tests {
         };
         apply(&mut doc, &op).unwrap();
         doc
+    }
+
+    /// TF-36 / K-173: what a saved project carries. The written clone's
+    /// references are rebased relative to the project's folder and stamped
+    /// with fingerprints; the serialized JSON contains no `absolute_path`
+    /// key at all (it would embed the local username — the thing docs/10 §2
+    /// promises the file never holds); and a legacy file that DOES carry one
+    /// still loads it, so old saves keep their step-2 fallback.
+    #[test]
+    fn saved_projects_carry_relative_paths_and_no_absolute_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let media_dir = dir.path().join("media");
+        fs::create_dir_all(&media_dir).unwrap();
+        let file = media_dir.join("clip.bin");
+        fs::write(&file, vec![7u8; 100_000]).unwrap();
+
+        let mut doc = Document::new();
+        let mut item = footage("clip.bin");
+        item.media.relative_path = "stale/nonsense.bin".into(); // rebased below
+        item.media.absolute_path = file.to_string_lossy().into_owned();
+        apply(
+            &mut doc,
+            &Op::AddItem {
+                index: 0,
+                item: Box::new(ProjectItem::Footage(item)),
+            },
+        )
+        .unwrap();
+
+        let rebased = rebase_for_save(&doc, dir.path());
+        let ProjectItem::Footage(f) = &rebased.items[0] else {
+            panic!("footage survives the rebase");
+        };
+        assert_eq!(
+            f.media.relative_path, "media/clip.bin",
+            "rebased, / slashes"
+        );
+        assert!(f.media.fingerprint.is_some(), "fingerprint stamped on save");
+        // The in-memory document is untouched.
+        let ProjectItem::Footage(orig) = &doc.items[0] else {
+            unreachable!()
+        };
+        assert_eq!(orig.media.relative_path, "stale/nonsense.bin");
+        assert!(orig.media.fingerprint.is_none());
+
+        // The file itself: no absolute path anywhere in the JSON.
+        let json = serde_json::to_string(&rebased).unwrap();
+        assert!(
+            !json.contains("absolute_path"),
+            "an absolute path embeds the username — never serialized (K-173)"
+        );
+        // A legacy file that carries one still loads it (step-2 fallback).
+        let legacy: MediaRef = serde_json::from_str(
+            r#"{"relative_path":"a.mp4","absolute_path":"/home/Full Name/a.mp4"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.absolute_path, "/home/Full Name/a.mp4");
+
+        // A missing file keeps its reference untouched — saving must never
+        // destroy the information a later relink needs.
+        let mut doc2 = Document::new();
+        let mut gone = footage("gone.bin");
+        gone.media.relative_path = "somewhere/gone.bin".into();
+        gone.media.absolute_path = "/nowhere/gone.bin".into();
+        apply(
+            &mut doc2,
+            &Op::AddItem {
+                index: 0,
+                item: Box::new(ProjectItem::Footage(gone)),
+            },
+        )
+        .unwrap();
+        let rebased2 = rebase_for_save(&doc2, dir.path());
+        let ProjectItem::Footage(f2) = &rebased2.items[0] else {
+            unreachable!()
+        };
+        assert_eq!(f2.media.relative_path, "somewhere/gone.bin");
+        assert!(f2.media.fingerprint.is_none());
+    }
+
+    /// TF-36: opening resolves every reference — the relative path first, and
+    /// when it has gone stale, the fingerprint search finds the moved file
+    /// (docs/10 §2 steps 1–3, previously built but never wired). The session
+    /// absolute path points at whatever was found; missing files are named.
+    #[test]
+    fn open_resolution_relinks_moved_media_by_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+
+        // One file where its relative path says; one moved elsewhere in the
+        // project tree (found by fingerprint); one truly missing.
+        let here = dir.path().join("here.bin");
+        fs::write(&here, &data).unwrap();
+        let moved_dir = dir.path().join("moved");
+        fs::create_dir_all(&moved_dir).unwrap();
+        let moved = moved_dir.join("renamed.bin");
+        let mut other = data.clone();
+        other[0] ^= 0xAA;
+        fs::write(&moved, &other).unwrap();
+
+        let mut doc = Document::new();
+        let mut a = footage("here.bin");
+        a.media.relative_path = "here.bin".into();
+        a.media.absolute_path = String::new();
+        let mut b = footage("was-elsewhere.bin");
+        b.media.relative_path = "old/was-elsewhere.bin".into();
+        b.media.absolute_path = String::new();
+        b.media.fingerprint = Some(fingerprint_path(&moved).unwrap());
+        let mut c = footage("gone.bin");
+        c.media.relative_path = "gone.bin".into();
+        c.media.absolute_path = String::new();
+        c.media.fingerprint = None;
+        for (i, item) in [a, b, c].into_iter().enumerate() {
+            apply(
+                &mut doc,
+                &Op::AddItem {
+                    index: i,
+                    item: Box::new(ProjectItem::Footage(item)),
+                },
+            )
+            .unwrap();
+        }
+
+        let (relinked, missing) = resolve_all_media(&mut doc, dir.path(), &[]);
+        assert_eq!(relinked, 1, "only the moved file counts as relinked");
+        assert_eq!(missing, vec!["gone.bin".to_string()]);
+        let abs = |i: usize| match &doc.items[i] {
+            ProjectItem::Footage(f) => f.media.absolute_path.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(abs(0), here.to_string_lossy());
+        assert_eq!(abs(1), moved.to_string_lossy(), "found by content");
+    }
+
+    /// The pure relative-path arithmetic behind the rebase.
+    #[test]
+    fn relative_between_walks_up_and_down() {
+        use std::path::Path;
+        let base = Path::new("/projects/film");
+        assert_eq!(
+            relative_between(base, Path::new("/projects/film/media/a.mp4")).as_deref(),
+            Some("media/a.mp4")
+        );
+        assert_eq!(
+            relative_between(base, Path::new("/projects/other/b.mp4")).as_deref(),
+            Some("../other/b.mp4")
+        );
+        assert_eq!(
+            relative_between(base, Path::new("/projects/film/c.mp4")).as_deref(),
+            Some("c.mp4")
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            relative_between(Path::new("C:\\p"), Path::new("D:\\m\\a.mp4")),
+            None,
+            "cross-drive: no relative path exists"
+        );
     }
 
     /// docs/10 §2: the fingerprint is stable, matches a byte-identical copy by
@@ -969,16 +1229,25 @@ mod tests {
             "unset fingerprint must not appear in the file: {json}"
         );
         let back: lumit_core::model::MediaRef = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, m);
+        // The absolute path is session-state (K-173): never serialized, so it
+        // comes back empty; everything else round-trips.
+        assert_eq!(back.absolute_path, "");
+        assert_eq!(back.relative_path, m.relative_path);
+        assert_eq!(back.fingerprint, m.fingerprint);
     }
 
     #[test]
     fn save_open_round_trip_and_no_temp_litter() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("edit.lum");
-        let doc = doc_with_item();
+        let mut doc = doc_with_item();
         save(&doc, &path).unwrap();
         let (loaded, manifest) = open(&path).unwrap();
+        // Absolute paths are session-state, never saved (K-173) — equality
+        // holds once the original's is cleared to match.
+        if let ProjectItem::Footage(f) = &mut doc.items[0] {
+            f.media.absolute_path = String::new();
+        }
         assert_eq!(loaded, doc);
         assert_eq!(manifest.format, FORMAT);
         save(&doc, &path).unwrap();

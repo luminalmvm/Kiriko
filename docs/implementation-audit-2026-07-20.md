@@ -54,6 +54,37 @@ locally (fmt, clippy `-D warnings`, 638 + 64 GPU tests). Tracked as TF-1..4 / OD
   walk), and precomp carriers get the Audio group's Volume row; **audio-only rows draw no
   eye** (nothing to show or hide); the **per-layer waveform lane rides a live bar drag**
   (reads `move_edit`, the same preview the bar draws from).
+- **Round 4 (tester privacy report, TF-36 / K-173):** saved projects contained every media
+  file's absolute path — usernames included — while docs/10 §2 simultaneously promised "no
+  local usernames" ever in the file (a self-contradiction the audit missed: the same section
+  also said references *store* the absolute path). Resolved for privacy: `absolute_path` is
+  session-state (`skip_serializing`; legacy files still load theirs), saves rebase relative
+  paths against the project folder and stamp fingerprints, and open now actually runs the
+  built-but-unwired resolver — the tester's moved-project-folder breakage was exactly this
+  missing wiring. The relink dialogue for still-missing files stays future work.
+- **Round 5 (missing-footage flow, TF-37).** 07 §3.3's badge + placeholder slate + relink
+  flow, previously "not implemented", is built: absent media is its own `MediaStatus`, the
+  project row carries a crossed-link badge and a *Relink…* button, and a lost layer renders
+  **generated** colour bars (never a bundled asset) in preview and export alike — a missing
+  layer that rendered black could otherwise reach a delivered file unnoticed. Relinking one
+  item takes its siblings in the same folder with it. Closes the graph's RELINKUI node;
+  the *Find missing footage* filter and an unreadable-file slate remain.
+- **Round 6 (TF-40): a cache-key honesty bug the audit's own checklist is for.** The frame
+  key describes the *document*, so it cannot distinguish "this file's state was still
+  unknown when we drew this" from "we drew it knowing the file is missing". A frame rendered
+  during the first and banked during the second is filed under a key promising different
+  pixels. Fixed with `AppState::media_epoch`: a landing probe bumps it, every comp request
+  is stamped with it, the finished `CompFrame` carries it back, and `accepts_comp_frame`
+  refuses anything older before it is shown or banked. Two lessons worth carrying, because
+  both cost a round of wrong inference. **(1) Clearing a cache does not stop what is already
+  in flight.** Dropping banked frames when the probe landed looked like a complete fix; the
+  background fill's queued renders landed a moment later and re-poisoned the cache that had
+  just been cleared. Any invalidation of derived state needs to answer for work in progress,
+  not only work completed. **(2) Measure before the third theory.** Two plausible causes
+  were argued from the code and both were wrong; a one-line trace in the Viewer settled it
+  in a single reading, and incidentally disproved a premise the earlier reasoning rested on
+  (a slate's frame key is *not* time-invariant). Worth remembering when adding any future
+  state that changes the picture without changing the document.
 - **Round 3 (owner re-test, OD-8/OD-9):** the GEN-4 sync's scoping hole — `sync_comp_audio`
   managed only the fronted comp, so an edit inside a fronted precomp stale-played the
   PARENT's loaded mix; it now also reconciles whichever comp's mix sits in the engine

@@ -328,14 +328,21 @@ impl Shell {
                 }
                 ctx.request_repaint_after(std::time::Duration::from_millis(16));
             }
-            if self.app.media.poll()
-                && (self.app.preview_comp.is_some() || self.app.preview_item.is_some())
-            {
-                // A probe just finished: the shown frame was rendered without
-                // that footage (unprobed layers contribute nothing), so
-                // re-render it — a restored project's first frame fills in as
-                // probes land instead of waiting for a playhead move (owner).
-                self.app.refresh_preview();
+            if self.app.media.poll() {
+                // A probe just finished, so every frame rendered before it is
+                // stale — including any already banked, whose key was computed
+                // from a state the pixels never saw. Bumping the epoch first
+                // means renders still in flight are dropped when they land
+                // rather than re-poisoning the cache we are about to clear.
+                self.app.media_epoch += 1;
+                self.app.invalidate_rendered_frames();
+                if self.app.preview_comp.is_some() || self.app.preview_item.is_some() {
+                    // The shown frame was rendered without that footage
+                    // (unprobed layers contribute nothing), so re-render it —
+                    // a restored project's first frame fills in as probes land
+                    // instead of waiting for a playhead move (owner).
+                    self.app.refresh_preview();
+                }
             }
             if self.app.media.any_probing() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(150));
@@ -401,6 +408,27 @@ impl Shell {
             }
             use crate::app_state::preview::PreviewResult;
             match newest {
+                // Rendered before a probe changed what one of its sources
+                // *is* — most often footage turning out to be missing, which
+                // the render drew as nothing because the answer had not
+                // arrived yet. Its key, computed now, promises a slate. Bank
+                // it and every frame but the live one goes black (TF-40), so
+                // drop it and release the fill slot it holds; the probe's own
+                // `refresh_preview` has already asked for the frame again.
+                Some(Ok(PreviewResult::Comp(cf)))
+                    if !self.app.accepts_comp_frame(cf.media_epoch) =>
+                {
+                    if self.app.fill_in_flight == Some((cf.comp, cf.frame)) {
+                        self.app.fill_in_flight = None;
+                    }
+                }
+                // Anything reaching here is epoch-current (the arm above took
+                // the rest). Deliberately NOT also gated on the request
+                // generation: every request bumps that, background fills
+                // included, so a fill queued after a display render would
+                // supersede it and the Viewer would simply stop updating.
+                // Ordinary staleness is handled where it belongs — the worker
+                // drops superseded *requests* before rendering them.
                 Some(Ok(PreviewResult::Comp(cf))) if Some(cf.comp) == self.app.preview_comp => {
                     // Only the frame under the playhead is presented; any other
                     // frame (a background fill, or a stale render that arrived

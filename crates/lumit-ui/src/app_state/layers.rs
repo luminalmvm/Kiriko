@@ -465,8 +465,9 @@ impl AppState {
     }
 
     /// Delete the selected layer from its composition (one undoable step).
-    /// Deliberately reachable only from the menu and the command palette, not
-    /// a bare Delete key, so it can never fire while a value field has focus.
+    /// Reached from the menu, the command palette, and — since TF-6 — the
+    /// Delete key, whose handler is focus-gated so it can never fire while a
+    /// value field holds focus (the reason the key was originally withheld).
     pub fn delete_selected_layer(&mut self) {
         let Some(comp_id) = self.preview_comp.or(self.selected_comp) else {
             return;
@@ -808,6 +809,173 @@ impl AppState {
         self.lane_selection = new_sel;
         #[cfg(feature = "media")]
         self.refresh_preview();
+    }
+
+    /// Delete every selected keyframe (TF-6, the Delete key): the graph
+    /// selection when the graph editor owns it, otherwise the lane selection —
+    /// linked pairs carry their partner axis, exactly as copy does. One Batch,
+    /// one undo step. A property whose last key goes becomes static at its
+    /// playhead value (the state flicking its stopwatch off leaves), never a
+    /// `Keyframed(vec![])`. Returns whether anything was deleted, so the
+    /// Delete key can fall through to the selected layer when no keys are
+    /// selected. Selections clear afterwards — their keys are gone.
+    pub fn delete_selected_keyframes(&mut self) -> bool {
+        use lumit_core::anim::{Animation, Keyframe};
+        use lumit_core::model::{EffectValue, TransformProp};
+        let doc = self.store.snapshot();
+        let Some(comp_id) = self.selected_comp else {
+            return false;
+        };
+        let Some(comp) = doc.comp(comp_id) else {
+            return false;
+        };
+        let fps = comp.frame_rate.fps().max(1.0);
+        let tol = 0.5 / fps;
+
+        // The doomed (layer, row, time) set — graph selection wins outright in
+        // graph mode, the same precedence copy takes (T4).
+        let tf_key = |layer: &lumit_core::model::Layer, prop: TransformProp, t: f64| match &layer
+            .transform
+            .get(prop)
+            .animation
+        {
+            Animation::Keyframed(keys) => keys
+                .iter()
+                .copied()
+                .find(|k| (k.time.to_f64() - t).abs() < tol),
+            Animation::Static(_) => None,
+        };
+        let fx_key = |layer: &lumit_core::model::Layer, e: usize, p: usize, t: f64| {
+            let param = layer.effects.get(e)?.params.get(p)?;
+            if let EffectValue::Float(prop) = &param.value {
+                if let Animation::Keyframed(keys) = &prop.animation {
+                    return keys
+                        .iter()
+                        .copied()
+                        .find(|k| (k.time.to_f64() - t).abs() < tol);
+                }
+            }
+            None
+        };
+        let mut collected: Vec<(Uuid, PropRow, f64, Keyframe)> = Vec::new();
+        if self.timeline_graph_mode && self.graph_selection.is_some() {
+            self.collect_graph_selection(comp, tol, &mut collected);
+        } else {
+            self.collect_lane_selection(comp, tol, &tf_key, &fx_key, &mut collected);
+        }
+        if collected.is_empty() {
+            return false;
+        }
+
+        // Group per channel, mirroring paste's shape.
+        let mut tf: Vec<(Uuid, TransformProp, Vec<f64>)> = Vec::new();
+        let mut fx: Vec<(Uuid, usize, usize, Vec<f64>)> = Vec::new();
+        for (l, row, t, _) in collected {
+            match row {
+                PropRow::Transform(prop) => {
+                    match tf.iter_mut().find(|(ll, p, _)| *ll == l && *p == prop) {
+                        Some((_, _, ts)) => ts.push(t),
+                        None => tf.push((l, prop, vec![t])),
+                    }
+                }
+                PropRow::Effect { effect, param } => {
+                    match fx
+                        .iter_mut()
+                        .find(|(ll, e, p, _)| *ll == l && *e == effect && *p == param)
+                    {
+                        Some((.., ts)) => ts.push(t),
+                        None => fx.push((l, effect, param, vec![t])),
+                    }
+                }
+                PropRow::Retime => {}
+            }
+        }
+
+        let playhead_comp = self.preview_frame as f64 / fps;
+        let doomed =
+            |times: &[f64], k: &Keyframe| times.iter().any(|t| (k.time.to_f64() - t).abs() < tol);
+        let mut ops: Vec<Op> = Vec::new();
+        for (layer_id, prop, times) in &tf {
+            let Some(layer) = comp.layers.iter().find(|l| l.id == *layer_id) else {
+                continue;
+            };
+            let slot = layer.transform.get(*prop);
+            let Animation::Keyframed(keys) = &slot.animation else {
+                continue;
+            };
+            let kept: Vec<Keyframe> = keys.iter().copied().filter(|k| !doomed(times, k)).collect();
+            if kept.len() == keys.len() {
+                continue;
+            }
+            let animation = if kept.is_empty() {
+                let lt = playhead_comp - layer.start_offset.0.to_f64();
+                Animation::Static(slot.value_at(lt))
+            } else {
+                Animation::Keyframed(kept)
+            };
+            ops.push(Op::SetTransformProperty {
+                comp: comp_id,
+                layer: *layer_id,
+                prop: *prop,
+                animation,
+            });
+        }
+        // Effect params: one SetLayerEffects per layer, all its params folded in.
+        let mut fx_layers: Vec<Uuid> = Vec::new();
+        for (l, ..) in &fx {
+            if !fx_layers.contains(l) {
+                fx_layers.push(*l);
+            }
+        }
+        for layer_id in fx_layers {
+            let Some(layer) = comp.layers.iter().find(|l| l.id == layer_id) else {
+                continue;
+            };
+            let mut effects = layer.effects.clone();
+            let mut touched = false;
+            for (_l, e, p, times) in fx.iter().filter(|(l, ..)| *l == layer_id) {
+                if let Some(param) = effects.get_mut(*e).and_then(|inst| inst.params.get_mut(*p)) {
+                    if let EffectValue::Float(prop) = &mut param.value {
+                        if let Animation::Keyframed(keys) = &prop.animation {
+                            let kept: Vec<Keyframe> =
+                                keys.iter().copied().filter(|k| !doomed(times, k)).collect();
+                            if kept.len() == keys.len() {
+                                continue;
+                            }
+                            prop.animation = if kept.is_empty() {
+                                let lt = playhead_comp - layer.start_offset.0.to_f64();
+                                Animation::Static(prop.value_at(lt))
+                            } else {
+                                Animation::Keyframed(kept)
+                            };
+                            touched = true;
+                        }
+                    }
+                }
+            }
+            if touched {
+                ops.push(Op::SetLayerEffects {
+                    comp: comp_id,
+                    layer: layer_id,
+                    effects,
+                });
+            }
+        }
+
+        if ops.is_empty() {
+            return false;
+        }
+        let op = if ops.len() == 1 {
+            ops.remove(0)
+        } else {
+            Op::Batch { ops }
+        };
+        self.commit(op);
+        self.lane_selection.clear();
+        self.graph_selection = None;
+        #[cfg(feature = "media")]
+        self.refresh_preview();
+        true
     }
 
     /// Add a keyframe at the playhead to every property row in the selection

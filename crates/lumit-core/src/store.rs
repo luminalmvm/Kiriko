@@ -846,6 +846,38 @@ mod tests {
         store.undo().unwrap();
         assert_eq!(lock_label(&store), (false, 0));
 
+        // Relink (docs/07 §3.3): SetMediaRef swaps the whole reference and
+        // undoes to exactly the old one, so a relink is one clean step.
+        let media_of = |s: &DocumentStore, id: Uuid| {
+            s.snapshot().items.iter().find_map(|i| match i {
+                ProjectItem::Footage(f) if f.id == id => Some(f.media.clone()),
+                _ => None,
+            })
+        };
+        let footage_id = store.snapshot().items.iter().find_map(|i| match i {
+            ProjectItem::Footage(f) => Some(f.id),
+            _ => None,
+        });
+        if let Some(fid) = footage_id {
+            let before = media_of(&store, fid).unwrap();
+            let mut relinked = before.clone();
+            relinked.relative_path = "media/moved.mp4".into();
+            relinked.absolute_path = "/new/place/moved.mp4".into();
+            store
+                .commit(Op::SetMediaRef {
+                    id: fid,
+                    media: Box::new(relinked.clone()),
+                })
+                .unwrap();
+            assert_eq!(media_of(&store, fid).unwrap(), relinked);
+            store.undo().unwrap();
+            assert_eq!(
+                media_of(&store, fid).unwrap(),
+                before,
+                "relink undoes whole"
+            );
+        }
+
         // Volume (docs/09 §6) round-trips like the transform properties.
         let vol = |s: &DocumentStore| {
             s.snapshot()

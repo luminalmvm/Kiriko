@@ -89,7 +89,7 @@ impl Shell {
             .set_file_name(default_name)
             .save_file();
         let Some(path) = picked else { return };
-        let items = crate::export::item_infos(&doc, &self.app.media);
+        let items = crate::export::item_infos(&doc, &self.app.media, (comp.width, comp.height));
         let audio = self.app.comp_audio_jobs(&doc, comp);
         self.export_queue.push_back(crate::export::QueuedExport {
             doc,
