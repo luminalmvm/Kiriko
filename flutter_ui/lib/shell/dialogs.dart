@@ -1,13 +1,12 @@
 // Modal dialogues driven from the menu bar (phase F4): the composition
 // settings / new-composition dialogue and the shared modal scaffold.
 //
-// The dialogues are real chrome in the Settings-window visual style; some of
-// what they collect is not yet wired to the engine, and that is stated
-// honestly (K-007). Composition settings has no bridge op at all: on OK it
-// records the intent through `app.engine(…)` and closes — the UI is real, the
-// commit is a stub. New composition commits the name through the real
-// `app.newComposition` op; size, frame rate and duration await a comp-settings
-// bridge op and are noted as pending in the dialogue.
+// The dialogues are real chrome in the Settings-window visual style. Both now
+// commit for real: Composition settings applies its whole field set through
+// `app.setCompSettings` (one SetCompSettings undo step); New composition
+// creates the comp through `app.newComposition`, then applies size, frame rate
+// and duration to it with `setCompSettings` as one visible flow (the bridge's
+// newComposition takes only a name).
 //
 // The dialogue is shown through the app's Overlay (like the menus and
 // dropdowns) rather than shell state, so it needs no shell wiring. A dimmed
@@ -33,8 +32,34 @@ const List<double> kFpsPresets = [
   120.0,
 ];
 
-/// Open the composition-settings dialogue (edit an existing comp). The commit
-/// is honestly stubbed — there is no comp-settings bridge op yet.
+/// A frame-rate preset as the engine's exact rational `{num, den}` — the
+/// fractional presets are the NTSC 1001 rates, the rest are whole/1. `SetComp
+/// Settings` takes the pair, so the dialogue resolves the display double back
+/// to it here.
+(int num, int den) fpsRational(double fps) {
+  if ((fps - 23.976).abs() < 0.01) return (24000, 1001);
+  if ((fps - 29.97).abs() < 0.01) return (30000, 1001);
+  if ((fps - 59.94).abs() < 0.01) return (60000, 1001);
+  return (fps.round(), 1);
+}
+
+/// The nearest preset to an arbitrary [fps] (seeding the dropdown from an
+/// existing comp whose rate might be a rational the presets round).
+double nearestFpsPreset(double fps) {
+  var best = kFpsPresets.first;
+  var bestGap = (fps - best).abs();
+  for (final p in kFpsPresets) {
+    final gap = (fps - p).abs();
+    if (gap < bestGap) {
+      best = p;
+      bestGap = gap;
+    }
+  }
+  return best;
+}
+
+/// Open the composition-settings dialogue (edit the front comp). Apply commits
+/// the field set through `app.setCompSettings` as one undo step.
 Future<void> showCompositionSettingsDialog(
   BuildContext context,
   AppStateStub app,
@@ -116,13 +141,42 @@ class _CompDialog extends StatefulWidget {
 
 class _CompDialogState extends State<_CompDialog> {
   // Defaults mirror the egui new-comp dialogue (compositions.rs
-  // open_new_comp_dialog): 1920×1080, 60 fps, 30 s.
-  late final TextEditingController _name = TextEditingController(text: 'Comp');
+  // open_new_comp_dialog): 1920×1080, 60 fps, 30 s. When editing, they seed
+  // from the front comp instead.
+  late final TextEditingController _name;
   final FocusNode _nameFocus = FocusNode();
   int _width = 1920;
   int _height = 1080;
   double _fps = 60.0;
   int _durationS = 30;
+
+  @override
+  void initState() {
+    super.initState();
+    final comp = widget.creating ? null : widget.app.frontComp;
+    final name = widget.creating
+        ? 'Comp'
+        : _frontCompName(widget.app) ?? 'Comp';
+    _name = TextEditingController(text: name);
+    if (comp != null) {
+      _width = comp.width;
+      _height = comp.height;
+      final fps = comp.fps.fps;
+      if (fps > 0) {
+        _fps = nearestFpsPreset(fps);
+        _durationS = (comp.frameCount / fps).round().clamp(1, 86400);
+      }
+    }
+  }
+
+  /// The front comp's display name (the id-keyed lookup the tab strip uses).
+  static String? _frontCompName(AppStateStub app) {
+    final id = app.frontCompIdResolved;
+    for (final c in app.compositions) {
+      if (c.id == id) return c.name;
+    }
+    return null;
+  }
 
   @override
   void dispose() {
@@ -132,13 +186,27 @@ class _CompDialogState extends State<_CompDialog> {
   }
 
   void _confirm() {
+    final app = widget.app;
+    final (fpsNum, fpsDen) = fpsRational(_fps);
+    final durationFrames = (_durationS * _fps).round();
     if (widget.creating) {
-      // Commit the name through the real op; size/fps/duration await a
-      // comp-settings bridge op (noted in the dialogue and the checklist).
-      widget.app.newComposition(_name.text.trim());
+      // Two-step: the bridge's newComposition only takes a name, so create it,
+      // then commit the full field set through setCompSettings on the new comp
+      // (found as the composition the create added). One visible flow.
+      final before = {for (final c in app.compositions) c.id};
+      app.newComposition(_name.text.trim());
+      final added = app.compositions.where((c) => !before.contains(c.id));
+      if (added.isNotEmpty) {
+        app.setCompSettings(added.first.id, _name.text.trim(), _width, _height,
+            fpsNum, fpsDen, durationFrames);
+      }
     } else {
-      // No comp-settings bridge op yet — record the intent honestly and close.
-      widget.app.engine('Set composition settings (bridge op pending)');
+      // Edit: commit the whole field set as one SetCompSettings undo step.
+      final compId = app.frontCompIdResolved;
+      if (compId != null) {
+        app.setCompSettings(compId, _name.text.trim(), _width, _height, fpsNum,
+            fpsDen, durationFrames);
+      }
     }
     widget.close();
   }
@@ -229,14 +297,12 @@ class _CompDialogState extends State<_CompDialog> {
             ),
           ),
           const SizedBox(height: 6),
-          Text(
-            widget.creating
-                ? 'Size, frame rate and duration apply once the '
-                    'composition-settings bridge op lands; the name commits now.'
-                : 'Applying is stubbed until the composition-settings bridge op '
-                    'lands.',
-            style: t.small.copyWith(color: t.textDisabled),
-          ),
+          if (widget.creating)
+            Text(
+              'The new composition is created, then its size, frame rate and '
+              'duration are applied in one step.',
+              style: t.small.copyWith(color: t.textDisabled),
+            ),
           const SizedBox(height: 12),
           Row(
             children: [

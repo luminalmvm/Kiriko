@@ -10,6 +10,7 @@ import '../state/settings.dart';
 import '../state/workspace.dart';
 import '../widgets/controls.dart';
 import 'dialogs.dart';
+import 'export_dialog.dart';
 
 class LumitMenuBar extends StatelessWidget {
   final AppStateStub app;
@@ -40,15 +41,23 @@ class LumitMenuBar extends StatelessWidget {
             _Item('Import footage…', app.importFootage),
             _Item('Save', app.save),
             _Item.divider(),
-            _Item('Export comp…',
-                () => app.engine('Export comp (${workspace.export.defaultPreset.label})')),
+            _Item(
+                'Export comp…',
+                () => _openExport(context, workspace.export.defaultPreset,
+                    'Export comp (${workspace.export.defaultPreset.label})')),
             _Item.submenu('Export preset', [
-              for (final p in ExportPreset.values)
-                _Item(p.label, () => app.engine('Export (${p.label})')),
+              // Custom is the "Export comp…" default; the submenu lists the
+              // delivery presets, mirroring app_update.rs.
+              for (final p in ExportPreset.values.where(
+                  (p) => p != ExportPreset.custom))
+                _Item(p.label,
+                    () => _openExport(context, p, 'Export (${p.label})')),
             ]),
             _Item.submenu('Export for sharing', [
-              _Item('Discord 50 MB', () => app.engine('Share export 50 MB')),
-              _Item('Small 10 MB', () => app.engine('Share export 10 MB')),
+              _Item('Discord 50 MB',
+                  () => _shareExport(50.0, 'Share export 50 MB')),
+              _Item('Small 10 MB',
+                  () => _shareExport(10.0, 'Share export 10 MB')),
             ]),
           ]),
           _menu(context, 'Edit', [
@@ -66,15 +75,22 @@ class LumitMenuBar extends StatelessWidget {
             _Item.divider(),
             _Item('Cut clip at playhead', () => app.engine('Cut clip at playhead')),
             _Item('Delete clip at playhead', () => app.engine('Delete clip at playhead')),
-            _Item('Add marker at playhead', () => app.engine('Add marker at playhead')),
+            _Item('Add marker at playhead', () {
+              final compId = app.frontCompIdResolved;
+              if (compId != null) {
+                app.addMarker(compId, app.previewFrame);
+              } else {
+                app.engine('Add marker at playhead');
+              }
+            }),
             _Item.submenu('Detect beats', [
               _Item('Detect', () => app.engine('Detect beats (sensitivity ${app.beatSensitivity})')),
             ]),
             _Item('Clear beat markers', () => app.engine('Clear beat markers')),
             _Item.submenu('Add mask', [
-              _Item('Rectangle', () => app.engine('Add mask: rectangle')),
-              _Item('Ellipse', () => app.engine('Add mask: ellipse')),
-              _Item('Star', () => app.engine('Add mask: star')),
+              _Item('Rectangle', () => app.addMaskToSelected('rectangle')),
+              _Item('Ellipse', () => app.addMaskToSelected('ellipse')),
+              _Item('Star', () => app.addMaskToSelected('star')),
             ]),
             _Item.divider(),
             _Item('Composition settings…',
@@ -93,6 +109,29 @@ class LumitMenuBar extends StatelessWidget {
 
   Widget _menu(BuildContext context, String title, List<_Item> items) =>
       _MenuButton(title: title, items: items);
+
+  /// Open the export dialogue stamped with [preset] when a bridge is present;
+  /// without one, keep the F0 notice ([fallbackNotice]) so the placeholder
+  /// build behaves exactly as before.
+  void _openExport(
+      BuildContext context, ExportPreset preset, String fallbackNotice) {
+    if (app.bridge == null) {
+      app.engine(fallbackNotice);
+      return;
+    }
+    showExportDialog(context, app,
+        preset: preset, template: workspace.export.filenameTemplate ?? '');
+  }
+
+  /// Start a size-targeted share export when a bridge is present; without one,
+  /// keep the F0 notice ([fallbackNotice]).
+  void _shareExport(double targetMb, String fallbackNotice) {
+    if (app.bridge == null) {
+      app.engine(fallbackNotice);
+      return;
+    }
+    app.startShareExport(targetMb);
+  }
 }
 
 class _Item {

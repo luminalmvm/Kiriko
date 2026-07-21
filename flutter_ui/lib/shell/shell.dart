@@ -8,6 +8,8 @@
 // initial entry, because an OverlayEntry's builder does not re-run when an
 // ancestor's setState fires — the body must own its modal state itself.
 
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -19,6 +21,7 @@ import '../state/workspace.dart';
 import '../widgets/controls.dart';
 import 'command_palette.dart';
 import 'dock_widget.dart';
+import 'export_dialog.dart';
 import 'menu_bar.dart';
 import 'settings_window.dart';
 import 'splash.dart';
@@ -67,17 +70,60 @@ class _ShellBodyState extends State<_ShellBody> {
     bridge: widget.bridge,
     lastProjectPath: widget.workspace.lastProjectPath,
     rememberProject: widget.workspace.rememberProject,
+    rememberSession: widget.workspace.rememberSession,
+    sessionFor: widget.workspace.sessionFor,
+    autosaveInterval:
+        Duration(minutes: widget.workspace.autosave.intervalMins),
+    autosaveKeep: widget.workspace.autosave.keep,
   );
+
+  @override
+  void initState() {
+    super.initState();
+    app.addListener(_manageExportPoll);
+    // Autosave only means anything with an engine to save through — and the
+    // guard keeps bridge-less widget tests free of pending timers.
+    if (widget.bridge != null) app.startAutosave();
+  }
   bool settingsOpen = false;
   bool paletteOpen = false;
   bool splashDone = false;
   final ValueNotifier<Panel?> activePanel = ValueNotifier(null);
   final FocusNode _rootFocus = FocusNode(debugLabel: 'lumit-shell');
 
+  /// The ~4 Hz export-progress poll: alive only while an export runs, driven by
+  /// app-state notifications (a running export → start the timer; idle → stop).
+  Timer? _exportPoll;
+
   Workspace get ws => widget.workspace;
+
+  /// Keep the poll timer's lifetime tied to whether an export is running.
+  void _manageExportPoll() {
+    if (app.exportRunning && _exportPoll == null) {
+      _exportPoll = Timer.periodic(
+          const Duration(milliseconds: 250), (_) => app.exportPollTick());
+    } else if (!app.exportRunning && _exportPoll != null) {
+      _exportPoll!.cancel();
+      _exportPoll = null;
+    }
+  }
+
+  /// Open the export dialogue (bridge present) or keep the F0 notice — shared by
+  /// the menu bar and the command palette's Export command.
+  void _openExport() {
+    if (app.bridge == null) {
+      app.engine('Export comp');
+      return;
+    }
+    showExportDialog(context, app,
+        preset: ws.export.defaultPreset,
+        template: ws.export.filenameTemplate ?? '');
+  }
 
   @override
   void dispose() {
+    _exportPoll?.cancel();
+    app.removeListener(_manageExportPoll);
     activePanel.dispose();
     _rootFocus.dispose();
     super.dispose();
@@ -122,7 +168,11 @@ class _ShellBodyState extends State<_ShellBody> {
     } else if (ctrl && shift && key == LogicalKeyboardKey.keyP) {
       setState(() => paletteOpen = true);
     } else if (ctrl && key == LogicalKeyboardKey.keyD) {
-      if (app.selectedLayer != null) app.engine('Duplicate layer');
+      final compId = app.frontCompIdResolved;
+      final layerId = app.selectedLayer;
+      if (compId != null && layerId != null) {
+        app.duplicateLayer(compId, layerId);
+      }
     } else if (shift && key == LogicalKeyboardKey.f3) {
       app.toggleGraphMode();
     } else if (key == LogicalKeyboardKey.space) {
@@ -146,7 +196,15 @@ class _ShellBodyState extends State<_ShellBody> {
       app.workAreaOutAtPlayhead();
     } else if (key == LogicalKeyboardKey.delete ||
         key == LogicalKeyboardKey.backspace) {
-      app.engine('Delete selected keyframes or layer');
+      // Selected lane keyframes are handled inside the timeline's own focus
+      // scope; here the selected layer goes (the egui fallback order).
+      final compId = app.frontCompIdResolved;
+      final layerId = app.selectedLayer;
+      if (compId != null && layerId != null) {
+        app.deleteLayer(compId, layerId);
+      } else {
+        handled = false;
+      }
     } else if (key == LogicalKeyboardKey.equal ||
         key == LogicalKeyboardKey.add) {
       app.zoomTimeline(1.4);
@@ -155,22 +213,31 @@ class _ShellBodyState extends State<_ShellBody> {
     } else if (key == LogicalKeyboardKey.backslash) {
       app.zoomTimelineFit();
     } else if (key == LogicalKeyboardKey.bracketLeft) {
-      if (app.selectedLayer != null) {
-        app.engine(
-            alt ? 'Trim layer in to playhead' : 'Move layer in to playhead');
+      final compId = app.frontCompIdResolved;
+      final layerId = app.selectedLayer;
+      if (compId != null && layerId != null) {
+        app.editLayerSpan(
+            compId, layerId, alt ? 'trim_in' : 'move_in', app.previewFrame);
       } else {
         handled = false;
       }
     } else if (key == LogicalKeyboardKey.bracketRight) {
-      if (app.selectedLayer != null) {
-        app.engine(
-            alt ? 'Trim layer out to playhead' : 'Move layer out to playhead');
+      final compId = app.frontCompIdResolved;
+      final layerId = app.selectedLayer;
+      if (compId != null && layerId != null) {
+        app.editLayerSpan(
+            compId, layerId, alt ? 'trim_out' : 'move_out', app.previewFrame);
       } else {
         handled = false;
       }
     } else if (event.character == '*') {
       // Layout-independent, like the egui text-event read.
-      app.engine('Add marker at playhead');
+      final compId = app.frontCompIdResolved;
+      if (compId != null) {
+        app.addMarker(compId, app.previewFrame);
+      } else {
+        handled = false;
+      }
     } else {
       handled = false;
     }
@@ -222,6 +289,7 @@ class _ShellBodyState extends State<_ShellBody> {
                   paletteOpen = false;
                   settingsOpen = true;
                 }),
+                openExport: _openExport,
               ),
               onClose: () => setState(() => paletteOpen = false),
             ),
@@ -258,6 +326,17 @@ class _StatusLine extends StatelessWidget {
               Text(app.errorNotice!, style: t.small.copyWith(color: t.error))
             else if (app.notice != null)
               Text(app.notice!, style: t.small),
+            if (app.exportStatusText != null) ...[
+              const SizedBox(width: 12),
+              Text(app.exportStatusText!,
+                  style: t.small.copyWith(color: t.accent)),
+              const SizedBox(width: 6),
+              HouseButton(
+                small: true,
+                onPressed: app.cancelExport,
+                child: const Text('×'),
+              ),
+            ],
             const Spacer(),
             Text('Flutter frontend — phase F0', style: t.small),
           ],

@@ -890,8 +890,14 @@ class BridgeReply {
   final BridgeSnapshot? snapshot;
   final String? error;
 
-  const BridgeReply.ok(this.snapshot) : error = null;
-  const BridgeReply.err(this.error) : snapshot = null;
+  /// The segment-to-Rate fit's drift in seconds, when the reply carried one
+  /// (the →Rate op injects it as an additive top-level field).
+  final double? driftSeconds;
+
+  const BridgeReply.ok(this.snapshot, {this.driftSeconds}) : error = null;
+  const BridgeReply.err(this.error)
+      : snapshot = null,
+        driftSeconds = null;
 
   bool get ok => error == null;
 
@@ -909,7 +915,11 @@ class BridgeReply {
     }
     final map = decoded.cast<String, dynamic>();
     if (map['ok'] == true) {
-      return BridgeReply.ok(BridgeSnapshot.fromJson(map));
+      final drift = map['drift'];
+      return BridgeReply.ok(
+        BridgeSnapshot.fromJson(map),
+        driftSeconds: drift is num ? drift.toDouble() : null,
+      );
     }
     final err = map['error'];
     return BridgeReply.err(err is String ? err : 'bridge error');

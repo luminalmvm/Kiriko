@@ -35,6 +35,7 @@ List<PaletteCommand> paletteCommands({
   required AppStateStub app,
   required Workspace workspace,
   required VoidCallback openSettings,
+  VoidCallback? openExport,
 }) =>
     [
       PaletteCommand('Save project', app.save),
@@ -53,7 +54,10 @@ List<PaletteCommand> paletteCommands({
           'Add sequence layer', () => app.engine('Add sequence layer')),
       PaletteCommand('Add marker at playhead',
           () => app.engine('Add marker at playhead')),
-      PaletteCommand('Export comp…', () => app.engine('Export comp'),
+      // The dialogue when a bridge is present (wired by the shell); the F0
+      // notice otherwise, so the placeholder build behaves as before.
+      PaletteCommand('Export comp…',
+          openExport ?? () => app.engine('Export comp'),
           aliases: 'render output video mp4'),
       PaletteCommand('Reset workspace', workspace.resetWorkspaceLayout),
       PaletteCommand('Open Settings', openSettings),

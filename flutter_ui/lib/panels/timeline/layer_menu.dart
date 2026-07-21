@@ -11,12 +11,16 @@ import 'package:flutter/widgets.dart';
 import '../../bridge/bridge.dart';
 import '../../state/app_state.dart';
 import '../../widgets/controls.dart';
+import 'columns.dart';
 
 /// The actions the layer menu can raise.
 enum _LayerMenuAction {
   rename,
   addEffect,
   addMask,
+  blendMode,
+  matte,
+  parent,
   duplicate,
   delete,
   solo,
@@ -24,6 +28,14 @@ enum _LayerMenuAction {
   motionBlur,
   convert,
 }
+
+/// The starter mask shapes the "Add mask" submenu offers (egui menu.rs) — the
+/// [kind] string is what `addMask` takes.
+const List<(String label, String kind)> _maskShapes = [
+  ('Rectangle', 'rectangle'),
+  ('Ellipse', 'ellipse'),
+  ('Star', 'star'),
+];
 
 /// Show the layer context menu at [position] (global) and run the chosen action
 /// against [app]. Mirrors the egui item set; unimplemented entries speak through
@@ -54,7 +66,20 @@ Future<void> showLayerContextMenu({
           ),
           MenuRow(
             onPressed: () => close(_LayerMenuAction.addMask),
-            child: const Text('Add mask'),
+            child: const _MenuSubmenuLabel('Add mask'),
+          ),
+          const _MenuDivider(),
+          MenuRow(
+            onPressed: () => close(_LayerMenuAction.blendMode),
+            child: const _MenuSubmenuLabel('Blend mode'),
+          ),
+          MenuRow(
+            onPressed: () => close(_LayerMenuAction.matte),
+            child: const _MenuSubmenuLabel('Matte'),
+          ),
+          MenuRow(
+            onPressed: () => close(_LayerMenuAction.parent),
+            child: const _MenuSubmenuLabel('Parent'),
           ),
           const _MenuDivider(),
           MenuRow(
@@ -93,6 +118,8 @@ Future<void> showLayerContextMenu({
     ),
   );
   if (action == null) return;
+  // The context menu has closed; the picker submenus open at the same anchor.
+  if (!context.mounted) return;
   switch (action) {
     case _LayerMenuAction.duplicate:
       app.duplicateLayer(compId, layer.id);
@@ -105,15 +132,59 @@ Future<void> showLayerContextMenu({
     case _LayerMenuAction.motionBlur:
       app.setLayerSwitch(
           compId, layer.id, 'motion_blur', !layer.switches.motionBlur);
+    case _LayerMenuAction.addMask:
+      await _showMaskShapeMenu(
+          context: context, app: app, compId: compId, layer: layer,
+          position: position);
+    case _LayerMenuAction.blendMode:
+      await showBlendModePicker(
+          context: context, app: app, compId: compId, layer: layer,
+          position: position);
+    case _LayerMenuAction.matte:
+      await showMattePicker(
+          context: context, app: app, compId: compId, layer: layer,
+          position: position);
+    case _LayerMenuAction.parent:
+      await showParentPicker(
+          context: context, app: app, compId: compId, layer: layer,
+          position: position);
     case _LayerMenuAction.rename:
       app.engine('Rename layer');
     case _LayerMenuAction.addEffect:
       app.engine('Add effect');
-    case _LayerMenuAction.addMask:
-      app.engine('Add mask');
     case _LayerMenuAction.convert:
       app.engine('Convert to sequenced layer');
   }
+}
+
+/// The "Add mask" submenu: Rectangle / Ellipse / Star, each committing a
+/// starter mask through `addMask` (the egui menu.rs shape set).
+Future<void> _showMaskShapeMenu({
+  required BuildContext context,
+  required AppStateStub app,
+  required String compId,
+  required BridgeLayer layer,
+  required Offset position,
+}) async {
+  final kind = await showLumitPopup<String>(
+    context: context,
+    position: position,
+    builder: (close) => FloatSurface(
+      width: 160,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final shape in _maskShapes)
+            MenuRow(
+              onPressed: () => close(shape.$2),
+              child: Text(shape.$1),
+            ),
+        ],
+      ),
+    ),
+  );
+  if (kind != null) app.addMask(compId, layer.id, kind);
 }
 
 class _MenuDivider extends StatelessWidget {
@@ -124,6 +195,25 @@ class _MenuDivider extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
       child: Container(height: 1, color: t.hairline),
+    );
+  }
+}
+
+/// A menu label with a trailing chevron marking a submenu (the picker opens on
+/// click at the same anchor — the house pattern keeps the family of choices in
+/// one place rather than scattered).
+class _MenuSubmenuLabel extends StatelessWidget {
+  final String label;
+  const _MenuSubmenuLabel(this.label);
+  @override
+  Widget build(BuildContext context) {
+    final t = ThemeScope.of(context).theme;
+    return Row(
+      children: [
+        Expanded(child: Text(label)),
+        const SizedBox(width: 12),
+        Text('›', style: t.small.copyWith(color: t.textMuted)),
+      ],
     );
   }
 }

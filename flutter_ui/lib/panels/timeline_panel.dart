@@ -16,6 +16,7 @@ import '../icons/icons.dart';
 import '../state/app_state.dart';
 import '../widgets/controls.dart';
 import 'timeline/comp_tabs.dart';
+import 'timeline/graph_editor.dart';
 import 'timeline/group_header.dart';
 import 'timeline/lane_host.dart';
 import 'timeline/lane_scale.dart';
@@ -278,28 +279,41 @@ class _TimelineBodyState extends State<_TimelineBody>
                     ],
                   ),
                 ),
+                // The lane area: the graph editor when the graph lens is on,
+                // else the scrolling layer rows. The ruler above and the pan
+                // scrollbar below stay put, and the graph shares this `scale`.
                 Expanded(
-                  child: Listener(
-                    onPointerSignal: (e) {
-                      if (e is! PointerScrollEvent || !scale.canPan) return;
-                      final shift = HardwareKeyboard.instance.isShiftPressed;
-                      final dx = e.scrollDelta.dx != 0
-                          ? e.scrollDelta.dx
-                          : (shift ? e.scrollDelta.dy : 0);
-                      if (dx == 0) return;
-                      _pan(dx / scale.pxPerFrame, widget.comp.frameCount,
-                          app.timelineZoom);
-                    },
-                    child: SingleChildScrollView(
-                      child: Column(
-                        children: [
-                          for (var i = 0; i < layers.length; i++)
-                            ..._layerBlock(layers[i], i, outlineW.toDouble(),
-                                scale, fps, markers),
-                        ],
-                      ),
-                    ),
-                  ),
+                  child: app.timelineGraphMode
+                      ? GraphEditor(
+                          app: app,
+                          comp: widget.comp,
+                          compId: widget.compId,
+                          scale: scale,
+                        )
+                      : Listener(
+                          onPointerSignal: (e) {
+                            if (e is! PointerScrollEvent || !scale.canPan) {
+                              return;
+                            }
+                            final shift =
+                                HardwareKeyboard.instance.isShiftPressed;
+                            final dx = e.scrollDelta.dx != 0
+                                ? e.scrollDelta.dx
+                                : (shift ? e.scrollDelta.dy : 0);
+                            if (dx == 0) return;
+                            _pan(dx / scale.pxPerFrame,
+                                widget.comp.frameCount, app.timelineZoom);
+                          },
+                          child: SingleChildScrollView(
+                            child: Column(
+                              children: [
+                                for (var i = 0; i < layers.length; i++)
+                                  ..._layerBlock(layers[i], i,
+                                      outlineW.toDouble(), scale, fps, markers),
+                              ],
+                            ),
+                          ),
+                        ),
                 ),
                 if (scale.canPan)
                   _PanScrollbar(
@@ -671,6 +685,15 @@ class _BottomBar extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 6),
       child: Row(
         children: [
+          // The leading cluster scrolls horizontally rather than overflowing
+          // when the panel is narrow, so adding the motion-blur master never
+          // clips the graph toggle off the end.
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
           HouseButton(
             frameless: true,
             small: true,
@@ -708,7 +731,12 @@ class _BottomBar extends StatelessWidget {
               ),
             ),
           ),
-          const Spacer(),
+          const SizedBox(width: 8),
+          _MotionBlurMaster(app: app),
+                ],
+              ),
+            ),
+          ),
           LumitTooltip(
             message: 'Graph editor (Shift+F3)',
             child: HouseButton(
@@ -723,6 +751,45 @@ class _BottomBar extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The composition motion-blur master (T9/T22): the comp-wide enable that the
+/// per-layer motion-blur switches need. egui puts this in the Timeline's top
+/// row; that strip is shared here, so — as the port allows — it sits in the
+/// bottom bar for now (INTEGRATOR: move it up to the top row alongside the
+/// search box once that row is owned in one place). Toggling flips only the
+/// master enable, preserving the comp's shutter angle/phase/samples.
+class _MotionBlurMaster extends StatelessWidget {
+  final AppStateStub app;
+  const _MotionBlurMaster({required this.app});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ThemeScope.of(context).theme;
+    final comp = app.frontComp;
+    final compId = app.frontCompIdResolved;
+    if (comp == null || compId == null) return const SizedBox.shrink();
+    // Older engines carry no master read-back; default to sensible shutter
+    // values so the first enable is well-formed (180° / 0° / 16 samples).
+    final mb = comp.motionBlur ??
+        const BridgeMotionBlur(
+            enabled: false, angle: 180, phase: 0, samples: 16);
+    return LumitTooltip(
+      message: 'Composition motion blur (master)',
+      child: HouseButton(
+        key: const ValueKey('mb-master'),
+        frameless: true,
+        small: true,
+        onPressed: () => app.setMotionBlur(
+            compId, !mb.enabled, mb.angle, mb.phase, mb.samples),
+        child: lumitIcon(
+          LumitIcon.motionBlur,
+          size: 13,
+          color: mb.enabled ? t.accent : t.textMuted,
+        ),
       ),
     );
   }

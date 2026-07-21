@@ -2462,3 +2462,40 @@ egui frontend commits, one undoable step, and the reply is the whole document as
 text so the panels just re-read it. Nothing engine-side is needed to remember
 which comps are open or where the playhead sits — that is the frontend's own
 state — so restoring a session stays a Dart concern.
+
+**The Retime graph, in the timeline.** Turning on the graph lens swaps the
+timeline's lane area for a curve of the selected clip's *speed* over time: each
+straight or eased ramp is drawn from its start speed to its end speed, a bent
+(mapped) segment shows the speed its curve implies, and the join points between
+segments sit as vertical lines you can drag left or right; a small row up top
+lets you ease the ramp under the playhead (Lin/Slow/Fast/Smth/Shrp) or flatten a
+curved segment to a plain rate, and every number the curve needs to be drawn is
+worked out by a small, separately tested piece of plain maths so the picture is
+never guesswork.
+
+**Exporting a video (the dialogue and the queue).** Choosing File → Export opens
+a small settings window where you pick a delivery preset (which fills in the
+codec, size, bitrate and a suggested file name for you), adjust anything you
+like, choose where to save, and press Export; if one export is already running
+the new one simply lines up behind it and starts the moment the first finishes,
+one at a time, with the status line at the bottom showing the frame count as it
+goes and a × to cancel. The "share" shortcuts (Discord 50 MB / Small 10 MB) skip
+the dialogue and work the bitrate out from the size you are aiming for, using the
+same tested piece of plain maths the desktop app uses.
+
+**Reaching the last columns, and the app remembering where you were.** The
+right-click menu on a layer now does the real work for its blend mode, its matte
+and its parent, and for dropping a starter mask (rectangle, ellipse or star) —
+the desktop app packs these into narrow dropdowns across a wide row, but the
+Flutter panel's layer column is too slim for that, so they live in the menu
+instead, each opening a small picker; the composition's motion-blur master
+switch sits on the timeline's bottom bar for now. The Composition-settings and
+New-composition windows now apply for real (editing an existing comp fills the
+boxes from it and commits the whole set as one undoable change; creating one
+makes the comp and then applies its size, rate and duration). Two conveniences
+mirror the desktop app: the interface now **remembers each project's session** —
+which comps were open, where the playhead sat and which layer was picked, saved
+per project file and restored when you reopen it — and it **autosaves** a
+rotating copy beside the project every few minutes while you have unsaved
+changes, in an `autosaves` folder next to the file, never touching the file
+itself (three copies are kept, oldest dropped first).

@@ -74,9 +74,27 @@ where the row is logic).
 - ◐ Project panel live: item tree + type icons (footage/folder/composition/
   solid) with layer-colour tints and nesting, empty-document hint, hover fill.
   Not yet: thumbnails, relink, missing badge, selection/drag
-- ☐ Session restore *within* a project (open comps, playhead, selection) — the
-  per-project session the egui shell restores on open; F1 restores only which
-  project file reopens, not its saved session
+- ☑ Session restore *within* a project (open comps, playhead, selection) — the
+  Flutter counterpart of the egui shell's `SavedSession`, keyed by project path
+  in `Workspace.sessions` (persisted beside `lastProjectPath` in the workspace
+  JSON). `AppStateStub` persists it on change (front-comp / selection / playhead
+  seams, via the additive `rememberSession` seam) and re-applies it after a
+  project opens/reopens (`sessionFor` → `_applySessionFor`, each id validated
+  against the fresh document so a stale comp/layer id falls back to the default,
+  never a crash) — round-trip + re-apply + stale-fallback tested. INTEGRATOR:
+  the shell wires `rememberSession`/`sessionFor` at `AppStateStub` construction
+  (one-line each, alongside the existing `rememberProject`).
+- ☑ Autosave: a periodic rotating copy beside the project mirroring
+  `lumit_project::autosave` — `autosaves/<stem>.autosave-N.lum`, N = 1 newest,
+  keep-N rotation (`AutosaveScheme`, pure + tested). `AppStateStub.autosaveTick`
+  writes through `bridge.saveProject(slot1)` only when the document is dirty and
+  has a path (silent, like egui), never touching the main file; `startAutosave`
+  drives it on a Timer (opt-in so tests own no pending timers). KNOWN BRIDGE GAP:
+  `saveProject` re-points the engine's loaded path to the written file, so
+  autosaving via it drifts the path; a dedicated `lumit_bridge_autosave` op
+  (writing without re-pointing, like the Rust `autosave`) is needed for full
+  correctness. INTEGRATOR: call `app.startAutosave()` once a bridge is live and
+  point `autosaveInterval`/`autosaveKeep` at Settings → General.
 
 ## Phase F2 — Viewer (in progress)
 
@@ -230,7 +248,13 @@ where the row is logic).
   note below), drag the 6 px edge handles to trim (`trim_in`/`trim_out`);
   snapping rounds drags to whole seconds and marker frames — widget-tested
 - ☑ Bottom bar: zoom − / + / Fit + percentage readout, magnet snap toggle, graph
-  lens toggle (kept from the F0 skeleton, zoom readout corrected to `zoom×100`)
+  lens toggle (kept from the F0 skeleton, zoom readout corrected to `zoom×100`).
+  Wave 3 adds the **composition motion-blur master** here (`_MotionBlurMaster`,
+  toggling `setMotionBlur` while preserving the shutter angle/phase/samples). The
+  egui frontend puts it in the Timeline top row; that strip is shared, so it sits
+  in the bottom bar for now — INTEGRATOR to move it up once the top row is owned
+  in one place. The leading cluster scrolls horizontally so it never overflows a
+  narrow panel — widget-tested
 - ☑ Outline twirls + Transform property rows (wave 2): each layer row gains a
   disclosure twirl; open reveals a Transform group header and one 22 px row per
   transform property (Anchor point, Position, Scale, Rotation, Opacity — x/y
@@ -251,18 +275,54 @@ where the row is logic).
   `setWorkAreaEdge`. B/N gain additive `workAreaInAtPlayhead`/`workAreaOutAtPlayhead`
   helpers on `AppStateStub` (the shell's B/N handlers still need repointing to
   these — see the deviation note) — geometry unit-tested + edge-drag widget-tested
-- ☑ Layer context menu (wave 2): right-click a layer row → Duplicate (Ctrl+D),
-  Delete and the Solo/Enabled/Motion-blur switch toggles wired to the real ops;
-  the entries the Flutter frontend hasn't grown yet (Rename, Add effect/mask,
-  Convert) route to `app.engine(...)` honestly — widget-tested
+- ☑ Layer context menu (wave 2 + wave 3): right-click a layer row → Duplicate
+  (Ctrl+D), Delete and the Solo/Enabled/Motion-blur switch toggles wired to the
+  real ops. Wave 3 adds the last-columns pickers and the mask shapes: **Add
+  mask** ▸ Rectangle/Ellipse/Star (→ `addMask`), **Blend mode** ▸ the
+  `listBlendModes` registry (→ `setBlendMode`), **Matte** ▸ None / another
+  layer / Luma / Inverted (→ `setMatte`), **Parent** ▸ None / a non-cycling
+  layer (→ `setParent`). egui shows blend/matte/parent as inline outline
+  dropdowns in a wide row; the Flutter outline is narrow and column-degraded, so
+  — taking the option the port allows — they live in the context menu instead
+  (`panels/timeline/columns.dart`, the pure `parentingWouldCycle` unit-tested).
+  Rename, Add effect and Convert still route to `app.engine(...)` honestly —
+  widget-tested
 - ☑ Layer search (wave 2): a search box in the outline header filters rows by
   case-insensitive name substring — unit-tested + widget-tested
 - ☑ Horizontal pan (wave 2): shift-wheel + a scrollbar when zoomed past fit,
   ruler and lanes locked through a session-persisted `viewStartFrame` on the
   `LaneScale` — clamp unit-tested
-- ☐ Remainder (still open): the graph lens, matte/blend/parent columns, the
-  top-row MB-master toggle, beat markers/cache bar, sequence sub-bars and the
-  overrun HOLD hatch, resizable outline column, keyframe copy/paste
+- ◐ Graph lens — the Retime **speed** lens (docs/04-RETIMING.md §9.2), ported
+  from `graph.rs::graph_plot_retime`: when the graph toggle is on the lane area
+  becomes the speed-over-time curve for the selected footage layer (`panels/
+  timeline/graph_editor.dart` + the pure `graph_maths.dart`; one switch in
+  `timeline_panel.dart`). Rate segments draw their native ease shape (v₀ →
+  v₁ along e(u), the five `Ease` profiles ported exactly), Map segments draw
+  their derived speed y′(u)/x′(u); the header carries the Retime enable toggle,
+  the Lin/Slow/Fast/Smth/Shrp ramp presets (stamping the segment under the
+  playhead via `setSegmentPreset`) and →Rate (`convertSegmentToRate`, surfacing
+  a conversion notice); boundaries draw as verticals, the interior ones
+  draggable (live curve preview, committing `dragBoundary` on release); 0%/100%
+  reference lines, a labelled y-grid, and the playhead with a speed readout,
+  all on the ruler's shared `LaneScale`. Unit-tested (ease shapes, sampling, the
+  map derivative, segment-at-frame, boundary hit-test/clamp) + widget-tested
+  (appears with the lens + a footage selection; preset click stamps the playhead
+  frame; →Rate surfaces the notice; boundary drag commits `dragBoundary`).
+  **Named remainder** (deliberately out of this slice — the egui graph editor's
+  own gaps or bridge-plumbing limits): the Retime **Time**/value (source-
+  position) lens and the transform value/speed graph (egui offers both, but the
+  bridge's graph ops are speed-lens only, so a non-footage or un-retimed
+  selection shows a calm hint rather than a value graph); the numeric **N ms
+  drift** figure on →Rate (the engine returns `drift` in the reply, but the typed
+  `BridgeReply`/`BridgeSnapshot` drop it — bridge.dart is out of scope — so the
+  notice reads "Converted to rate" without the millisecond figure); the RATE/MAP
+  **type chips** and ease-name label (§9.4), **kink badges** (§6.1) and overrun
+  **hatching** (§7.2), per-boundary/per-segment **numeric % / t·s entry** fields
+  (§9.3), the boundary-drag **beat/frame snapping**, the Vegas default-lens
+  preference, and speed-keyframe (plain-store) drag handles
+- ☐ Remainder (still open): matte/blend/parent columns, the top-row MB-master
+  toggle, beat markers/cache bar, sequence sub-bars and the overrun HOLD hatch,
+  resizable outline column, keyframe copy/paste
 
 ## Phase F4 — editors (in progress)
 
@@ -315,14 +375,17 @@ First slice (2026-07-21):
     stopwatch/navigator on effect params, parameter *ranges* (unclamped drag
     until the snapshot carries them), the eyedropper, effect reorder, and the
     per-linked-pair single-undo batch.
-- ◐ Comp settings: the composition-settings / new-composition dialogue in the
+- ☑ Comp settings: the composition-settings / new-composition dialogue in the
   Settings-window visual style (name, size, frame-rate preset dropdown,
   duration), shown through the app Overlay. `dialogs.dart`, wired from the
-  Composition menu, widget-tested. **UI real; the bridge op now exists (v0.3)**:
-  New composition commits the *name* through `app.newComposition`; the whole
-  Composition-settings apply can now route to `app.setCompSettings(comp, name, w,
-  h, fps_num, fps_den, duration_frames)` (one undo step) — a panel adoption still
-  to land, replacing the stubbed `app.engine(…)`.
+  Composition menu, widget-tested. **Both commit for real now**: editing seeds
+  the fields from the front comp and Apply commits the whole set through
+  `app.setCompSettings(comp, name, w, h, fps_num, fps_den, duration_frames)` as
+  one undo step (`fpsRational` maps the NTSC presets to their 1001 rationals).
+  New composition creates the comp through `app.newComposition`, then applies
+  size/rate/duration to it with `setCompSettings` as one visible flow (the
+  bridge's `newComposition` takes only a name) — the stubbed `app.engine(…)`
+  notice is gone.
 - ◐ Effects & presets: a search field over the built-in effect registry
   (`app.listEffects()`, label substring, case-insensitive) and the matching
   effects listed, applied to the selected layer of the front comp
@@ -335,8 +398,41 @@ First slice (2026-07-21):
   remainder: the `.lumfx` **preset save/load** (needs the file + preset bridge
   ops — a placeholder row at the bottom says exactly that), category grouping,
   and drag-onto-a-layer application.
-- ☐ Add mask ▸ Rectangle/Ellipse/Star: still routes to `app.engine` (mask ops
-  are not in the bridge); the submenu reads correctly.
+- ◐ Add mask ▸ Rectangle/Ellipse/Star: wired from the **layer context menu**
+  (`addMask`, wave 3); `AppStateStub.addMaskToSelected(kind)` exposes the
+  selected-layer path (quiet error when none). INTEGRATOR: repoint the
+  menu-bar / command-palette Add-mask entries (owned elsewhere) at
+  `addMaskToSelected` — that repoint is left for after the wave.
+- ☑ Export dialogue + queue + live progress: the Settings-window-style modal
+  (`export_dialog.dart`) — preset dropdown (stamps codec/size/bitrate/name via
+  `app.exportPreset`, the engine-side `ExportDialogState::apply` resolver), codec
+  dropdown, size (comp size when Custom, with a "Use comp size" reset), a Mbps
+  bitrate box (blank = encoder default; the 1.5× peak / preset-peak switch is
+  resolved engine-side off the preset name we send), include-audio checkbox, the
+  resolver's suggested file name, a Save-location picker (new
+  `pickExportSaveLocation` seam in `file_dialogs.dart`), and Queue/Export +
+  Cancel. Confirming calls `app.queueExport`; a Dart-side one-at-a-time queue
+  (`AppStateStub`, a `VecDeque` mirror of `export_actions.rs`) starts the next on
+  each done/failed. A shell `Timer` polls `app.exportPollTick` at ~4 Hz while one
+  runs; the status line reads `exporting {name} {frame}/{total} · {enc} · {n}
+  queued` with a × cancel, completion drops the quiet `exported {path} — encoded
+  with {enc}` notice and failures take the error tint (app_update.rs wording).
+  File → Export comp… / Export preset ▸ / the palette Export command open it;
+  Export for sharing ▸ Discord 50 MB / Small 10 MB run the K-037 share maths
+  (`shareExportBitRate`, a pure port of `start_share_export`) and start directly.
+  Widget + app-state tested (`export_test.dart`). Without a bridge every entry
+  keeps its F0 `engine` notice (pinned).
+  - **Known behavioural difference (honest):** egui's queue snapshots the whole
+    document at *queue* time (docs/06 §7.1); the bridge can only snapshot at
+    *start* time (`start_export` reads the store then), so a Dart queue item
+    holds the call arguments and the document is snapshotted when its turn comes
+    — a later document edit reaches a still-queued export where egui froze it.
+  - Named remainder: the share export's video peak (egui sets `max_rate: None`;
+    the bridge's custom-preset resolver applies the customary 1.5× peak to any
+    explicit bitrate, so a share export gains a VBR cap egui did not have), and
+    the share `has_audio` budget test is a snapshot approximation (any audible
+    footage layer whose source probed with audio) rather than the renderer's
+    exact `comp_audio_jobs`.
 
 ## Post-parity fixes (owner's known rough edges — do NOT fix during the port)
 

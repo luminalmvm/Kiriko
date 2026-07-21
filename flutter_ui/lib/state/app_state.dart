@@ -5,6 +5,9 @@
 // panel control can be wired now and re-pointed at the bridge in Phase F1
 // (docs/flutter-port/03-ARCHITECTURE.md).
 
+import 'dart:async';
+import 'dart:collection';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -12,6 +15,47 @@ import 'package:flutter/foundation.dart';
 import '../bridge/bridge.dart';
 import '../panels/preview_source.dart';
 import 'file_dialogs.dart';
+import 'workspace.dart';
+
+/// One pending export in the Dart-side queue — a `VecDeque` mirror of
+/// export_actions.rs. The egui side snapshots the whole document at QUEUE time;
+/// the bridge can only snapshot at START time, so a Dart queue item carries the
+/// call arguments and the document is snapshotted when the export actually
+/// begins (a recorded deviation, docs/06 §7.1 and 05-PARITY-CHECKLIST).
+class QueuedExport {
+  final String compId;
+  final String specJson;
+  final String outPath;
+
+  /// The file name shown in the status line while this export runs (the path's
+  /// last segment).
+  final String name;
+
+  const QueuedExport(this.compId, this.specJson, this.outPath, this.name);
+}
+
+/// The video bitrate (bits/second) a size-targeted share export uses (K-037) —
+/// a faithful port of `Shell::start_share_export`: the byte budget spread over
+/// the duration, with the audio track's share removed first and an 8%
+/// container/overhead headroom. Pure so it is unit-tested without a bridge.
+///
+/// [durationSeconds] is the export span in seconds (the work area when set,
+/// else the whole comp), floored at 0.1 s exactly as the egui `.max(0.1)`.
+/// A leaner 192 kbps AAC rate is subtracted when [hasAudio], because on a share
+/// export every audio bit comes out of the same budget. The result is floored
+/// at 100 kbps.
+int shareExportBitRate({
+  required double targetMb,
+  required double durationSeconds,
+  required bool hasAudio,
+}) {
+  const audioBitRate = 192000;
+  final duration = durationSeconds < 0.1 ? 0.1 : durationSeconds;
+  var bits = targetMb * 1000000.0 * 8.0 * 0.92;
+  if (hasAudio) bits -= audioBitRate * duration;
+  final bitRate = (bits / duration).toInt();
+  return bitRate < 100000 ? 100000 : bitRate;
+}
 
 /// One entry in the stub's action log — what a real engine call would have
 /// been. The status line surfaces the latest as a notice, so clicking through
@@ -49,21 +93,51 @@ class AppStateStub extends ChangeNotifier {
   final Future<String?> Function() saveLocationPicker;
   final Future<List<String>> Function() footagePicker;
 
+  /// The export Save-location seam (suggested name → chosen path, or null when
+  /// cancelled), defaulting to the real file_selector call. Tests inject their
+  /// own so the export dialogue and share exports never touch a plugin channel.
+  final Future<String?> Function(String suggestedName) exportSaveLocationPicker;
+
   /// Called with the file a project was opened from or saved to, so the
   /// workspace can restore it next launch (wired to `Workspace.rememberProject`
   /// by the shell; null in tests that do not care).
   final void Function(String path)? rememberProject;
+
+  /// Persist the per-project session (open comps, front comp, playhead,
+  /// selection) for a project path — wired to `Workspace.rememberSession` by
+  /// the shell; null leaves session state session-only.
+  final void Function(String path, SavedSession session)? rememberSession;
+
+  /// Read a stored session for a project path (wired to `Workspace.sessionFor`
+  /// by the shell), applied after a project opens. Null means no restore.
+  final SavedSession? Function(String path)? sessionFor;
+
+  /// The autosave interval — how often [autosaveTick] writes a rotating copy
+  /// when the document is dirty. Defaults to the egui `AUTOSAVE_INTERVAL_SECS`
+  /// (5 min). The shell points this at Settings → General.
+  Duration autosaveInterval;
+
+  /// How many rotating autosaves to keep (egui `AUTOSAVE_KEEP`); the oldest
+  /// falls off. The shell points this at Settings → General.
+  int autosaveKeep;
 
   AppStateStub({
     this.bridge,
     Future<String?> Function()? openProjectPicker,
     Future<String?> Function()? saveLocationPicker,
     Future<List<String>> Function()? footagePicker,
+    Future<String?> Function(String suggestedName)? exportSaveLocationPicker,
     this.rememberProject,
+    this.rememberSession,
+    this.sessionFor,
+    this.autosaveInterval = const Duration(minutes: 5),
+    this.autosaveKeep = 3,
     String? lastProjectPath,
   })  : openProjectPicker = openProjectPicker ?? pickProjectToOpen,
         saveLocationPicker = saveLocationPicker ?? pickProjectSaveLocation,
-        footagePicker = footagePicker ?? pickFootage {
+        footagePicker = footagePicker ?? pickFootage,
+        exportSaveLocationPicker =
+            exportSaveLocationPicker ?? pickExportSaveLocation {
     // A live bridge means a live document from the first frame: pull the
     // initial snapshot so the Project panel is populated immediately.
     if (bridge != null) {
@@ -86,6 +160,7 @@ class AppStateStub extends ChangeNotifier {
     final reply = bridge!.openProject(path);
     if (reply.ok) {
       _adoptSnapshot(reply.snapshot);
+      _applySessionFor(path);
       notice = 'Project reopened';
     } else {
       notice = 'the last project could not be reopened';
@@ -150,12 +225,14 @@ class AppStateStub extends ChangeNotifier {
   void stepFrame(int delta) {
     if (playing) playing = false;
     previewFrame = (previewFrame + delta).clamp(0, previewFrameCount);
+    _persistSession();
     notifyListeners();
   }
 
   void goToFrame(int frame) {
     if (playing) playing = false;
     previewFrame = frame.clamp(0, previewFrameCount);
+    _persistSession();
     notifyListeners();
   }
 
@@ -199,6 +276,7 @@ class AppStateStub extends ChangeNotifier {
   void selectLayer(String? id) {
     if (selectedLayer == id) return;
     selectedLayer = id;
+    _persistSession();
     notifyListeners();
   }
 
@@ -256,14 +334,20 @@ class AppStateStub extends ChangeNotifier {
     if (snapshot?.path != null) {
       final reply = bridge!.saveProject('');
       _applyReply(reply, 'Project saved');
-      if (reply.ok && snapshot?.path != null) rememberProject?.call(snapshot!.path!);
+      if (reply.ok) {
+        _dirtySinceSave = false;
+        if (snapshot?.path != null) rememberProject?.call(snapshot!.path!);
+      }
       return;
     }
     final path = await saveLocationPicker();
     if (path == null) return; // cancelled — leave the status line as-is
     final reply = bridge!.saveProject(path);
     _applyReply(reply, 'Project saved');
-    if (reply.ok) rememberProject?.call(snapshot?.path ?? path);
+    if (reply.ok) {
+      _dirtySinceSave = false;
+      rememberProject?.call(snapshot?.path ?? path);
+    }
   }
 
   Future<void> openProject() async {
@@ -275,7 +359,11 @@ class AppStateStub extends ChangeNotifier {
     if (path == null) return; // cancelled — leave the status line as-is
     final reply = bridge!.openProject(path);
     _applyReply(reply, 'Project opened');
-    if (reply.ok) rememberProject?.call(path);
+    if (reply.ok) {
+      _dirtySinceSave = false;
+      _applySessionFor(path);
+      rememberProject?.call(path);
+    }
   }
 
   Future<void> importFootage() async {
@@ -367,6 +455,7 @@ class AppStateStub extends ChangeNotifier {
     frontCompId = id;
     previewFrameCount = frontComp?.frameCount ?? previewFrameCount;
     previewFrame = previewFrame.clamp(0, previewFrameCount);
+    _persistSession();
     notifyListeners();
   }
 
@@ -558,6 +647,31 @@ class AppStateStub extends ChangeNotifier {
   void segmentToRate(String compId, String layerId, int frame) =>
       _bridgeOp((b) => b.segmentToRate(compId, layerId, frame));
 
+  /// →Rate on the Retime segment under [frame], surfacing the fit outcome as a
+  /// calm status notice the way the egui speed lens does (docs/04-RETIMING.md
+  /// §5.2). The engine reports a fit `drift` in its reply, but the typed
+  /// [BridgeReply]/[BridgeSnapshot] do not carry that field (it is dropped in
+  /// the bridge's snapshot decode, out of this slice's scope), so we post the
+  /// clean-fit confirmation without the millisecond figure — the numeric drift
+  /// badge stays a named remainder in the parity checklist.
+  void convertSegmentToRate(String compId, String layerId, int frame) {
+    final b = bridge;
+    if (b == null) return;
+    final reply = b.segmentToRate(compId, layerId, frame);
+    if (reply.ok) {
+      _adoptSnapshot(reply.snapshot);
+      // The egui wording: the fit drift surfaces as a quiet notice.
+      final drift = reply.driftSeconds;
+      notice = drift == null
+          ? 'Converted to rate'
+          : 'fitted, ${(drift * 1000).round()} ms drift';
+      errorNotice = null;
+    } else {
+      errorNotice = reply.error;
+    }
+    notifyListeners();
+  }
+
   /// Move the value-lens Retime boundary at [index] to comp [frame].
   void dragBoundary(String compId, String layerId, int index, int frame) =>
       _bridgeOp((b) => b.dragBoundary(compId, layerId, index, frame));
@@ -589,6 +703,20 @@ class AppStateStub extends ChangeNotifier {
   /// Add a starter mask shape (`rectangle`/`ellipse`/`star`) to a layer.
   void addMask(String compId, String layerId, String kind) =>
       _bridgeOp((b) => b.addMask(compId, layerId, kind));
+
+  /// Add a starter mask shape to the currently selected layer of the front
+  /// comp (the menu-bar / palette Add-mask path). A quiet error when there is
+  /// no selected layer (or no front comp) — never a crash.
+  void addMaskToSelected(String kind) {
+    final compId = frontCompIdResolved;
+    final layerId = selectedLayer;
+    if (compId == null || layerId == null) {
+      errorNotice = 'select a layer to add a mask';
+      notifyListeners();
+      return;
+    }
+    addMask(compId, layerId, kind);
+  }
 
   // --- Bridge v0.4 export -------------------------------------------------
 
@@ -622,6 +750,216 @@ class AppStateStub extends ChangeNotifier {
   void cancelExport() {
     bridge?.exportCancel();
     notifyListeners();
+  }
+
+  // --- Export queue + live progress (F4, export_actions.rs + app_update.rs) --
+  //
+  // A Dart-side one-at-a-time queue: confirming an export while one runs
+  // enqueues it, and each completion (done/failed) starts the next. A shell
+  // Timer drives [exportPollTick] at ~4 Hz while one runs; the status line
+  // reads [exportStatusText]. Everything degrades to a quiet no-op without a
+  // bridge (the menu/palette keep their F0 `engine` notices instead).
+
+  final Queue<QueuedExport> _exportQueue = Queue<QueuedExport>();
+
+  /// The running export's file name (the status-line label), or null when idle.
+  String? exportName;
+
+  /// The encoder the ladder settled on, once a running poll reports it — kept
+  /// so the quiet completion notice can name it (the `done` poll carries no
+  /// encoder, exactly as the egui `export_encoder` outlives the Progress
+  /// events).
+  String? exportEncoder;
+
+  /// The running export's progress counters (0/0 until the first poll).
+  int exportFrame = 0;
+  int exportTotal = 0;
+
+  /// Whether an export is in flight (drives the poll timer and the status line).
+  bool get exportRunning => exportName != null;
+
+  /// How many exports wait behind the running one.
+  int get exportQueueLength => _exportQueue.length;
+
+  /// The status-line export readout while one runs (null when idle) — the exact
+  /// wording of app_update.rs: `exporting {name} {frame}/{total}`, with the
+  /// encoder and queued-count suffixes.
+  String? get exportStatusText {
+    final name = exportName;
+    if (name == null) return null;
+    var line = 'exporting $name $exportFrame/$exportTotal';
+    final enc = exportEncoder;
+    if (enc != null) line += ' · $enc';
+    if (_exportQueue.isNotEmpty) line += ' · ${_exportQueue.length} queued';
+    return line;
+  }
+
+  /// Queue one export (the dialogue's confirm, or a share export). It starts
+  /// immediately when nothing is running; otherwise it waits its turn
+  /// (export_actions.rs `enqueue_export` + `try_start_next_export`).
+  void queueExport(String compId, String specJson, String outPath) {
+    _exportQueue.add(QueuedExport(compId, specJson, outPath, _fileName(outPath)));
+    _tryStartNextExport();
+  }
+
+  /// Start the next queued export when none is running (a no-op otherwise).
+  void _tryStartNextExport() {
+    if (exportRunning || _exportQueue.isEmpty) return;
+    final next = _exportQueue.first;
+    // We only reach here idle, so a failure is a genuine start error (a bad
+    // comp, no GPU) rather than "already running"; startExport has set the
+    // error tint. Drop the item either way so the queue can never wedge.
+    final reply = startExport(next.compId, next.specJson, next.outPath);
+    _exportQueue.removeFirst();
+    if (reply.ok) {
+      exportName = next.name;
+      exportEncoder = null;
+      exportFrame = 0;
+      exportTotal = 0;
+      // Deliberately leave `errorNotice` alone: starting the next export must
+      // not wipe the tint from an export that just failed (egui's
+      // `try_start_next_export` never clears the error).
+      notifyListeners();
+    }
+  }
+
+  /// One poll tick — a shell Timer drives this at ~4 Hz while an export runs.
+  /// Reads the bridge's export state, updates the status-line readout, and on a
+  /// terminal state posts the quiet completion notice or the error tint with
+  /// app_update.rs's exact wording, then starts the next queued export.
+  void exportPollTick() {
+    if (!exportRunning) return;
+    final s = pollExport();
+    switch (s.state) {
+      case 'running':
+        exportFrame = s.frame;
+        exportTotal = s.total;
+        if (s.encoder != null) exportEncoder = s.encoder;
+        notifyListeners();
+      case 'done':
+        // A completed export is a quiet notice, not an error (docs/15 §10).
+        final enc = exportEncoder;
+        final withEnc = enc != null ? ' — encoded with $enc' : '';
+        notice = 'exported ${s.path ?? ''}$withEnc';
+        errorNotice = null;
+        _clearExportSession();
+        _tryStartNextExport();
+        notifyListeners();
+      case 'failed':
+        errorNotice = 'export: ${s.error ?? 'failed'}';
+        _clearExportSession();
+        _tryStartNextExport();
+        notifyListeners();
+      default:
+        // 'idle' while we believed one was running — treat as finished quietly.
+        _clearExportSession();
+        _tryStartNextExport();
+        notifyListeners();
+    }
+  }
+
+  void _clearExportSession() {
+    exportName = null;
+    exportEncoder = null;
+    exportFrame = 0;
+    exportTotal = 0;
+  }
+
+  /// The last path segment of [path] (its file name), for the status line.
+  static String _fileName(String path) {
+    final parts = path.split(RegExp(r'[/\\]'));
+    for (final part in parts.reversed) {
+      if (part.isNotEmpty) return part;
+    }
+    return 'export';
+  }
+
+  /// Start a size-targeted share export (K-037): resolve the front comp, size
+  /// the video bitrate to [targetMb] via [shareExportBitRate], ask where to
+  /// save, then queue it directly — no settings dialogue, exactly as
+  /// `Shell::start_share_export` does. A quiet no-op without a bridge (the menu
+  /// keeps its F0 notice for that build).
+  Future<void> startShareExport(double targetMb) async {
+    if (bridge == null) return;
+    final comp = frontComp;
+    final compId = frontCompIdResolved;
+    if (comp == null || compId == null) {
+      errorNotice = 'select a composition to export';
+      notifyListeners();
+      return;
+    }
+    final bitRate = shareExportBitRate(
+      targetMb: targetMb,
+      durationSeconds: _compDurationSeconds(comp),
+      hasAudio: _compHasAudio(comp),
+    );
+    final suggested = 'share-${targetMb.toInt()}mb.mp4';
+    final path = await exportSaveLocationPicker(suggested);
+    if (path == null) return; // cancelled — leave the status line as-is
+    // The bridge's spec resolver takes Mbps (blank = default quality); a share
+    // export always pins an explicit bitrate. The comp's own size and the
+    // leaner share AAC rate ride the spec too.
+    final specJson = jsonEncode({
+      'preset': 'custom',
+      'codec': 'h264',
+      'size': [comp.width, comp.height],
+      'bitrate_mbps': (bitRate / 1000000.0).toString(),
+      'include_audio': true,
+      'audio_bit_rate': 192000,
+    });
+    queueExport(compId, specJson, path);
+  }
+
+  /// The export span in seconds — the work area when set, else the whole comp
+  /// (a faithful mirror of `start_share_export`'s `duration`, before its
+  /// 0.1 s floor, which [shareExportBitRate] applies).
+  double _compDurationSeconds(BridgeComp comp) {
+    final fps = comp.fps.fps;
+    if (fps <= 0) return 0;
+    final wa = comp.workArea;
+    final frames =
+        wa != null ? (wa[1] - wa[0]).toDouble() : comp.frameCount.toDouble();
+    return frames / fps;
+  }
+
+  /// A best-effort read of whether [comp] carries audio: any audible footage
+  /// layer whose source item probed with an audio track. The egui side asks the
+  /// renderer for the comp's audio jobs; the snapshot cannot reproduce that
+  /// exactly, so this approximates it (noted in the checklist).
+  bool _compHasAudio(BridgeComp comp) {
+    final snap = snapshot;
+    if (snap == null) return false;
+    for (final layer in comp.layers) {
+      if (!layer.switches.audible) continue;
+      final srcId = layer.sourceItemId;
+      if (srcId == null) continue;
+      if (_findItem(snap, srcId)?.media?.audio == true) return true;
+    }
+    return false;
+  }
+
+  /// Find a project item by its id across the snapshot tree, or null.
+  BridgeItem? _findItem(BridgeSnapshot snap, String id) {
+    BridgeItem? search(List<BridgeItem> items) {
+      for (final item in items) {
+        if (item.id == id) return item;
+        final nested = search(item.children);
+        if (nested != null) return nested;
+      }
+      return null;
+    }
+
+    return search(snap.items);
+  }
+
+  /// The front composition's display name (the `{comp}` filename token), or an
+  /// empty string when there is no composition — for the export dialogue.
+  String get frontCompName {
+    final id = frontCompIdResolved;
+    for (final c in compositions) {
+      if (c.id == id) return c.name;
+    }
+    return '';
   }
 
   /// Run [op] against the bridge (a quiet no-op without one), applying its
@@ -677,6 +1015,9 @@ class AppStateStub extends ChangeNotifier {
     if (reply.ok) {
       _adoptSnapshot(reply.snapshot);
       errorNotice = null;
+      // A successful direct edit dirties the document — the autosave gate (like
+      // egui's `dirty`) so an idle session never writes rotating copies.
+      _dirtySinceSave = true;
     } else {
       errorNotice = reply.error;
     }
@@ -709,5 +1050,131 @@ class AppStateStub extends ChangeNotifier {
       errorNotice = reply.error;
     }
     notifyListeners();
+  }
+
+  // --- Per-project session (SavedSession parity) --------------------------
+  //
+  // The Flutter counterpart of the egui shell's `SavedSession`: which comps are
+  // open, which is fronted, where the playhead sits, and which layer is
+  // selected — persisted per project path and restored when it reopens. All
+  // additive: without the [rememberSession]/[sessionFor] seams wired (the shell
+  // points them at the Workspace), the app behaves exactly as before.
+
+  /// The session as it stands right now, for the front project.
+  SavedSession currentSession() => SavedSession(
+        openComps: List<String>.from(openComps),
+        activeComp: frontCompIdResolved,
+        frame: previewFrame,
+        selectedLayer: selectedLayer,
+      );
+
+  /// Persist the current session against the loaded project path, if one is
+  /// known and the seam is wired. A quiet no-op otherwise.
+  void _persistSession() {
+    final path = snapshot?.path;
+    if (path == null) return;
+    rememberSession?.call(path, currentSession());
+  }
+
+  /// Apply the stored session for [path] after its project opens: front the
+  /// saved comp, restore the playhead and the selection — each validated
+  /// against the freshly-loaded document so a stale id falls back to the
+  /// default rather than crashing.
+  void _applySessionFor(String path) {
+    final read = sessionFor;
+    if (read == null) return;
+    final session = read(path);
+    if (session == null) return;
+    final comps = compositions;
+    // Restore the open-comp list to the ids that still exist.
+    openComps
+      ..clear()
+      ..addAll([
+        for (final id in session.openComps)
+          if (comps.any((c) => c.id == id)) id,
+      ]);
+    // Front the saved comp when it still resolves.
+    final active = session.activeComp;
+    if (active != null && comps.any((c) => c.id == active)) {
+      frontCompId = active;
+      previewFrameCount = frontComp?.frameCount ?? previewFrameCount;
+    }
+    // Restore the playhead, clamped into the (possibly changed) range.
+    previewFrame = session.frame.clamp(0, previewFrameCount);
+    // Restore the selection only if that layer is still present.
+    final sel = session.selectedLayer;
+    selectedLayer =
+        (sel != null && snapshot != null && _findLayer(snapshot!, sel) != null)
+            ? sel
+            : null;
+  }
+
+  // --- Autosave (lumit_project::autosave parity) --------------------------
+  //
+  // A periodic rotating copy beside the project (`autosaves/<stem>.autosave-N.
+  // lum`), written only when the document is dirty and has a path — the main
+  // file is never touched. The timer is opt-in ([startAutosave]); tests drive
+  // [autosaveTick] with an injected clock instead.
+
+  bool _dirtySinceSave = false;
+  DateTime _lastAutosave = DateTime.now();
+  Timer? _autosaveTimer;
+
+  /// Whether an autosave would write now (dirty, a bridge, and a saved path).
+  bool get autosaveEligible =>
+      _dirtySinceSave && bridge != null && snapshot?.path != null;
+
+  /// Start the periodic autosave driver: every [checkEvery] it asks
+  /// [autosaveTick] whether a write is due. Idempotent — a running timer is
+  /// replaced. The shell calls this once a bridge is live; tests need not.
+  void startAutosave({Duration checkEvery = const Duration(seconds: 30)}) {
+    _autosaveTimer?.cancel();
+    _lastAutosave = DateTime.now();
+    _autosaveTimer =
+        Timer.periodic(checkEvery, (_) => autosaveTick(DateTime.now()));
+  }
+
+  /// Stop the periodic autosave driver (no-op when none runs).
+  void stopAutosave() {
+    _autosaveTimer?.cancel();
+    _autosaveTimer = null;
+  }
+
+  /// One autosave check at [now]: writes a rotating copy when the interval has
+  /// elapsed and the document is dirty. The seam a timer (or a test clock)
+  /// drives. Returns true when a copy was written.
+  bool autosaveTick(DateTime now) {
+    if (!autosaveEligible) return false;
+    if (now.difference(_lastAutosave) < autosaveInterval) return false;
+    _lastAutosave = now;
+    return _writeAutosave();
+  }
+
+  /// Write one rotating autosave copy now, regardless of the interval (used by
+  /// [autosaveTick] and available to a manual "save a copy" path). Rotates the
+  /// `autosaves/` folder then writes the newest slot through the bridge; the
+  /// reply is deliberately NOT adopted, so the held snapshot keeps pointing at
+  /// the real project path.
+  bool _writeAutosave() {
+    final b = bridge;
+    final path = snapshot?.path;
+    if (b == null || path == null) return false;
+    final slot1 = AutosaveScheme.rotateAndNewestSlot(path, autosaveKeep);
+    final reply = b.saveProject(slot1);
+    if (reply.ok) {
+      // Autosave is silent in the egui frontend (no status-line notice), so
+      // nothing is surfaced here beyond clearing the dirty gate.
+      _dirtySinceSave = false;
+      return true;
+    }
+    errorNotice = reply.error;
+    notifyListeners();
+    return false;
+  }
+
+  @override
+  void dispose() {
+    _autosaveTimer?.cancel();
+    super.dispose();
   }
 }
