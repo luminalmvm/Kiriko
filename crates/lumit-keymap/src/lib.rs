@@ -331,6 +331,11 @@ pub fn default_keymap() -> Keymap {
         row(Global, "B", "workarea.set.start"),
         row(Global, "N", "workarea.set.end"),
         row(Global, "*", "marker.add"),
+        // Delete-removes-the-selection was missing from the §15 table
+        // entirely (TF-6, first outside tester): keyframes when any are
+        // selected, else the selected layer. Backspace is its usual sibling.
+        row(Global, "Delete", "edit.delete.selection"),
+        row(Global, "Backspace", "edit.delete.selection"),
         row(Global, "Mod+Shift+P", "palette.open"),
         row(Global, "Mod+M", "export.queue.add"),
         row(Global, "Mod+K", "comp.settings"),

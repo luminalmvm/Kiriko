@@ -768,6 +768,7 @@ navigation moves to `,`/`.`; Viewer zoom therefore lives on `Ctrl+=`/`Ctrl+-` an
 | Global | `Ctrl+,` / `Ctrl+.` | Previous / next edit point or layer boundary |
 | Global | `B` / `N` | Set work area start / end at playhead |
 | Global | `*` (numpad or `Shift+8`) | Add marker at playhead (`8` during playback: beat tap, §10) |
+| Global | `Delete` / `Backspace` | Delete the selection — keyframes when any are selected, else the layer (TF-6) |
 | Global | `Ctrl+Shift+P` | Command palette |
 | Global | `Ctrl+M` | Add active comp to export queue |
 | Global | `Ctrl+K` | Composition settings |

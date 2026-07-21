@@ -468,8 +468,16 @@ graph, where these are wired in; the shortcuts group goes first (owner: users de
 hotkeys, and their absence makes testing feel clunky).
 
 ## Usability
-- [ ] TF-6 Delete key deletes the selection — layers and keyframes both.
-- [ ] TF-7 A hotkey inserts a marker at the playhead, and works during playback.
+- [x] TF-6 Delete key deletes the selection — layers and keyframes both. Done: Delete and
+  Backspace (Global, added to the §15 table — the spec had no delete binding at all) remove
+  the selected keyframes when any are selected (lane or graph selection, linked pairs carry
+  their partner, one Batch/undo; a property losing its last key goes Static at its playhead
+  value), else the selected layer. Focus-gated, so it can never fire from a value field —
+  the concern that had kept the key unbound.
+- [x] TF-7 A hotkey inserts a marker at the playhead, and works during playback. Done: `*`
+  per the §15 table — read from the text events (the asterisk never arrives as a key event:
+  it is Shift+8 or numpad-multiply depending on layout), so it is layout-independent; it
+  only commits a marker, so the transport never pauses.
 - [ ] TF-8 (owner) **The full shortcut pass**: bind everything — including actions not yet
   implemented where sensible — or document precisely which 07 §15 bindings are not wired
   yet; must be thorough. With it, **start the first-run onboarding screen**: a settings-like

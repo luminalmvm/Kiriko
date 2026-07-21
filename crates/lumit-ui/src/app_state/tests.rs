@@ -277,6 +277,84 @@ fn duplicate_layer_makes_a_fresh_copy_above_the_original_and_undoes() {
     assert_eq!(app.store.snapshot().comp(comp_id).unwrap().layers.len(), 1);
 }
 
+/// TF-6 (the Delete key's keyframe half): deleting the lane selection removes
+/// exactly those keys, one undo step; removing a property's last key leaves it
+/// static at its playhead value, never `Keyframed(vec![])`.
+#[test]
+fn delete_selected_keyframes_removes_keys_then_goes_static() {
+    use lumit_core::anim::{Animation, Keyframe, SideInterp};
+    use lumit_core::model::TransformProp;
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+    app.add_solid_layer();
+    let comp_id = app.selected_comp.unwrap();
+    let layer = app.store.snapshot().comp(comp_id).unwrap().layers[0].id;
+    let key = |t: i64, v: f64| Keyframe {
+        time: lumit_core::Rational::new(t, 1).unwrap(),
+        value: v,
+        interp_in: SideInterp::Linear,
+        interp_out: SideInterp::Linear,
+    };
+    app.commit(Op::SetTransformProperty {
+        comp: comp_id,
+        layer,
+        prop: TransformProp::Opacity,
+        animation: Animation::Keyframed(vec![key(0, 100.0), key(2, 40.0)]),
+    });
+    let sel = |t: i64| super::LaneKeySel {
+        layer,
+        row: super::PropRow::Transform(TransformProp::Opacity),
+        time: lumit_core::Rational::new(t, 1).unwrap(),
+    };
+
+    // Delete one of the two keys.
+    app.lane_selection = vec![sel(2)];
+    assert!(app.delete_selected_keyframes(), "one key deleted");
+    let opacity = |app: &AppState| {
+        app.store.snapshot().comp(comp_id).unwrap().layers[0]
+            .transform
+            .opacity
+            .clone()
+    };
+    match opacity(&app).animation {
+        Animation::Keyframed(keys) => {
+            assert_eq!(keys.len(), 1, "only the selected key went");
+            assert_eq!(keys[0].value, 100.0);
+        }
+        Animation::Static(_) => panic!("one key must remain keyframed"),
+    }
+    assert!(
+        app.lane_selection.is_empty(),
+        "selection cleared — keys gone"
+    );
+
+    // Delete the last key: static at the playhead value (frame 0 → 100).
+    app.preview_frame = 0;
+    app.lane_selection = vec![sel(0)];
+    assert!(app.delete_selected_keyframes());
+    match opacity(&app).animation {
+        Animation::Static(v) => assert_eq!(v, 100.0, "static at the playhead value"),
+        Animation::Keyframed(_) => panic!("last key removed must leave a Static, never []"),
+    }
+
+    // Nothing selected: reports false so the Delete key can fall through to
+    // the layer.
+    assert!(!app.delete_selected_keyframes());
+
+    // Each delete was one undo step.
+    app.undo();
+    assert!(matches!(
+        opacity(&app).animation,
+        Animation::Keyframed(ref k) if k.len() == 1
+    ));
+    app.undo();
+    assert!(matches!(
+        opacity(&app).animation,
+        Animation::Keyframed(ref k) if k.len() == 2
+    ));
+}
+
 #[test]
 fn delete_selected_layer_removes_it_and_undoes() {
     let mut app = AppState::default();

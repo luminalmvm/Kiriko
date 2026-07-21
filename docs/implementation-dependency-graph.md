@@ -289,7 +289,7 @@ flowchart TD
     TOOLTIPKEYS["Tooltip shortcut text (07 §13.2)"]
     MACMENU["macOS native menu ↔ keymap sync (07 §15)"]
     RAZORD["Decision: razor-on-C semantics —<br/>click-tool vs playhead cut (07 §4.4)"]
-    KEYSNOW["Tester round 2 quick wins (TF-6/7): Delete removes the<br/>selection (layers AND keyframes); a marker key that<br/>works during playback"]
+    KEYSNOW["✅ Tester round 2 quick wins (TF-6/7): Delete/Backspace remove<br/>the selection — keyframes first (lane or graph, linked pairs,<br/>one undo; last key → Static), else the layer; `*` drops a marker,<br/>during playback too (read from text events, layout-independent)"]
     KEYFULL["The FULL binding pass (TF-8, owner): every 07 §15 action<br/>bound or explicitly documented as not-yet-wired —<br/>must be thorough; wires lumit-keymap through the app"]
     VEGASKEYS["Vegas keymap preset table (owner) —<br/>joins the shipped AE preset in lumit-keymap"]
     ONBOARD["First-run onboarding modal (TF-8, owner): settings-style,<br/>expandable later; v1 = pick AE or Vegas bindings + a note<br/>they can be changed later. Supersedes K-006's post-v1<br/>stance — log the K-decision when it lands"]
