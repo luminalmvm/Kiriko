@@ -140,7 +140,8 @@ impl AppState {
         let mut visited = vec![comp_id];
         self.collect_comp_jobs(&doc, comp, t, &mut jobs, &mut visited);
         self.fill_in_flight = Some((comp_id, frame));
-        self.preview_engine.request_comp(comp_id, frame, jobs);
+        self.preview_engine
+            .request_comp(comp_id, frame, jobs, self.media_epoch);
     }
 
     /// The next work-area frame worth filling (forward-biased from the
@@ -317,7 +318,6 @@ impl AppState {
 
     #[cfg(feature = "media")]
     pub fn refresh_comp_preview(&mut self) {
-        use lumit_core::model::LayerKind;
         let Some(comp_id) = self.preview_comp else {
             return;
         };
@@ -351,12 +351,8 @@ impl AppState {
         let mut jobs = Vec::new();
         let mut visited = vec![comp_id];
         self.collect_comp_jobs(&doc, comp, t, &mut jobs, &mut visited);
-        let _ = LayerKind::Footage {
-            item: Uuid::now_v7(),
-            retime: None,
-        }; // keep the import used in both cfg modes
         self.preview_engine
-            .request_comp(comp_id, self.preview_frame, jobs);
+            .request_comp(comp_id, self.preview_frame, jobs, self.media_epoch);
     }
 
     /// Decode target width for a source of `natural_w` px under the current
@@ -694,12 +690,28 @@ impl AppState {
     /// The frame key describes the *document*, so it cannot tell those apart:
     /// a frame rendered while a file's state was still unknown, then banked
     /// once it became known, is filed under a key that promises different
-    /// pixels. That is what left a missing-footage comp showing the slate
-    /// until the playhead moved and then an empty frame for ever after — the
-    /// slate's key is the same on every frame, so one bad entry answered them
-    /// all. Probes land rarely (open, import, relink), and mostly before much
-    /// is cached, so dropping the lot is cheap and leaves nothing to reason
-    /// about.
+    /// pixels. That is what left a missing-footage comp showing the slate on
+    /// the frame you were sitting on and black on every other — the frames
+    /// either side had already been banked empty by the background fill.
+    ///
+    /// This clears what is *banked*; it cannot touch what is still in flight,
+    /// so it is only half the guard. [`AppState::media_epoch`] is the other
+    /// half, and the two are always bumped together. Probes land rarely
+    /// (open, import, relink), and mostly before much is cached, so dropping
+    /// the lot is cheap and leaves nothing to reason about.
+    /// Whether a comp frame that finished rendering may still be used, given
+    /// the [`media_epoch`](AppState::media_epoch) it was rendered under.
+    ///
+    /// False means a probe landed while it was in flight, so it drew a source
+    /// whose state was still unknown — an empty layer where there is now a
+    /// slate. Such a frame must be neither shown nor banked: the key it would
+    /// be filed under is computed from the *current* document and promises
+    /// the picture the render never drew.
+    #[cfg(feature = "media")]
+    pub fn accepts_comp_frame(&self, media_epoch: u64) -> bool {
+        media_epoch == self.media_epoch
+    }
+
     #[cfg(feature = "media")]
     pub fn invalidate_rendered_frames(&mut self) {
         self.comp_frame_cache.clear();

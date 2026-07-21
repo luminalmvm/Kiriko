@@ -1589,6 +1589,79 @@ fn a_landing_probe_discards_frames_rendered_before_it() {
     assert!(app.cache_epoch > epoch, "the cache bar re-reads");
 }
 
+/// TF-40 take three, and the one that was actually wrong. Clearing the frame
+/// cache when a probe lands (above) throws away what is *banked*; it cannot
+/// touch what is still *in flight*. The background fill had already queued
+/// renders of the frames either side of the playhead while the footage's
+/// state was unknown, so those renders drew nothing for that layer — and when
+/// they finished, a moment after the probe, they were banked under keys
+/// computed from the new state, keys that promise a slate. The result was
+/// exactly what the owner saw and what two rounds of inference missed: colour
+/// bars on the frame you were sitting on, black on every frame you moved to,
+/// served from cache without rendering anything (the trace read `CACHED` with
+/// no render behind it).
+///
+/// So a landing probe must move the epoch, and a frame stamped with an older
+/// one must be refused.
+#[cfg(feature = "media")]
+#[test]
+fn a_frame_rendered_before_a_probe_landed_is_refused_when_it_finishes() {
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+
+    let before = app.media_epoch;
+    assert!(
+        app.accepts_comp_frame(before),
+        "a frame rendered under the live epoch is fine"
+    );
+
+    // What a landing probe does (see the `media.poll()` handler).
+    app.media_epoch += 1;
+    app.invalidate_rendered_frames();
+
+    assert!(
+        !app.accepts_comp_frame(before),
+        "a render that started before the probe landed drew the layer as          nothing; banking it would file black pixels under the slate's key"
+    );
+    assert!(
+        app.accepts_comp_frame(app.media_epoch),
+        "renders started after it are the ones we want"
+    );
+}
+
+/// The epoch is only a guard if it survives the trip through the worker, so
+/// this drives the real preview engine rather than trusting the field.
+#[cfg(feature = "media")]
+#[test]
+fn a_comp_frame_comes_back_stamped_with_the_epoch_it_was_asked_for() {
+    let app = AppState::default();
+    let comp = Uuid::now_v7();
+    app.preview_engine.request_comp(comp, 0, Vec::new(), 7);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match app.preview_engine.results.try_recv() {
+            Ok(Ok(crate::app_state::preview::PreviewResult::Comp(cf))) => {
+                assert_eq!(cf.comp, comp);
+                assert_eq!(
+                    cf.media_epoch, 7,
+                    "the epoch must ride along with the frame — the receiver                      has nothing else to judge staleness by"
+                );
+                return;
+            }
+            Ok(_) => continue,
+            Err(_) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the preview engine never answered"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
 /// TF-40 take two, through the REAL open path: save a project whose footage
 /// then disappears, open it, and check the slate job survives a playhead move.
 /// The artificial version of this test passed while the app still failed, so

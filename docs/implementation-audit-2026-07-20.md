@@ -73,11 +73,18 @@ locally (fmt, clippy `-D warnings`, 638 + 64 GPU tests). Tracked as TF-1..4 / OD
   key describes the *document*, so it cannot distinguish "this file's state was still
   unknown when we drew this" from "we drew it knowing the file is missing". A frame rendered
   during the first and banked during the second is filed under a key promising different
-  pixels — and because a slate frame's key is time-invariant, one such entry poisoned every
-  frame of the comp. Fixed by tagging `CompFrame` with its request generation (stale results
-  are neither presented nor banked) and by dropping rendered frames when a probe lands.
-  Worth remembering when adding any future state that changes the picture without changing
-  the document.
+  pixels. Fixed with `AppState::media_epoch`: a landing probe bumps it, every comp request
+  is stamped with it, the finished `CompFrame` carries it back, and `accepts_comp_frame`
+  refuses anything older before it is shown or banked. Two lessons worth carrying, because
+  both cost a round of wrong inference. **(1) Clearing a cache does not stop what is already
+  in flight.** Dropping banked frames when the probe landed looked like a complete fix; the
+  background fill's queued renders landed a moment later and re-poisoned the cache that had
+  just been cleared. Any invalidation of derived state needs to answer for work in progress,
+  not only work completed. **(2) Measure before the third theory.** Two plausible causes
+  were argued from the code and both were wrong; a one-line trace in the Viewer settled it
+  in a single reading, and incidentally disproved a premise the earlier reasoning rested on
+  (a slate's frame key is *not* time-invariant). Worth remembering when adding any future
+  state that changes the picture without changing the document.
 - **Round 3 (owner re-test, OD-8/OD-9):** the GEN-4 sync's scoping hole — `sync_comp_audio`
   managed only the fronted comp, so an edit inside a fronted precomp stale-played the
   PARENT's loaded mix; it now also reconciles whichever comp's mix sits in the engine

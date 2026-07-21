@@ -92,14 +92,18 @@ pub struct CompLayerPixels {
 pub struct CompFrame {
     pub comp: Uuid,
     pub frame: usize,
-    /// The request generation this frame was rendered for. The receiver
-    /// compares it with the live generation and drops anything older: a
-    /// result computed before the document (or a media status) moved on
-    /// describes a picture that no longer exists, and banking it under a key
-    /// derived from the *current* state files the wrong pixels under the
-    /// right name — which is exactly how a missing-footage slate could be
-    /// replaced by an empty frame for the rest of the session.
-    pub generation: u64,
+    /// The media epoch this frame was rendered under — see
+    /// `AppState::media_epoch`. A render started before a probe landed drew a
+    /// layer whose state was still unknown (so it drew nothing); if its
+    /// result arrives afterwards it is banked under a key derived from the
+    /// *new* state, filing black pixels under the slate's name. Clearing the
+    /// cache when the probe lands cannot help — these frames are still in
+    /// flight at that moment — so the receiver drops them by epoch instead.
+    ///
+    /// Deliberately not the request generation: every request bumps that,
+    /// background fills included, so gating on it would let a fill supersede
+    /// a display render and the Viewer would stop updating.
+    pub media_epoch: u64,
     /// Top-of-stack first (document order); the renderer draws bottom-up.
     pub layers: Vec<CompLayerPixels>,
     /// Wall time this frame's layers took to decode on the worker thread — the
@@ -109,14 +113,6 @@ pub struct CompFrame {
     /// otherwise every frame would appear to cost one repaint (~16 ms) and the
     /// resolution would walk down even on comps that play fine at Full.
     pub render_cost: std::time::Duration,
-}
-
-impl PreviewEngine {
-    /// The newest request generation. A [`CompFrame`] carrying anything less
-    /// was superseded before it finished.
-    pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Relaxed)
-    }
 }
 
 pub enum PreviewResult {
@@ -137,6 +133,7 @@ enum Message {
         comp: Uuid,
         frame: usize,
         jobs: Vec<CompJob>,
+        media_epoch: u64,
     },
     /// Resize the decoded-frame cache (its slice of the one RAM budget,
     /// Settings → Performance). Applied immediately, never latest-wins-dropped.
@@ -194,7 +191,8 @@ impl Default for PreviewEngine {
                         comp,
                         frame,
                         jobs,
-                        generation,
+                        media_epoch,
+                        ..
                     } => decode_comp(
                         &mut decoders,
                         &mut frame_cache,
@@ -202,7 +200,7 @@ impl Default for PreviewEngine {
                         comp,
                         frame,
                         &jobs,
-                        generation,
+                        media_epoch,
                     )
                     .map(PreviewResult::Comp),
                     Message::SetCacheBudget(_) => continue, // handled above
@@ -323,12 +321,13 @@ impl PreviewEngine {
         let _ = self.tx.send(Message::SetCacheBudget(bytes));
     }
 
-    pub fn request_comp(&self, comp: Uuid, frame: usize, jobs: Vec<CompJob>) {
+    pub fn request_comp(&self, comp: Uuid, frame: usize, jobs: Vec<CompJob>, media_epoch: u64) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = self.tx.send(Message::Comp {
             generation,
             comp,
             frame,
+            media_epoch,
             jobs,
         });
     }
@@ -341,7 +340,7 @@ fn decode_comp(
     comp: Uuid,
     frame: usize,
     jobs: &[CompJob],
-    generation: u64,
+    media_epoch: u64,
 ) -> Result<CompFrame, String> {
     let decode_started = std::time::Instant::now();
     let mut layers = Vec::with_capacity(jobs.len());
@@ -463,7 +462,7 @@ fn decode_comp(
     Ok(CompFrame {
         comp,
         frame,
-        generation,
+        media_epoch,
         layers,
         render_cost: decode_started.elapsed(),
     })

@@ -840,6 +840,17 @@ pub struct AppState {
     /// right-click menu; combines with the search box rather than replacing
     /// it. A view preference, not project data.
     pub project_missing_only: bool,
+    /// Bumped whenever a media probe lands and changes what a source *is* —
+    /// notably footage turning out to be missing. A comp render started
+    /// before the bump drew that layer as nothing (its state was still
+    /// unknown); if the result arrives afterwards it must be thrown away
+    /// rather than banked, because the frame key it would be filed under now
+    /// describes a picture with a slate in it. Clearing the frame cache when
+    /// the probe lands is not enough on its own: the offending renders are
+    /// still in flight at that moment and would re-poison the cache the
+    /// instant they finish, which is precisely how a missing-footage comp
+    /// showed colour bars at the frame on screen and black everywhere else.
+    pub media_epoch: u64,
     /// Hide switched-off (invisible) layers from the outline (TL4): the top
     /// row's hide toggle declutters the list to just the live layers. The layers
     /// still render/exist — this is a view filter. Off by default.
@@ -1298,6 +1309,7 @@ impl Default for AppState {
             selected_items: Vec::new(),
             timeline_layer_search: String::new(),
             project_missing_only: false,
+            media_epoch: 0,
             timeline_hide_invisible: false,
             mask_drag: None,
             tool: ToolMode::default(),

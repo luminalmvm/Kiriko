@@ -1740,6 +1740,26 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   Lumit spends the spare moment decoding the next uncached frame a short way in front of the
   clock (about a dozen frames' lookahead). That's why the first pass over a cold section can
   stutter but the work-area loop settles into perfectly smooth playback once round.
+- **The cache has to know when a file's *identity* changed, not just the project.** Every
+  cached frame is filed under a "frame key" — a short fingerprint of everything that
+  decides what the picture looks like, worked out from the project. Ask for the same frame
+  again, get the same key, and Lumit can hand back the picture it already has instead of
+  re-rendering. That works because the project is the whole story… almost. Checking a file
+  is really on disk happens on a background thread, so for a moment after opening a project
+  Lumit genuinely does not know whether a clip exists, and draws that layer as nothing. The
+  project hasn't changed when the answer arrives — but the picture has: the layer now shows
+  colour bars. Same key, different picture, which is exactly the thing a cache must never
+  allow.
+  Throwing away the cached frames when the answer lands is half the fix, and the half that
+  isn't enough: the pre-cacher above has *already sent off* renders of the neighbouring
+  frames, and those come back a moment later, drawn without the colour bars, and get filed
+  under keys that now promise colour bars. That was a real bug — the missing-footage bars
+  showed on the frame you were sitting on and every other frame in the composition went
+  black. So Lumit keeps a counter, the *media epoch*, which ticks whenever an answer changes
+  what a file is. Every render request is stamped with the counter's value, the finished
+  frame carries the stamp home, and anything stamped with an old value is thrown away rather
+  than shown or filed. It is the render-queue equivalent of binning work that was started
+  from an out-of-date brief.
 - **Mask editing in the Viewer** — select a layer with masks and its outlines draw
   over the picture in clay, with a square handle on every vertex. Drag a handle and
   the outline follows your cursor live; let go and the pixels update — one undo step

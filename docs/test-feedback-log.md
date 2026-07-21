@@ -599,3 +599,25 @@ hotkeys, and their absence makes testing feel clunky).
   probe-thread flow in `a_reopened_project_with_missing_media_slates_at_every_frame`, which
   proves the comp path emits a slate job at every time, so the comp render was never the
   problem.
+  **Resolved — and neither theory above was the cause.** Two rounds of inference failed, so
+  the third measured: a temporary trace in the Viewer's corner reported what each frame
+  actually did. It read `f889 CACHED key…51b215 | got f889 lay1 draws1 fill0` on the good
+  frame and `f890 CACHED key…551b215` on the black one — *cached, with no render behind it*.
+  That settled two things at once. Frame keys are **not** time-invariant for a slate (they
+  differ per frame, so the "one bad entry answers every frame" story was wrong), and the
+  black frames were being served from the cache rather than rendered. Something had banked
+  black pixels under keys that promise a slate.
+  The something is the **background fill**. While the probe is in flight the fill is already
+  queueing renders of the frames around the playhead, and those renders draw the layer as
+  nothing. Clearing the cache when the probe lands throws away what is *banked* — it cannot
+  touch what is still *in flight*, and those results land a moment later and re-poison the
+  cache it just cleared. Hence colour bars on the frame you were sitting on (rendered live,
+  after the probe) and black on every frame you moved to.
+  Fixed with `AppState::media_epoch`: bumped whenever a landing probe changes what a source
+  *is*, stamped onto every comp request, carried back on the `CompFrame`, and checked by
+  `accepts_comp_frame` before the result is shown or banked (a refused fill also releases
+  its slot so filling resumes). Deliberately the media epoch and **not** the request
+  generation, for the reason (1) records. Regressions:
+  `a_frame_rendered_before_a_probe_landed_is_refused_when_it_finishes` and
+  `a_comp_frame_comes_back_stamped_with_the_epoch_it_was_asked_for`, the latter driving the
+  real preview engine and verified to fail when the stamp is dropped in transit.
