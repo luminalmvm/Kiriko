@@ -5,6 +5,7 @@
 // follows the cursor, the hovered pane shows a drop-zone preview, and release
 // commits the move through movePanel. Pop-out windows remain a checklist item.
 
+import 'package:flutter/rendering.dart' show RenderOffstage;
 import 'package:flutter/widgets.dart';
 
 import '../icons/icons.dart';
@@ -237,6 +238,11 @@ class _DragController extends ChangeNotifier {
       if (ctx == null) continue;
       final box = ctx.findRenderObject() as RenderBox?;
       if (box == null || !box.attached) continue;
+      // A hidden tab is built (to keep its panel state) but sits under an
+      // offstage ancestor. It still resolves a render object and would report
+      // a rect overlapping the visible pane, so skip it — only the on-stage
+      // pane is a valid drop target.
+      if (!_onStage(box)) continue;
       final rect = box.localToGlobal(Offset.zero) & box.size;
       if (rect.contains(pointer)) {
         hoveredPanel = entry.key;
@@ -244,6 +250,17 @@ class _DragController extends ChangeNotifier {
         return;
       }
     }
+  }
+
+  /// Whether [box] has no offstage ancestor — i.e. it is actually painted.
+  static bool _onStage(RenderObject box) {
+    RenderObject? node = box;
+    while (node != null) {
+      if (node is RenderOffstage && node.offstage) return false;
+      final parent = node.parent;
+      node = parent is RenderObject ? parent : null;
+    }
+    return true;
   }
 
   /// The inner ~50% of both axes is a stack; outside it, the nearest edge
@@ -511,18 +528,46 @@ class _TabGroup extends StatelessWidget {
             ],
           ),
         ),
+        // Every tab's body is built and kept alive, not just the active one:
+        // the inactive tabs sit offstage with their ticker paused, so their
+        // panel state (scroll offsets, twirl-downs) survives a tab switch, the
+        // way egui's memory persists a hidden tab. Only the active body paints
+        // or ticks; an offstage body still lays out on a rebuild but does no
+        // per-frame work, which matches egui.
         Expanded(
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              for (var i = 0; i < tabs.children.length; i++)
+                _paneBody(context, tabs.children[i].panel, i == tabs.active),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// One tab's body, wrapped identically whether shown or hidden so its State
+  /// is preserved across the flip. Keyed per panel so reordering the tabs never
+  /// cross-matches one panel's State onto another.
+  Widget _paneBody(BuildContext context, Panel panel, bool visible) {
+    return KeyedSubtree(
+      key: ValueKey(panel),
+      child: Offstage(
+        offstage: !visible,
+        child: TickerMode(
+          enabled: visible,
           child: _PaneChrome(
             bare: false,
-            panel: tabs.activePane.panel,
+            panel: panel,
             activePanel: activePanel,
             onPopOut: onPopOut,
             offerPopOut: false,
             drag: drag,
-            child: buildPanel(context, tabs.activePane.panel),
+            child: buildPanel(context, panel),
           ),
         ),
-      ],
+      ),
     );
   }
 }
@@ -673,15 +718,23 @@ class _PaneChrome extends StatelessWidget {
               boxShadow: round ? t.tokens.cardShadow : null,
             ),
             // The accent boundary paints over the content's edge, like the
-            // egui overlay stroke at Order::Middle.
-            foregroundDecoration: active == panel
-                ? BoxDecoration(
-                    border: Border.all(color: t.accent, width: 1),
-                    borderRadius: round
-                        ? BorderRadius.circular(t.tokens.cardRadius)
-                        : null,
-                  )
-                : null,
+            // egui overlay stroke at Order::Middle. It is ALWAYS supplied — an
+            // inactive pane wears a fully transparent border of the same width,
+            // so the composed widget chain (the internal DecoratedBox) keeps a
+            // constant shape across the active flip. A null-vs-non-null
+            // foregroundDecoration would add or remove a layer, forcing Flutter
+            // to discard the pane's Element subtree and rebuild it with fresh
+            // State — losing scroll offsets and the gesture recogniser the
+            // activating pointer-down had just armed (the first-click-drag bug).
+            foregroundDecoration: BoxDecoration(
+              border: Border.all(
+                color:
+                    active == panel ? t.accent : t.accent.withValues(alpha: 0),
+                width: 1,
+              ),
+              borderRadius:
+                  round ? BorderRadius.circular(t.tokens.cardRadius) : null,
+            ),
             padding: round ? EdgeInsets.all(t.tokens.cardPadding) : null,
             clipBehavior: round ? Clip.antiAlias : Clip.none,
             child: Stack(

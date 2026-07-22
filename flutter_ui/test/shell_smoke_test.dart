@@ -210,7 +210,12 @@ void main() {
     Iterable<Container> accentEdged() =>
         tester.widgetList<Container>(find.byType(Container)).where((c) {
       final fg = c.foregroundDecoration;
-      return fg is BoxDecoration && fg.border != null;
+      if (fg is! BoxDecoration) return false;
+      // Every pane now carries a foreground border so the composed tree shape
+      // stays constant across the active flip; only the active pane's border is
+      // painted (an opaque accent), the inactive ones are fully transparent.
+      final border = fg.border;
+      return border is Border && border.top.color.a > 0;
     });
     expect(accentEdged(), isEmpty);
 

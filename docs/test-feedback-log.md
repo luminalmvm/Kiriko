@@ -687,3 +687,30 @@ hotkeys, and their absence makes testing feel clunky).
   its probes), and `audio_playback_test.dart` (transport→audio calls with the right start
   seconds, scrub parks the clock, edit re-prepares, the tick chases a fake clock with the
   work-area wrap re-seeking, and the wall-clock fallback stays intact).
+
+- [x] **A panel's state reset whenever it flipped active or inactive.** Clicking a different
+  panel snapped a scrolled list (Effects & presets) back to the top, and the first click on a
+  drag target in an inactive panel (a timeline item, a `DragValueField` slider) did nothing —
+  only the second attempt dragged. Root cause was a `Container`-composition trap in
+  `dock_widget.dart`'s `_PaneChrome`: the pane body was wrapped in a `Container` whose
+  `foregroundDecoration` was `active ? BoxDecoration(...) : null`. `Container` composes its
+  internal widget chain conditionally, so a null-vs-non-null `foregroundDecoration` adds or
+  removes a `DecoratedBox` layer — the active flip changed the tree shape between the Container
+  and the pane body. Flutter could then no longer match the old subtree by position and type,
+  discarded the pane's Element subtree and rebuilt it with fresh State: scroll offsets gone,
+  and the gesture recogniser that the activating pointer-down had just armed gone with it (the
+  `Listener.onPointerDown` that sets the active panel is the very click that should have begun
+  the drag). Fixed by always supplying a `foregroundDecoration` and keeping the composed tree
+  shape constant: an inactive pane wears a fully transparent border of the same width
+  (`t.accent.withValues(alpha: 0)`, no hex), so nothing paints but the widget chain is
+  identical. A sibling parity gap rode along: `_TabGroup` built only the active tab's body, so
+  switching tabs discarded the hidden tab's state — where egui's memory persists it. It now
+  keeps every tab's body alive in a `Stack`, the inactive ones under `Offstage` +
+  `TickerMode(enabled: false)` (state preserved, no painting, no per-frame ticking), each body
+  keyed `ValueKey(panel)` so reordering tabs never cross-matches state; the drag hit-test
+  (`_DragController._resolve`) now skips panes under an offstage ancestor, so a hidden tab is
+  never a drop target. Regressions in `dock_panel_state_test.dart`, all verified to fail
+  without the fix: a bare pane flipped inactive keeps its State object and scroll offset; a
+  drag begun on an inactive pane takes effect on the first gesture; a tab group preserves a
+  hidden tab's scroll offset across a switch away and back. `shell_smoke_test.dart`'s
+  accent-edge probe now detects the painted (opaque) border rather than a non-null decoration.

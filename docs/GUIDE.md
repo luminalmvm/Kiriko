@@ -2314,6 +2314,29 @@ now genuinely renders a smaller picture rather than a full-size one relabelled:
 choosing Half asks the engine for half-resolution pixels, which are faster to
 draw and get their own place on the shelf.
 
+**Panels that keep their place.** A panel now remembers where it was scrolled to,
+which twirl-downs were open, and a drag you had half-begun — even as you click
+around between panels. This sounds obvious, but it took care to get right, and the
+reason is a quirk of how Flutter decides whether to keep a piece of the screen or
+throw it away and build it afresh. The clicked panel wears a thin accent outline so
+you can see which one the keyboard is talking to; the trouble was that Flutter was
+adding that outline by *changing the shape* of the panel's on-screen scaffolding —
+and whenever the scaffolding's shape changes, Flutter can no longer line the old
+version up against the new one, so it discards the whole panel and rebuilds it from
+scratch, losing everything it remembered. The very click that lit the outline was
+the click that wiped the panel's memory — which is why a scrolled list jumped back
+to the top when you clicked elsewhere, and why the *first* attempt to drag a slider
+in an unfocused panel did nothing (the click that focused it tore out the drag
+before it could take hold; only the second try worked). The fix is to give every
+panel that outline *all the time* and simply make it invisible (fully transparent)
+when the panel isn't the focused one — the shape never changes, so Flutter keeps
+the panel and its memory intact, and only the colour of the outline flickers
+between accent and clear. The same care now covers **tabs**: stack a few panels
+together and switch between their tabs, and the ones you flip away from stay exactly
+as you left them, rather than resetting each time — the hidden tabs are kept alive
+off to one side, doing no drawing and no per-frame work but holding their place,
+the way the old egui interface remembered them.
+
 **Where things are.** `docs/flutter-port/` holds the plan: `01` the strategy
 and phases, `02` an inventory of every surface the egui interface ships (the
 port's shopping list), `03` the bridge design, `04` a table mapping each egui
