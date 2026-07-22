@@ -30,6 +30,11 @@ class DockWidget extends StatefulWidget {
   /// Called when a pane's context menu asks to pop out into its own window.
   final void Function(Panel) onPopOut;
 
+  /// Whether [onPopOut] is offered for a panel — the pop-out button and the
+  /// bare-pane context-menu item are hidden when this returns false (the Viewer
+  /// and Timeline, and an already-floating panel). Defaults to always offered.
+  final bool Function(Panel)? canPopOut;
+
   const DockWidget({
     super.key,
     required this.root,
@@ -37,7 +42,10 @@ class DockWidget extends StatefulWidget {
     required this.onLayoutChanged,
     required this.activePanel,
     required this.onPopOut,
+    this.canPopOut,
   });
+
+  bool _canPopOut(Panel panel) => canPopOut?.call(panel) ?? true;
 
   @override
   State<DockWidget> createState() => _DockWidgetState();
@@ -97,6 +105,7 @@ class _DockWidgetState extends State<DockWidget> {
             panel: panel,
             activePanel: widget.activePanel,
             onPopOut: widget.onPopOut,
+            offerPopOut: widget._canPopOut(panel),
             drag: _drag,
             child: widget.buildPanel(context, panel),
           ),
@@ -105,6 +114,7 @@ class _DockWidgetState extends State<DockWidget> {
             buildPanel: widget.buildPanel,
             activePanel: widget.activePanel,
             onPopOut: widget.onPopOut,
+            canPopOut: widget._canPopOut,
             drag: _drag,
             onChanged: () {
               setState(() {});
@@ -436,6 +446,7 @@ class _TabGroup extends StatelessWidget {
   final VoidCallback onChanged;
   final ValueNotifier<Panel?> activePanel;
   final void Function(Panel) onPopOut;
+  final bool Function(Panel) canPopOut;
   final _DragController drag;
 
   const _TabGroup({
@@ -444,6 +455,7 @@ class _TabGroup extends StatelessWidget {
     required this.onChanged,
     required this.activePanel,
     required this.onPopOut,
+    required this.canPopOut,
     required this.drag,
   });
 
@@ -481,18 +493,21 @@ class _TabGroup extends StatelessWidget {
                   ),
                 ),
               ),
-              // The pop-out button for the active tab (top_bar_right_ui).
-              LumitTooltip(
-                message: 'Pop out into its own window',
-                child: HouseButton(
-                  frameless: true,
-                  small: true,
-                  onPressed: () => onPopOut(tabs.activePane.panel),
-                  child: lumitIcon(LumitIcon.popOut,
-                      size: 12, color: t.textMuted),
+              // The pop-out button for the active tab (top_bar_right_ui), shown
+              // only for panels a popout can host.
+              if (canPopOut(tabs.activePane.panel)) ...[
+                LumitTooltip(
+                  message: 'Pop out into its own window',
+                  child: HouseButton(
+                    frameless: true,
+                    small: true,
+                    onPressed: () => onPopOut(tabs.activePane.panel),
+                    child: lumitIcon(LumitIcon.popOut,
+                        size: 12, color: t.textMuted),
+                  ),
                 ),
-              ),
-              const SizedBox(width: 4),
+                const SizedBox(width: 4),
+              ],
             ],
           ),
         ),
@@ -502,6 +517,7 @@ class _TabGroup extends StatelessWidget {
             panel: tabs.activePane.panel,
             activePanel: activePanel,
             onPopOut: onPopOut,
+            offerPopOut: false,
             drag: drag,
             child: buildPanel(context, tabs.activePane.panel),
           ),
@@ -599,6 +615,11 @@ class _PaneChrome extends StatelessWidget {
   final Panel panel;
   final ValueNotifier<Panel?> activePanel;
   final void Function(Panel) onPopOut;
+
+  /// Whether this bare pane offers "pop out" in its context menu (hidden for
+  /// panels a popout cannot host). Ignored for a tabbed pane, which gets its
+  /// pop-out affordance from the tab bar's own button.
+  final bool offerPopOut;
   final _DragController drag;
   final Widget child;
 
@@ -607,6 +628,7 @@ class _PaneChrome extends StatelessWidget {
     required this.panel,
     required this.activePanel,
     required this.onPopOut,
+    required this.offerPopOut,
     required this.drag,
     required this.child,
   });
@@ -639,8 +661,9 @@ class _PaneChrome extends StatelessWidget {
         onPointerDown: (_) => activePanel.value = panel,
         child: GestureDetector(
           behavior: HitTestBehavior.translucent,
-          onSecondaryTapDown:
-              bare ? (d) => _contextMenu(context, d.globalPosition) : null,
+          onSecondaryTapDown: bare && offerPopOut
+              ? (d) => _contextMenu(context, d.globalPosition)
+              : null,
           child: Container(
             key: drag.paneKeys[panel],
             decoration: BoxDecoration(

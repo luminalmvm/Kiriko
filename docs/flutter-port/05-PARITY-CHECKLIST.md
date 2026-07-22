@@ -22,21 +22,36 @@ where the row is logic).
 - ☑ Dock: drag a tab / bare-pane grip to re-dock — model + interaction, unit-
   and widget-tested (movePanel/simplify with the every-panel-once invariant; a
   ghost pill, drop-zone previews and commit-on-release over both shapes)
-- ☑ Bare-pane affordances: right-click "Pop out into its own window" (surfaces
-  the multi-window notice for now); the corner drag grip built (2×3 dot grid,
-  drags the pane exactly like a tab)
-- ☐ Pop out a panel into its own OS window (multi-window) — **BLOCKED with
-  evidence (2026-07-22, section-E burn-down)**. The pinned SDK (stable 3.44.7)
-  ships multi-window only as an `@internal`, feature-flag-gated experimental
-  surface (`_window.dart`; `isWindowingEnabled` reads a build-time flag that is
-  off by default, `_features.dart`) whose own header says not to use it in
-  production and to switch to the main channel — using it would fail the
-  `flutter analyze` gate. The community `desktop_multi_window` route runs each
-  window in its own engine/isolate (a separate Dart heap), so it cannot host a
-  panel over the SAME app state (the F0 requirement). Kept as the graceful
-  notice (`shell/shell.dart` `onPopOut`), no real window opened, tests never
-  spawn one. Full evidence on 06 §E. Re-attempt when the official API lands
-  un-gated on stable (flutter/flutter#30701).
+- ☑ Bare-pane affordances: right-click "Pop out into its own window" (now opens
+  a real window for the hostable panels; hidden for the Viewer/Timeline); the
+  corner drag grip built (2×3 dot grid, drags the pane exactly like a tab)
+- ◑ Pop out a panel into its own OS window (multi-window) — **built behind
+  seams, pending on-machine verification (2026-07-22)**. The earlier block
+  (§E) rested on two findings; the second was wrong. The SDK finding stands: the
+  pinned stable SDK ships multi-window only as an `@internal`, flag-gated
+  surface that would fail `flutter analyze`, so its own API is not used. But the
+  community route was mis-read: `desktop_multi_window` (0.3.0, Apache-2.0) runs
+  each window as a second Flutter engine in the **same OS process** (engine-per-
+  window, verified against the package source + pub metadata), so a popout does
+  NOT need the main window's Dart heap — it opens its OWN `LumitBridge.tryLoad()`
+  handle, which reaches the SAME process-wide engine document behind the bridge
+  mutex (the identical fact `bridge.dart` already records for the render
+  isolate). Built: `lib/popout/` (arguments/theme snapshot, `PopoutAppState`
+  with an external-edit `resync`, `PopoutHost`, the window-opener seam +
+  `desktop_multi_window` impl, the sub-window entrypoint), wired at
+  `shell/shell.dart onPopOut` + `dock_widget.dart`, `main.dart` dispatch, and the
+  Windows runner sub-window plugin callback. Offered only for the read-mostly
+  panels a second engine can host honestly — Project, Hierarchy, Effect controls,
+  Effects & presets, Scopes; the Viewer and Timeline stay in-window (texture
+  registrar + playhead/transport are main-window concerns). Caveats: the popout
+  polls at ~2 Hz to see main-window edits, but the main window sees a popout's
+  edit only on its next interaction (no public resync on `AppStateStub`, which
+  this agent does not own — documented, not faked); window sizing/title is a
+  `window_manager` follow-up. The native plugin + `main.dart` dispatch + runner
+  callback compile only in a real `flutter build windows` (owner's machine); the
+  `flutter analyze`/`flutter test`/`pub get` gates could not be run in the
+  implementing environment (no Dart/Flutter toolchain) and await CI/owner. Full
+  evidence on 06 §E.
 - ☑ Menu bar: File / Edit / Composition / Window with the full shipped item set
   (engine-backed items dispatch to the stub state and surface a notice)
 - ☑ Status line: notices, error tint rule, export-progress slot
@@ -277,6 +292,53 @@ where the row is logic).
   pass-throughs + an `pollExport` timer seam wired
 - ☑ Session restore: nothing engine-side — open comps + playhead are Dart state,
   so `SavedSession` stays a frontend concern (confirmed)
+
+## Bridge v0.9 engine-surface close (done, 2026-07-22, ABI 9)
+
+The last engine-surface parity blockers, all *expose-what-exists* or a clean
+wire (no engine-model change): the model already held clips, marker kinds,
+`start_offset`, the text/solid/camera assets and the full `EffectKey` +
+parameter `Property` animations, and lumit-eval's `RealtimeController` was built
+and tested (K-171), only unwired.
+
+- ☑ Snapshot completions (additive): a Sequence layer's `clips` (ids, comp-frame
+  placement, source refs, the clip retime); a layer's `start_offset_frame`/
+  `start_offset_secs` + `in_secs`/`out_secs` (the overrun-hatch ingredients);
+  `marker_details` (`{frame, kind, confidence?, label, duration_frames?}` — the
+  model's `MarkerKind`, beat markers distinguishable); text content/size/fill,
+  solid size and camera zoom read-back; each effect's `EffectKey` namespace +
+  version and each animatable parameter's animation state. Dart: `BridgeClip`,
+  `BridgeMarker`, `BridgeTextDocument`, `BridgeEffect.namespace/version`,
+  `BridgeEffectParam.animated/keys/channelKeys`, the new `BridgeLayer` fields
+- ☑ `add_mask_geometry(comp, layer, kind, x, y, w, h)` builds a rectangle/
+  ellipse/star from a drawn drag rect exactly as egui's Shape tool
+  (`overlays.rs`), so the drawn size/position is honoured (the old `add_mask`
+  placed a fixed starter shape). `AppStateStub.addMaskGeometry`
+- ☑ Effect-param keyframe ops (`toggle_effect_param_animated`,
+  `add`/`remove_effect_param_keyframe`, `shift_effect_param_keyframes`,
+  `set_effect_param_keyframe_interp`) mirror the transform keyframe ops exactly,
+  driving each parameter's `Property` animation with a `channel` selector for
+  point/colour — the effect stopwatch + navigator. `AppStateStub` pass-throughs
+- ☑ Preset ops: `save_effect_preset` returns the stack as `.lumfx` JSON
+  byte-compatible with `lumit-ui`'s `preset.rs` (a round-trip test under the
+  `render` build pins the two); `load_effect_preset` appends with fresh ids
+  (K-065). Dart needs only the file dialogs (`saveEffectPresetJson`,
+  `loadEffectPreset`)
+- ☑ Journal-append on commit: `Bridge` carries a `JournalFile` armed at every
+  document-install point; `state::commit`/`journal_append` append every op
+  (including the direct-commit ops) after a successful store commit, matching
+  egui's `AppState::commit`; save/new clear it. `restore_journal` now recovers
+  THIS frontend's unsaved work
+- ☑ Realtime tier: lumit-eval's `RealtimeController` wired into the Viewer render
+  path — a genuine render reports its measured cost (`realtime::observe`, gated
+  so a manual-scale render never corrupts the Auto model), and `playback_tier`/
+  `reset_realtime` expose the tier + scale. `BridgePlaybackTier`,
+  `AppStateStub.playbackTier`/`resetRealtime`. Manual `previewScale` overrides
+  Auto exactly as egui's picker + auto mode interact (Dart-side choice)
+- ◐ **Overrun HOLD hatch drawing** and the async-beats / off-thread-probe
+  threading refactors remain (06 §A/§B) — the first is Dart Timeline work now
+  that the data crosses; the latter two function synchronously today and are
+  threading refactors, not missing capabilities
 
 ## Phase F3 — Timeline (in progress)
 
@@ -625,11 +687,11 @@ The owner wants right-click menus everywhere egui offers one. Per-surface audit
 
 | Surface | egui offers (source) | Flutter has (source) | Gap |
 |---|---|---|---|
-| Bare pane | Pop out into its own window (`shell/dock.rs:231`) | Yes — Pop out, surfaces the multi-window notice (`shell/dock_widget.dart:642`) | **parity** (pop-out itself still deferred) |
+| Bare pane | Pop out into its own window (`shell/dock.rs:231`) | Yes — Pop out opens a real window for hostable panels; hidden for Viewer/Timeline (`shell/dock_widget.dart`, `popout/`) | **parity** (pending on-machine verification) |
 | Layer row (outline name) | Rename · Add effect ▸ (categorised) · Add mask ▸ · Duplicate · Delete · Solo · Enabled · Motion blur · Convert to sequenced · **Trim to source end** (retimed footage) (`shell/timeline/menu.rs:27`, opened at `timeline/panel.rs:816`) | Rename (in-place editor → `renameLayer`) · Add effect ▸ (categorised → `addEffect`) · Add mask ▸ · **Blend mode ▸ · Matte ▸ · Parent ▸** · Duplicate · Delete · Solo · Enabled · Motion blur · Convert (→ `convertToSequenced`) · **Trim to source end** (retimed footage → `trimToSourceEnd`) (`panels/timeline/layer_menu.dart`, `layer_row.dart`) | **parity** (2026-07-22) — every entry wired to a real op; Trim offered only for a retimed footage layer (egui condition). Blend/Matte/Parent added deliberately (narrow column, K-note) |
 | Lane / property keyframe | Timeline lane key: right-click removes; graph-editor key: Easy ease · Linear · Hold · Unify handles · Delete key (`shell/graph.rs:1676`) | Lane key right-click opens Easy ease · Linear · Hold · Unify (broken bezier only) · Delete key (`panels/timeline/keyframe_interp_menu.dart`, wired at `property_row.dart`) | **parity for lane keys** (2026-07-22) — Easy ease = `EASY_EASE`, Unify averages both slopes keeping each reach; a multi-selection all take the choice (per-key `setKeyframeInterp`, multi-delete via `applyKeyframeBatch`). The **graph-editor** key menu rides the unbuilt transform value graph (no value keys to right-click yet) |
 | Empty timeline lane | Composition settings · Reveal in project · Show time grid · Beat sensitivity slider + Detect beats · Clear beat markers (`timeline/panel.rs:384`) | Composition settings… · Reveal in project · Show time grid · Beat sensitivity slider + Detect beats · Clear beat markers (`panels/timeline/lane_context_menu.dart`) | **parity** (2026-07-22) — Reveal → `selectProjectItem`; grid is session-only lane state; Detect/Clear → `detectBeats`/`clearBeatMarkers` |
-| Comp-tab strip (empty space) | Pop out timeline (`shell/panels.rs:1139`) | Pop out timeline → the multi-window notice (`panels/timeline/comp_tabs.dart`) | **parity** (2026-07-22, pop-out itself deferred to E — same notice the dock seam uses) |
+| Comp-tab strip (empty space) | Pop out timeline (`shell/panels.rs:1139`) | Menu item present but the Timeline is deliberately NOT a hostable popout (playhead/transport are a main-window concern; see the popout panel split) — it still shows the old notice (`panels/timeline/comp_tabs.dart`) | **deviation, recorded** (Timeline stays in-window; the comp-tab notice copy is a follow-up in that file) |
 | Project row | Composition settings · Relink… (missing footage) · Find missing footage · Move to root · Delete (`shell/panels.rs:909`) | Composition settings… · Relink… (missing only) · Find missing footage (footage) · Move to root · Delete (`panels/project_panel.dart` `showProjectContextMenu`) | **parity** — Relink/Find-missing are footage-scoped as in egui; Comp settings opens the dialogue; Relink→`relink`, Find missing→missing-only filter, Move to root→`moveToRoot`, Delete→`deleteItem` (no confirm, as egui). Missing rows carry a "missing" badge + inline Relink…; a second click renames in place (`renameItem`) |
 | Viewer toolbar Shape tool | Rectangle / Ellipse / Star mask shape (`shell/app_update.rs:971`) | Select/Hand/Shape/Pen tool row + Shape right-click Rectangle/Ellipse/Star picker (`panels/viewer_toolbar.dart`) | **parity** — tool state on `AppStateStub.viewerTool`/`viewerShape`; a Shape drag commits a default mask (`addMask` carries no geometry — named remainder) |
 | Value field (DragValue) | egui built-in Reset / Copy / Paste on every drag box | Reset / Copy / Paste on `DragValueField` (`widgets/controls.dart`, 2026-07-22) | **done** — Copy/Paste via the system clipboard (parse-on-paste with the field's clamp); Reset shows when a call site passes the optional `resetTo` default. Call sites wired (2026-07-22 final sweep): `effect_controls_panel.dart` transform axes (the property seed) + text size (72 pt); `dialogs.dart` new-comp width/height/duration (1920×1080 / 30 s); `settings_window.dart` autosave interval/copies (5 / 3) + the three cache budgets. Effect-param scalars skipped (`BridgeParamRange` carries no default) |

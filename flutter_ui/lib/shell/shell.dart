@@ -16,6 +16,9 @@ import 'package:flutter/widgets.dart';
 import '../bridge/bridge.dart';
 import '../panels/panels.dart';
 import '../panels/preview_isolate.dart';
+import '../popout/desktop_window_opener.dart';
+import '../popout/popout_arguments.dart';
+import '../popout/popout_windows.dart';
 import '../state/app_state.dart';
 import '../state/dock.dart';
 import '../state/workspace.dart';
@@ -35,7 +38,17 @@ class LumitShell extends StatelessWidget {
   /// placeholder build). Threaded down to the shell body's [AppStateStub].
   final LumitBridge? bridge;
 
-  const LumitShell({super.key, required this.workspace, this.bridge});
+  /// Opens panels in their own OS windows. Defaults to the real
+  /// `desktop_multi_window`-backed opener; tests inject a fake so no real
+  /// window is ever spawned.
+  final PopoutWindows? popoutWindows;
+
+  const LumitShell({
+    super.key,
+    required this.workspace,
+    this.bridge,
+    this.popoutWindows,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -48,8 +61,11 @@ class LumitShell extends StatelessWidget {
         child: Overlay(
           initialEntries: [
             OverlayEntry(
-              builder: (context) =>
-                  _ShellBody(workspace: workspace, bridge: bridge),
+              builder: (context) => _ShellBody(
+                workspace: workspace,
+                bridge: bridge,
+                popoutWindows: popoutWindows,
+              ),
             ),
           ],
         ),
@@ -61,7 +77,12 @@ class LumitShell extends StatelessWidget {
 class _ShellBody extends StatefulWidget {
   final Workspace workspace;
   final LumitBridge? bridge;
-  const _ShellBody({required this.workspace, this.bridge});
+  final PopoutWindows? popoutWindows;
+  const _ShellBody({
+    required this.workspace,
+    this.bridge,
+    this.popoutWindows,
+  });
 
   @override
   State<_ShellBody> createState() => _ShellBodyState();
@@ -97,6 +118,19 @@ class _ShellBodyState extends State<_ShellBody> {
   final ValueNotifier<Panel?> activePanel = ValueNotifier(null);
   final FocusNode _rootFocus = FocusNode(debugLabel: 'lumit-shell');
 
+  /// Opens popped-out panel windows. The real opener until a test injects a
+  /// fake; constructing it touches no plugin (only [PopoutWindows.open] does),
+  /// so bridge-less widget tests are unaffected.
+  late final PopoutWindows _popoutWindows =
+      widget.popoutWindows ?? DesktopWindowOpener();
+
+  /// Panels currently floating in their own window. While floating, the panel
+  /// keeps its dock slot but shows a placeholder (egui's "hidden while
+  /// floating"); closing the window re-docks it (the placeholder is replaced by
+  /// the real body again). Held here, not in the dock tree, so re-dock is
+  /// lossless.
+  final Set<Panel> _floating = {};
+
   /// The engine's boot log, pulled once at start-up (empty without a bridge, so
   /// the splash falls back to its canned lines) — streamed by the splash card.
   late final List<String> _bootLog = app.bootLog();
@@ -128,6 +162,47 @@ class _ShellBodyState extends State<_ShellBody> {
     showExportDialog(context, app,
         preset: ws.export.defaultPreset,
         template: ws.export.filenameTemplate ?? '');
+  }
+
+  /// Pop a panel into its own OS window (multi-window, same process — the
+  /// popout's engine shares this process's `lumit_bridge.dll`, so it edits the
+  /// same document). The Viewer and Timeline stay in-window and are never
+  /// offered ([canPopOutPanel]). On success the panel floats (its dock slot
+  /// shows a placeholder) until its window closes, when it re-docks. If the
+  /// window cannot open (no multi-window at runtime), the panel stays docked
+  /// under a calm notice.
+  Future<void> _onPopOut(Panel panel) async {
+    if (!canPopOutPanel(panel) || _floating.contains(panel)) return;
+    if (app.bridge == null) {
+      app.setNotice('${panel.title}: pop out needs the engine');
+      return;
+    }
+    final accent = ws.accentOverride;
+    final args = PopoutArguments(
+      panel: panel,
+      scheme: ws.colorScheme,
+      shape: ws.themeShape,
+      accentArgb: accent == null ? null : PopoutArguments.packAccent(accent),
+      animationLevel: ws.animationLevel,
+      showTooltips: ws.interface.showTooltips,
+      uiScale: ws.interface.uiScale,
+      projectPath: app.snapshot?.path ?? ws.lastProjectPath,
+      frontCompId: app.frontCompIdResolved,
+      selectedLayer: app.selectedLayer,
+    );
+    final opened = await _popoutWindows.open(
+      args,
+      onClosed: () {
+        if (!mounted) return;
+        setState(() => _floating.remove(panel));
+      },
+    );
+    if (!mounted) return;
+    if (opened) {
+      setState(() => _floating.add(panel));
+    } else {
+      app.setNotice('${panel.title}: multi-window is unavailable on this build');
+    }
   }
 
   @override
@@ -281,20 +356,21 @@ class _ShellBodyState extends State<_ShellBody> {
               Expanded(
                 child: DockWidget(
                   root: ws.dock,
-                  buildPanel: (context, panel) =>
-                      buildPanelBody(context, panel, app),
+                  // A floating panel keeps its dock slot but shows a
+                  // placeholder; its real body lives in the popped-out window.
+                  buildPanel: (context, panel) => _floating.contains(panel)
+                      ? _FloatingPanelSlot(panel: panel)
+                      : buildPanelBody(context, panel, app),
                   onLayoutChanged: ws.save,
                   activePanel: activePanel,
-                  // Multi-window pop-out is the graceful-degradation seam. The
-                  // pinned Flutter SDK (stable 3.44.7) ships multi-window only as
-                  // an @internal, feature-flag-gated experimental API that would
-                  // fail `flutter analyze`, and no maintained package can host a
-                  // panel over the SAME app state (each runs its own engine
-                  // isolate) — so pop-out stays this calm notice, no real window
-                  // is opened, and tests never spawn one. Recorded as
-                  // blocked-with-evidence on the ledger E row + docs/flutter-port/05.
-                  onPopOut: (panel) => app.setNotice(
-                      '${panel.title}: pop out arrives with multi-window support'),
+                  // Pop-out opens the panel in its own OS window (multi-window,
+                  // same process → shared engine document). Offered only for the
+                  // read-mostly panels a second engine can host honestly; the
+                  // Viewer and Timeline stay in-window (see popout_arguments.dart
+                  // and docs/flutter-port/05).
+                  onPopOut: _onPopOut,
+                  canPopOut: (panel) =>
+                      canPopOutPanel(panel) && !_floating.contains(panel),
                 ),
               ),
               _StatusLine(app: app),
@@ -336,6 +412,25 @@ class _ShellBodyState extends State<_ShellBody> {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// What a panel's dock slot shows while it is floating in its own window: a
+/// calm placeholder naming the panel, so the layout is preserved and closing
+/// the window restores the real body in place.
+class _FloatingPanelSlot extends StatelessWidget {
+  final Panel panel;
+  const _FloatingPanelSlot({required this.panel});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ThemeScope.of(context).theme;
+    return Center(
+      child: Text(
+        '${panel.title} is open in its own window',
+        style: t.small.copyWith(color: t.textMuted),
       ),
     );
   }

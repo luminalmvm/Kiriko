@@ -121,6 +121,54 @@ class _EditFake implements DocumentBridge, EditOpsBridge {
   BridgeReply restoreJournal(String p) => _ok('restore:$p');
   @override
   List<String> bootLog() => const ['lumit-bridge 0.1.0', 'ABI v7'];
+
+  // --- Bridge v0.9 -------------------------------------------------------
+  @override
+  BridgeReply addMaskGeometry(
+          String c, String l, String k, double x, double y, double w, double h) =>
+      _ok('mask_geom:$c:$l:$k:$x,$y,$w,$h');
+  @override
+  BridgeReply toggleEffectParamAnimated(
+          String c, String l, String e, String p, int ch, int f) =>
+      _ok('fx_toggle:$e:$p:$ch@$f');
+  @override
+  BridgeReply addEffectParamKeyframe(
+          String c, String l, String e, String p, int ch, int f, double v) =>
+      _ok('fx_addkey:$e:$p:$ch@$f=$v');
+  @override
+  BridgeReply removeEffectParamKeyframe(
+          String c, String l, String e, String p, int ch, int f) =>
+      _ok('fx_rmkey:$e:$p:$ch@$f');
+  @override
+  BridgeReply shiftEffectParamKeyframes(
+          String c, String l, String e, String p, int ch, String frames, int d) =>
+      _ok('fx_shift:$e:$p:$ch:$frames+$d');
+  @override
+  BridgeReply setEffectParamKeyframeInterp(
+          String c,
+          String l,
+          String e,
+          String p,
+          int ch,
+          int f,
+          String ii,
+          String io,
+          double si,
+          double fi,
+          double so,
+          double fo) =>
+      _ok('fx_interp:$e:$p:$ch@$f=$ii/$io');
+  @override
+  BridgeReply saveEffectPreset(String c, String l, String n) =>
+      _ok('save_preset:$c:$l:$n');
+  @override
+  BridgeReply loadEffectPreset(String c, String l, String t) =>
+      _ok('load_preset:$c:$l');
+  @override
+  BridgePlaybackTier playbackTier() =>
+      const BridgePlaybackTier(tier: 2, scale: 0.5);
+  @override
+  BridgePlaybackTier resetRealtime() => BridgePlaybackTier.full;
 }
 
 /// A DocumentBridge-only fake (no EditOpsBridge) — an "older library" for the
@@ -233,6 +281,46 @@ void main() {
       expect(fake.saveCalls, 0,
           reason: 'the path-repointing saveProject is not used');
       app.dispose();
+    });
+  });
+
+  group('bridge v0.9 pass-throughs', () {
+    test('mask geometry, effect keyframes and presets route to the bridge', () {
+      final fake = _EditFake();
+      final app = AppStateStub(bridge: fake);
+      app.addMaskGeometry('c', 'l', 'rectangle', 10, 20, 100, 50);
+      app.toggleEffectParamAnimated('c', 'l', 'e', 'amount', 0, 0);
+      app.addEffectParamKeyframe('c', 'l', 'e', 'amount', 0, 60, 20.0);
+      app.removeEffectParamKeyframe('c', 'l', 'e', 'amount', 0, 0);
+      app.shiftEffectParamKeyframes('c', 'l', 'e', 'amount', 0, '[60]', 30);
+      app.setEffectParamKeyframeInterp(
+          'c', 'l', 'e', 'amount', 0, 0, 'Hold', 'Linear', 0, 0, 0, 0);
+      app.loadEffectPreset('c', 'l', '{"format":1,"name":"x","effects":[]}');
+      expect(fake.ops, contains('mask_geom:c:l:rectangle:10.0,20.0,100.0,50.0'));
+      expect(fake.ops, contains('fx_toggle:e:amount:0@0'));
+      expect(fake.ops, contains('fx_addkey:e:amount:0@60=20.0'));
+      expect(fake.ops, contains('fx_rmkey:e:amount:0@0'));
+      expect(fake.ops, contains('fx_shift:e:amount:0:[60]+30'));
+      expect(fake.ops, contains('fx_interp:e:amount:0@0=Hold/Linear'));
+      expect(fake.ops, contains('load_preset:c:l'));
+      expect(app.errorNotice, isNull);
+    });
+
+    test('the realtime tier reads back, and falls back to Full without a bridge',
+        () {
+      final fake = _EditFake();
+      final app = AppStateStub(bridge: fake);
+      final tier = app.playbackTier();
+      expect(tier.tier, 2);
+      expect(tier.scale, 0.5);
+      expect(tier.label, 'Half');
+      expect(app.resetRealtime().tier, 1);
+      // Without a bridge, the readout is Full and the ops are quiet no-ops.
+      final bare = AppStateStub(bridge: null);
+      expect(bare.playbackTier().tier, 1);
+      expect(bare.playbackTier().label, 'Full');
+      bare.addMaskGeometry('c', 'l', 'ellipse', 0, 0, 10, 10);
+      expect(bare.errorNotice, isNull);
     });
   });
 }

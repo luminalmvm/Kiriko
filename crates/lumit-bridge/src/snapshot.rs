@@ -17,9 +17,10 @@
 use crate::media::MediaCache;
 use crate::state::Bridge;
 use lumit_core::anim::{Animation, Keyframe, Property, SideInterp};
+use lumit_core::markers::MarkerKind;
 use lumit_core::model::{
-    Composition, Document, EffectInstance, EffectValue, Layer, LayerInputSource, LayerKind,
-    LinearColour, MatteChannel, ProjectItem, TransformProp,
+    Composition, Document, EffectInstance, EffectNamespace, EffectValue, Layer, LayerInputSource,
+    LayerKind, LinearColour, MatteChannel, ProjectItem, TransformProp,
 };
 use lumit_core::time::{CompTime, Rational};
 use serde_json::{json, Value};
@@ -139,6 +140,15 @@ fn comp_value(doc: &Document, c: &Composition) -> Value {
         .iter()
         .map(|m| c.frame_rate.frame_at(m.time))
         .collect();
+    // v0.9: the same markers with their kind, so beat markers can be drawn
+    // apart from user/chapter cues (`MarkerKind` — the model already
+    // distinguishes them; the bare `markers` array flattened the distinction).
+    // Additive: an older reader keeps reading `markers`.
+    let marker_details: Vec<Value> = c
+        .markers
+        .iter()
+        .map(|m| marker_detail_value(c, m))
+        .collect();
     // Work area as `[in_frame, out_frame]`, or null when the comp has none
     // (the whole span plays). The B/N keys set it via `set_work_area_edge`.
     let work_area = match c.work_area {
@@ -152,6 +162,7 @@ fn comp_value(doc: &Document, c: &Composition) -> Value {
         "frame_count": comp_frame_count(c),
         "layers": layers,
         "markers": markers,
+        "marker_details": marker_details,
         "work_area": work_area,
         // v0.4: the comp motion-blur master (read back; set via set_motion_blur).
         "motion_blur": {
@@ -161,6 +172,32 @@ fn comp_value(doc: &Document, c: &Composition) -> Value {
             "samples": c.motion_blur.samples,
         },
     })
+}
+
+/// One marker as `{frame, kind, confidence?, label, duration_frames?}` (v0.9).
+/// `kind` is `user`/`beat`/`chapter` (the [`MarkerKind`] the model stores);
+/// `confidence` is present only for a beat marker (its 0..1 onset prominence,
+/// which `detect_beats` sets and `clear_beat_markers` selects on). `frame` is
+/// the comp frame the marker's time lands on — the same value the bare
+/// `markers` array carries, so the two agree.
+fn marker_detail_value(c: &Composition, m: &lumit_core::markers::Marker) -> Value {
+    let (kind, confidence) = match m.kind {
+        MarkerKind::User => ("user", None),
+        MarkerKind::Beat { confidence } => ("beat", Some(confidence)),
+        MarkerKind::Chapter => ("chapter", None),
+    };
+    let mut obj = json!({
+        "frame": c.frame_rate.frame_at(m.time),
+        "kind": kind,
+        "label": m.label,
+    });
+    if let Some(conf) = confidence {
+        obj["confidence"] = json!(conf);
+    }
+    if let Some(dur) = m.duration {
+        obj["duration_frames"] = json!(c.frame_rate.frame_at(CompTime(dur)));
+    }
+    obj
 }
 
 /// One layer's v2 detail plus the v0.3 read-back: `in_frame`/`out_frame` are the
@@ -177,10 +214,19 @@ fn layer_value(doc: &Document, c: &Composition, index: usize, l: &Layer) -> Valu
         "kind": layer_kind(&l.kind),
         "in_frame": c.frame_rate.frame_at(l.in_point),
         "out_frame": c.frame_rate.frame_at(l.out_point),
+        // v0.9: the layer's start offset (where layer time 0 sits on the comp
+        // timeline) and its in/out points in seconds — the ingredients the
+        // overrun HOLD hatch needs (`overrun_span_secs` in speed_rows.rs) that
+        // the frame-only read-back could not give: start offset plus the local
+        // in/out. `start_offset` seeds to 0 for a fresh layer.
+        "start_offset_frame": c.frame_rate.frame_at(l.start_offset),
+        "start_offset_secs": l.start_offset.0.to_f64(),
+        "in_secs": l.in_point.0.to_f64(),
+        "out_secs": l.out_point.0.to_f64(),
         "label": l.label,
         "switches": switches,
         "transform": transform_value(c, l),
-        "effects": effects_value(l),
+        "effects": effects_value(c, l),
         // v0.4 columns: the blend mode (serde variant name, round-trip stable),
         // the matte, and the transform parent (a layer id or null).
         "blend_mode": serde_json::to_value(l.blend).unwrap_or(json!("Normal")),
@@ -202,7 +248,32 @@ fn layer_value(doc: &Document, c: &Composition, index: usize, l: &Layer) -> Valu
             if let Some(solid) = doc.solid(*def) {
                 let LinearColour([r, g, b, a]) = solid.colour;
                 obj["colour"] = json!([r, g, b, a]);
+                // v0.9: the solid's size read back (colour already crossed).
+                obj["solid_size"] = json!([solid.width, solid.height]);
             }
+        }
+        // v0.9: text content/size/fill, camera zoom, and sequence clips read
+        // back from the model — the editors held these in a session-edit map
+        // because the snapshot did not carry them.
+        LayerKind::Text { document } => {
+            let LinearColour([r, g, b, a]) = document.fill;
+            obj["text"] = json!({
+                "content": document.text,
+                "size": document.size,
+                "fill": [r, g, b, a],
+            });
+        }
+        LayerKind::Camera { zoom } => {
+            // Zoom is a Property (animatable); read it back like a transform
+            // property so the editor sees its value and any keyframes.
+            obj["camera"] = property_value(c, l, zoom);
+        }
+        LayerKind::Sequence { clips } => {
+            let clips: Vec<Value> = clips
+                .iter()
+                .map(|clip| crate::sequence::clip_value(c, l, clip))
+                .collect();
+            obj["clips"] = Value::Array(clips);
         }
         _ => {}
     }
@@ -379,12 +450,12 @@ fn side_bezier(s: SideInterp) -> Option<Value> {
 /// read-back `value` (scalar/colour evaluated at layer time 0, enums/bools as
 /// stored). Exotic kinds carry a null value — the Dart side shows the row but
 /// leaves the control to a later phase.
-fn effects_value(l: &Layer) -> Value {
-    let effects: Vec<Value> = l.effects.iter().map(effect_value).collect();
+fn effects_value(c: &Composition, l: &Layer) -> Value {
+    let effects: Vec<Value> = l.effects.iter().map(|e| effect_value(c, l, e)).collect();
     Value::Array(effects)
 }
 
-fn effect_value(e: &EffectInstance) -> Value {
+fn effect_value(c: &Composition, l: &Layer, e: &EffectInstance) -> Value {
     // The declaring schema, for the parameter ranges the drag controls clamp to
     // (v0.5). A schema a newer/older build does not know simply omits the range.
     let schema = lumit_core::fx::schema(&e.effect.match_name);
@@ -392,8 +463,8 @@ fn effect_value(e: &EffectInstance) -> Value {
         .params
         .iter()
         .map(|p| {
-            let (kind, value) = effect_param_kind_value(&p.value);
-            let mut obj = json!({ "name": p.id, "kind": kind, "value": value });
+            let mut obj = effect_param_value(c, l, &p.value);
+            obj["name"] = json!(p.id);
             if let Some(range) = schema
                 .and_then(|s| s.params.iter().find(|ps| ps.id == p.id))
                 .and_then(|ps| param_range(&ps.kind))
@@ -406,9 +477,26 @@ fn effect_value(e: &EffectInstance) -> Value {
     json!({
         "id": e.id.to_string(),
         "name": e.effect.match_name,
+        // v0.9: the full EffectKey identity, so a `.lumfx` preset round-trips
+        // byte-faithfully — the match name alone dropped the namespace and
+        // version the frame key and plugin resolver rely on.
+        "namespace": namespace_name(e.effect.namespace),
+        "version": e.effect.version,
+        "sample_temporally": e.sample_temporally,
         "enabled": e.enabled,
         "params": params,
     })
+}
+
+/// The [`EffectNamespace`] tag as a stable string (`builtin`/`ofx`/`lfx`/
+/// `placeholder`), so a preset carries which implementation an effect came from.
+fn namespace_name(ns: EffectNamespace) -> &'static str {
+    match ns {
+        EffectNamespace::Builtin => "builtin",
+        EffectNamespace::Ofx => "ofx",
+        EffectNamespace::Lfx => "lfx",
+        EffectNamespace::Placeholder => "placeholder",
+    }
 }
 
 /// A parameter's declared edit range for the read-back (v0.5): a `Float`'s hard
@@ -434,27 +522,83 @@ fn param_range(kind: &lumit_core::fx::ParamKind) -> Option<Value> {
     }
 }
 
-/// A parameter's `(kind, value)` pair for the read-back. Scalars and colours
+/// A parameter's read-back object `{kind, value, ...}`. Scalars and colours
 /// evaluate at layer time 0; enums/bools/seeds read their stored value; the
-/// point/file/layer kinds report their tag with a null value (no editor yet).
-fn effect_param_kind_value(v: &EffectValue) -> (&'static str, Value) {
+/// file/layer kinds report their tag with a null value (no editor yet).
+///
+/// v0.9: the animatable kinds (scalar/colour/point) also carry their animation
+/// state — an `animated` flag and, when animated, their `keys` — exactly as the
+/// transform read-back does, so the Effect controls can draw a stopwatch and a
+/// keyframe navigator on an effect parameter. A scalar carries one `keys` list;
+/// a point/colour carry per-axis/channel lists (`keys_x`/`keys_y`,
+/// `keys_r`/`keys_g`/`keys_b`/`keys_a`).
+fn effect_param_value(c: &Composition, l: &Layer, v: &EffectValue) -> Value {
     match v {
-        EffectValue::Float(p) => ("scalar", json!(p.value_at(0.0))),
-        EffectValue::Colour(ch) => (
-            "colour",
-            json!([
-                ch[0].value_at(0.0),
-                ch[1].value_at(0.0),
-                ch[2].value_at(0.0),
-                ch[3].value_at(0.0),
-            ]),
-        ),
-        EffectValue::Choice(i) => ("enum", json!(i)),
-        EffectValue::Bool(b) => ("bool", json!(b)),
-        EffectValue::Seed(s) => ("seed", json!(s)),
-        EffectValue::Point(x, y) => ("point", json!([x.value_at(0.0), y.value_at(0.0)])),
-        EffectValue::File(_) => ("file", Value::Null),
-        EffectValue::Layer(_) => ("layer", Value::Null),
+        EffectValue::Float(p) => {
+            let mut obj = json!({ "kind": "scalar", "value": p.value_at(0.0) });
+            add_animation(&mut obj, "keys", c, l, p);
+            obj
+        }
+        EffectValue::Colour(ch) => {
+            let mut obj = json!({
+                "kind": "colour",
+                "value": [
+                    ch[0].value_at(0.0),
+                    ch[1].value_at(0.0),
+                    ch[2].value_at(0.0),
+                    ch[3].value_at(0.0),
+                ],
+            });
+            let channels = ["keys_r", "keys_g", "keys_b", "keys_a"];
+            let animated = ch.iter().any(|p| p.is_animated());
+            obj["animated"] = json!(animated);
+            for (name, p) in channels.iter().zip(ch.iter()) {
+                add_channel_keys(&mut obj, name, c, l, p);
+            }
+            obj
+        }
+        EffectValue::Point(x, y) => {
+            let mut obj = json!({
+                "kind": "point",
+                "value": [x.value_at(0.0), y.value_at(0.0)],
+            });
+            obj["animated"] = json!(x.is_animated() || y.is_animated());
+            add_channel_keys(&mut obj, "keys_x", c, l, x);
+            add_channel_keys(&mut obj, "keys_y", c, l, y);
+            obj
+        }
+        EffectValue::Choice(i) => json!({ "kind": "enum", "value": i }),
+        EffectValue::Bool(b) => json!({ "kind": "bool", "value": b }),
+        EffectValue::Seed(s) => json!({ "kind": "seed", "value": s }),
+        EffectValue::File(_) => json!({ "kind": "file", "value": Value::Null }),
+        EffectValue::Layer(_) => json!({ "kind": "layer", "value": Value::Null }),
+    }
+}
+
+/// Set `obj["animated"]` and, when the property is keyframed, `obj[keys_field]`
+/// to its keys (mirroring [`property_value`]'s single-property read-back).
+fn add_animation(obj: &mut Value, keys_field: &str, c: &Composition, l: &Layer, p: &Property) {
+    match &p.animation {
+        Animation::Keyframed(keys) if !keys.is_empty() => {
+            obj["animated"] = json!(true);
+            let keys: Vec<Value> = keys.iter().map(|k| keyframe_value(c, l, k)).collect();
+            obj[keys_field] = Value::Array(keys);
+        }
+        _ => {
+            obj["animated"] = json!(false);
+        }
+    }
+}
+
+/// Set `obj[keys_field]` to a channel/axis property's keys when it is keyframed
+/// (the per-channel/per-axis sibling of [`add_animation`], which set the shared
+/// `animated` flag once for the whole colour/point).
+fn add_channel_keys(obj: &mut Value, keys_field: &str, c: &Composition, l: &Layer, p: &Property) {
+    if let Animation::Keyframed(keys) = &p.animation {
+        if !keys.is_empty() {
+            let keys: Vec<Value> = keys.iter().map(|k| keyframe_value(c, l, k)).collect();
+            obj[keys_field] = Value::Array(keys);
+        }
     }
 }
 
@@ -551,6 +695,7 @@ mod tests {
             store,
             path: None,
             media: MediaCache::default(),
+            journal: None,
         };
         let snap = snapshot_value(&bridge);
 
@@ -623,6 +768,7 @@ mod tests {
             store,
             path: None,
             media: MediaCache::default(),
+            journal: None,
         };
         let snap = snapshot_value(&bridge);
         let l = &snap["items"][0]["comp"]["layers"][0];
@@ -666,10 +812,263 @@ mod tests {
             store,
             path: None,
             media: MediaCache::default(),
+            journal: None,
         };
         let snap = snapshot_value(&bridge);
         assert_eq!(snap["items"][0]["status"], json!("unprobed"));
         assert!(snap["items"][0].get("media").is_none());
+    }
+
+    /// Build a one-layer 60 fps comp and its bridge, so a test can inspect the
+    /// single layer's snapshot. The layer spans comp [0, 5] s.
+    fn bridge_with_layer(layer: Layer) -> Bridge {
+        let comp = Composition {
+            id: Uuid::now_v7(),
+            name: "Scene".into(),
+            width: 1920,
+            height: 1080,
+            frame_rate: FrameRate::new(60, 1).unwrap(),
+            duration: Duration(Rational::new(5, 1).unwrap()),
+            background: LinearColour::BLACK,
+            work_area: None,
+            layers: vec![layer],
+            markers: Vec::new(),
+            motion_blur: MotionBlur::default(),
+            extra: serde_json::Map::new(),
+        };
+        let store = DocumentStore::new(Document::new());
+        store
+            .commit(Op::AddItem {
+                index: 0,
+                item: Box::new(ProjectItem::Composition(comp)),
+            })
+            .unwrap();
+        Bridge {
+            store,
+            path: None,
+            media: MediaCache::default(),
+            journal: None,
+        }
+    }
+
+    /// v0.9: `marker_details` carries each marker's kind, and a beat marker its
+    /// 0..1 confidence — so beat markers can be drawn apart from user cues. The
+    /// bare `markers` frame array is unchanged (additive).
+    #[test]
+    fn marker_details_carry_kind_and_confidence() {
+        let comp = Composition {
+            id: Uuid::now_v7(),
+            name: "Scene".into(),
+            width: 640,
+            height: 480,
+            frame_rate: FrameRate::new(60, 1).unwrap(),
+            duration: Duration(Rational::new(5, 1).unwrap()),
+            background: LinearColour::BLACK,
+            work_area: None,
+            layers: Vec::new(),
+            markers: vec![
+                Marker::user(Uuid::now_v7(), Rational::new(1, 1).unwrap()),
+                Marker::beat(Uuid::now_v7(), Rational::new(2, 1).unwrap(), 0.75),
+            ],
+            motion_blur: MotionBlur::default(),
+            extra: serde_json::Map::new(),
+        };
+        let store = DocumentStore::new(Document::new());
+        store
+            .commit(Op::AddItem {
+                index: 0,
+                item: Box::new(ProjectItem::Composition(comp)),
+            })
+            .unwrap();
+        let bridge = Bridge {
+            store,
+            path: None,
+            media: MediaCache::default(),
+            journal: None,
+        };
+        let snap = snapshot_value(&bridge);
+        let block = &snap["items"][0]["comp"];
+        // The bare array is unchanged: 1 s → 60, 2 s → 120.
+        assert_eq!(block["markers"], json!([60, 120]));
+        let details = block["marker_details"].as_array().unwrap();
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0]["kind"], json!("user"));
+        assert_eq!(details[0]["frame"], json!(60));
+        assert!(details[0].get("confidence").is_none());
+        assert_eq!(details[1]["kind"], json!("beat"));
+        assert_eq!(details[1]["frame"], json!(120));
+        assert_eq!(details[1]["confidence"], json!(0.75_f32));
+    }
+
+    /// v0.9: a layer carries its `start_offset` (frame + seconds) and its in/out
+    /// points in seconds — the overrun-hatch ingredients the frame-only
+    /// read-back lacked.
+    #[test]
+    fn layer_carries_start_offset_and_local_in_out() {
+        let mut layer = sample_layer("clip", ct(2), ct(4));
+        layer.start_offset = ct(1);
+        let bridge = bridge_with_layer(layer);
+        let snap = snapshot_value(&bridge);
+        let l = &snap["items"][0]["comp"]["layers"][0];
+        assert_eq!(l["start_offset_frame"], json!(60)); // 1 s at 60 fps
+        assert_eq!(l["start_offset_secs"], json!(1.0));
+        assert_eq!(l["in_secs"], json!(2.0));
+        assert_eq!(l["out_secs"], json!(4.0));
+    }
+
+    /// v0.9: an effect reads back its full `EffectKey` identity (namespace +
+    /// version, alongside the match name) and each animatable parameter its
+    /// animation state — an `animated` flag and, when animated, its `keys`.
+    #[test]
+    fn effect_identity_and_param_animation_read_back() {
+        use lumit_core::anim::{Animation, Keyframe, Property, SideInterp};
+        use lumit_core::model::EffectValue;
+        let mut layer = sample_layer("fx", ct(0), ct(5));
+        let mut effect = lumit_core::fx::instantiate("blur").expect("blur exists");
+        // Animate the first Float parameter with two keys at layer time 0 and 1.
+        let pi = effect
+            .params
+            .iter()
+            .position(|p| matches!(p.value, EffectValue::Float(_)))
+            .expect("blur has a float param");
+        let keys = vec![
+            Keyframe {
+                time: Rational::new(0, 1).unwrap(),
+                value: 5.0,
+                interp_in: SideInterp::Linear,
+                interp_out: SideInterp::Linear,
+            },
+            Keyframe {
+                time: Rational::new(1, 1).unwrap(),
+                value: 20.0,
+                interp_in: SideInterp::Linear,
+                interp_out: SideInterp::Linear,
+            },
+        ];
+        effect.params[pi].value = EffectValue::Float(Property {
+            animation: Animation::Keyframed(keys),
+            extra: serde_json::Map::new(),
+        });
+        let pid = effect.params[pi].id.clone();
+        layer.effects = vec![effect];
+        let bridge = bridge_with_layer(layer);
+        let snap = snapshot_value(&bridge);
+        let e = &snap["items"][0]["comp"]["layers"][0]["effects"][0];
+        assert_eq!(e["namespace"], json!("builtin"));
+        assert_eq!(e["version"], json!(1));
+        assert_eq!(e["name"], json!("blur"));
+        // Find the animated param and check its animation state.
+        let params = e["params"].as_array().unwrap();
+        let p = params
+            .iter()
+            .find(|p| p["name"] == json!(pid))
+            .expect("the animated param is present");
+        assert_eq!(p["kind"], json!("scalar"));
+        assert_eq!(p["animated"], json!(true));
+        let keys = p["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0]["frame"], json!(0));
+        assert_eq!(keys[1]["frame"], json!(60)); // 1 s at 60 fps
+        assert_eq!(keys[1]["value"], json!(20.0));
+        // A non-animated param reports animated:false with no keys.
+        let other = params
+            .iter()
+            .find(|p| p["kind"] == json!("scalar") && p["name"] != json!(pid));
+        if let Some(other) = other {
+            assert_eq!(other["animated"], json!(false));
+            assert!(other.get("keys").is_none());
+        }
+    }
+
+    /// v0.9: text, solid and camera layers read their asset back from the model
+    /// (text content/size/fill, solid size, camera zoom) rather than a
+    /// session-edit map.
+    #[test]
+    fn text_solid_camera_read_back() {
+        use lumit_core::anim::Property;
+        use lumit_core::model::{SolidDef, TextDocument};
+        // Text layer.
+        let mut text = sample_layer("title", ct(0), ct(5));
+        text.kind = LayerKind::Text {
+            document: TextDocument {
+                text: "Hello".into(),
+                size: 72.0,
+                fill: LinearColour([1.0, 0.5, 0.25, 1.0]),
+                extra: serde_json::Map::new(),
+            },
+        };
+        let snap = snapshot_value(&bridge_with_layer(text));
+        let l = &snap["items"][0]["comp"]["layers"][0];
+        assert_eq!(l["text"]["content"], json!("Hello"));
+        assert_eq!(l["text"]["size"], json!(72.0));
+        assert_eq!(l["text"]["fill"], json!([1.0, 0.5, 0.25, 1.0]));
+
+        // Camera layer: zoom reads back like a property.
+        let mut cam = sample_layer("cam", ct(0), ct(5));
+        cam.kind = LayerKind::Camera {
+            zoom: Property::fixed(1200.0),
+        };
+        let snap = snapshot_value(&bridge_with_layer(cam));
+        let l = &snap["items"][0]["comp"]["layers"][0];
+        assert_eq!(l["camera"]["value"], json!(1200.0));
+        assert_eq!(l["camera"]["animated"], json!(false));
+
+        // Solid layer: size reads back alongside the colour. The solid def must
+        // live in the document for the read-back to resolve.
+        let def = SolidDef {
+            id: Uuid::now_v7(),
+            name: "Red".into(),
+            colour: LinearColour([1.0, 0.0, 0.0, 1.0]),
+            width: 800,
+            height: 600,
+            extra: serde_json::Map::new(),
+        };
+        let mut solid = sample_layer("solid", ct(0), ct(5));
+        solid.kind = LayerKind::Solid { def: def.id };
+        let comp = Composition {
+            id: Uuid::now_v7(),
+            name: "Scene".into(),
+            width: 1920,
+            height: 1080,
+            frame_rate: FrameRate::new(60, 1).unwrap(),
+            duration: Duration(Rational::new(5, 1).unwrap()),
+            background: LinearColour::BLACK,
+            work_area: None,
+            layers: vec![solid],
+            markers: Vec::new(),
+            motion_blur: MotionBlur::default(),
+            extra: serde_json::Map::new(),
+        };
+        let store = DocumentStore::new(Document::new());
+        store
+            .commit(Op::AddItem {
+                index: 0,
+                item: Box::new(ProjectItem::Solid(def)),
+            })
+            .unwrap();
+        store
+            .commit(Op::AddItem {
+                index: 1,
+                item: Box::new(ProjectItem::Composition(comp)),
+            })
+            .unwrap();
+        let bridge = Bridge {
+            store,
+            path: None,
+            media: MediaCache::default(),
+            journal: None,
+        };
+        let snap = snapshot_value(&bridge);
+        // The comp is at root index 1 (solid at 0).
+        let comp_item = snap["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["kind"] == json!("composition"))
+            .unwrap();
+        let l = &comp_item["comp"]["layers"][0];
+        assert_eq!(l["colour"], json!([1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(l["solid_size"], json!([800, 600]));
     }
 
     fn sample_layer(name: &str, in_point: CompTime, out_point: CompTime) -> Layer {

@@ -3,6 +3,12 @@
 #include <optional>
 
 #include "flutter/generated_plugin_registrant.h"
+// Multi-window (pop-out panels). NOTE: this and its callback below compile only
+// in a real `flutter build windows` on the owner's machine — the plugin's
+// native header/lib are pulled in by `flutter pub get` + the generated CMake,
+// which do not run in this environment. If the header is ever absent, this and
+// the SetWindowCreatedCallback block are the only two additions to revert.
+#include "desktop_multi_window/desktop_multi_window_plugin.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -25,6 +31,17 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+
+  // Each popped-out panel is a second Flutter engine in THIS process. Register
+  // the app's plugins on every sub-window engine as it is created, so a popout
+  // has the same plugin surface (file_selector, etc.) as the main window. The
+  // engine bridge itself is dart:ffi, not a plugin, so it needs no registrant —
+  // the sub-window opens the same already-loaded lumit_bridge.dll directly.
+  DesktopMultiWindowSetWindowCreatedCallback([](void *controller) {
+    auto *view_controller =
+        reinterpret_cast<flutter::FlutterViewController *>(controller);
+    RegisterPlugins(view_controller->engine());
+  });
 
   // The zero-copy Viewer texture bridge (K-177): registers engine-created D3D
   // shared textures with Flutter over the 'lumit/viewer_texture' channel. Built

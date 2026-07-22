@@ -41,6 +41,11 @@ shared-texture = ["render", "lumit-ui/shared-texture"]
 [dependencies]
 lumit-core = { path = "../lumit-core" }
 lumit-project = { path = "../lumit-project" }
+# The realtime preview-tier controller (K-030/K-171) lives here as a pure,
+# tested decision core; the bridge feeds it measured render costs and reads the
+# tier back (see src/realtime.rs). An engine crate, so the docs/05 layering
+# (engine crates never depend on the UI) is unbroken.
+lumit-eval = { path = "../lumit-eval" }
 lumit-media = { path = "../lumit-media", optional = true }
 # Beat detection maths (docs/09 §5), pulled by the `render` feature alongside
 # lumit-ui (the audio mixdown rides the same headless input path).

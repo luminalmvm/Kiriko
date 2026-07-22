@@ -5,12 +5,18 @@
 import 'package:flutter/widgets.dart';
 
 import 'bridge/bridge.dart';
+import 'popout/popout_main.dart';
 import 'shell/shell.dart';
 import 'state/workspace.dart';
 import 'widgets/ui_scale.dart';
 
-void main() {
+Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
+  // A popped-out panel runs through this same entrypoint in its own engine
+  // (multi-window, same process). If this engine is a popout, it takes over
+  // here; otherwise — the main window, or any build without the multi-window
+  // plugin — this is a swallowed no-op and the normal shell boots below.
+  if (await maybeRunPopout(args)) return;
   final workspace = Workspace()..load();
   // Try the engine bridge; a null result keeps the F0 placeholder behaviour
   // (the app and every test must work without the library present).

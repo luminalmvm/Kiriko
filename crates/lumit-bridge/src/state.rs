@@ -21,6 +21,7 @@ use lumit_core::model::{
 use lumit_core::ops::{AutoFolderKind, Op, SpanEdit};
 use lumit_core::store::DocumentStore;
 use lumit_core::time::{Duration, FrameRate, Rational};
+use lumit_project::JournalFile;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -35,6 +36,16 @@ pub(crate) struct Bridge {
     pub store: DocumentStore,
     pub path: Option<PathBuf>,
     pub media: MediaCache,
+    /// The crash journal for the current document (K-176 recovery). Every
+    /// [`commit`] appends its op here, exactly as `lumit-ui`'s `AppState::commit`
+    /// does, so `restore_journal` recovers *this* frontend's unsaved work rather
+    /// than a journal another session wrote. Established at each document-install
+    /// point ([`set_journal_for_current_doc`]) — `Bridge::new()` leaves it `None`
+    /// so a raw test bridge never touches the on-disk cache; the real app calls
+    /// `new_project`/`open_project` at start-up, which arms it. Cleared on a
+    /// successful save (the journal covers work *between* saves) and when a new
+    /// document replaces the old one.
+    pub journal: Option<JournalFile>,
 }
 
 impl Bridge {
@@ -43,8 +54,18 @@ impl Bridge {
             store: DocumentStore::new(Document::new()),
             path: None,
             media: MediaCache::default(),
+            journal: None,
         }
     }
+}
+
+/// Point the bridge's journal at the current document's sidecar (keyed by the
+/// document id, `lumit_project::journal_path`). Called at every document-install
+/// point so the journal always tracks the live document. A machine with no cache
+/// directory yields `None` (journaling silently disabled) — never an error.
+pub(crate) fn set_journal_for_current_doc(bridge: &mut Bridge) {
+    let id = bridge.store.snapshot().id;
+    bridge.journal = JournalFile::for_document(id);
 }
 
 /// The single process-wide client state (single-client assumption). The lock is
@@ -78,9 +99,15 @@ pub(crate) fn snapshot(bridge: &Bridge) -> String {
 }
 
 pub(crate) fn new_project(bridge: &mut Bridge) -> String {
+    // Clear the outgoing document's journal before switching documents (the old
+    // work is being discarded), exactly as `AppState::new_project` does.
+    if let Some(journal) = &bridge.journal {
+        let _ = journal.clear();
+    }
     bridge.store = DocumentStore::new(Document::new());
     bridge.path = None;
     bridge.media.clear();
+    set_journal_for_current_doc(bridge);
     snapshot(bridge)
 }
 
@@ -91,6 +118,7 @@ pub(crate) fn open_project(bridge: &mut Bridge, path: &str) -> String {
             bridge.store = DocumentStore::new(doc);
             bridge.path = Some(path);
             bridge.media.clear();
+            set_journal_for_current_doc(bridge);
             refresh_media(bridge);
             snapshot(bridge)
         }
@@ -119,6 +147,11 @@ pub(crate) fn save_project(bridge: &mut Bridge, path: &str) -> String {
     let doc = lumit_project::rebase_for_save(&bridge.store.snapshot(), dir);
     match lumit_project::save(&doc, &target) {
         Ok(()) => {
+            // The journal covers work *between* saves; a successful save makes
+            // it redundant, so clear it (matching `AppState::save`).
+            if let Some(journal) = &bridge.journal {
+                let _ = journal.clear();
+            }
             bridge.path = Some(target);
             snapshot(bridge)
         }
@@ -215,8 +248,12 @@ pub(crate) fn new_composition(bridge: &mut Bridge, name: &str) -> String {
         children,
     });
 
-    match bridge.store.commit(Op::Batch { ops }) {
-        Ok(_) => snapshot(bridge),
+    let op = Op::Batch { ops };
+    match bridge.store.commit(op.clone()) {
+        Ok(_) => {
+            journal_append(bridge, &op);
+            snapshot(bridge)
+        }
         Err(e) => err_json(format!("new composition: {e}")),
     }
 }
@@ -259,11 +296,13 @@ pub(crate) fn import_footage(bridge: &mut Bridge, path: &str) -> String {
         extra: serde_json::Map::new(),
     };
     let index = bridge.store.snapshot().items.len();
-    match bridge.store.commit(Op::AddItem {
+    let op = Op::AddItem {
         index,
         item: Box::new(ProjectItem::Footage(item)),
-    }) {
+    };
+    match bridge.store.commit(op.clone()) {
         Ok(_) => {
+            journal_append(bridge, &op);
             refresh_media(bridge);
             snapshot(bridge)
         }
@@ -485,9 +524,24 @@ fn footage_pathbuf(f: &FootageItem) -> PathBuf {
 /// reply prefixed with `ctx` on failure. Shared with the v0.3 edit ops in
 /// [`crate::edits`], so every mutation refreshes the snapshot the same way.
 pub(crate) fn commit(bridge: &mut Bridge, op: Op, ctx: &str) -> String {
-    match bridge.store.commit(op) {
-        Ok(_) => snapshot(bridge),
+    match bridge.store.commit(op.clone()) {
+        Ok(_) => {
+            journal_append(bridge, &op);
+            snapshot(bridge)
+        }
         Err(e) => err_json(format!("{ctx}: {e}")),
+    }
+}
+
+/// Append `op` to the crash journal after a successful commit, mirroring
+/// `AppState::commit`. A journal write failure is not fatal (the edit already
+/// landed); it simply means recovery may miss this op — the same tolerance the
+/// egui path takes. Shared by [`commit`] and the few ops that commit directly
+/// (`new_composition`, `import_footage`, the retime setter), so every bridge
+/// commit is journalled.
+pub(crate) fn journal_append(bridge: &Bridge, op: &Op) {
+    if let Some(journal) = &bridge.journal {
+        let _ = journal.append(op);
     }
 }
 
@@ -623,7 +677,7 @@ mod tests {
         let v = parse(&version());
         assert_eq!(v["ok"], json!(true));
         assert_eq!(v["abi"], json!(crate::ABI_VERSION));
-        assert_eq!(v["abi"], json!(8));
+        assert_eq!(v["abi"], json!(9));
     }
 
     #[test]

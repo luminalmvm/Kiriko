@@ -1027,6 +1027,196 @@ void main() {
     });
   });
 
+  group('Bridge v0.9 parsing', () {
+    test('a comp parses its marker details with kind and confidence', () {
+      final comp = BridgeComp.fromJson({
+        'width': 640,
+        'height': 480,
+        'fps': {'num': 60, 'den': 1},
+        'frame_count': 300,
+        'layers': [],
+        'markers': [60, 120],
+        'marker_details': [
+          {'frame': 60, 'kind': 'user', 'label': 'cue'},
+          {'frame': 120, 'kind': 'beat', 'confidence': 0.75, 'label': ''},
+        ],
+      });
+      // The bare frame array is unchanged (additive).
+      expect(comp.markers, [60, 120]);
+      expect(comp.markerDetails.length, 2);
+      expect(comp.markerDetails[0].kind, 'user');
+      expect(comp.markerDetails[0].isBeat, isFalse);
+      expect(comp.markerDetails[0].confidence, isNull);
+      expect(comp.markerDetails[1].isBeat, isTrue);
+      expect(comp.markerDetails[1].confidence, 0.75);
+    });
+
+    test('a layer parses start offset, local in/out and asset read-backs', () {
+      final text = BridgeLayer.fromJson({
+        'id': 'l',
+        'index': 0,
+        'name': 'title',
+        'kind': 'text',
+        'in_frame': 0,
+        'out_frame': 300,
+        'start_offset_frame': 60,
+        'start_offset_secs': 1.0,
+        'in_secs': 2.0,
+        'out_secs': 4.0,
+        'label': 0,
+        'switches': {},
+        'text': {
+          'content': 'Hello',
+          'size': 72.0,
+          'fill': [1.0, 0.5, 0.25, 1.0],
+        },
+      });
+      expect(text.startOffsetFrame, 60);
+      expect(text.startOffsetSecs, 1.0);
+      expect(text.inSecs, 2.0);
+      expect(text.outSecs, 4.0);
+      expect(text.text!.content, 'Hello');
+      expect(text.text!.size, 72.0);
+      expect(text.text!.fill, [1.0, 0.5, 0.25, 1.0]);
+
+      final cam = BridgeLayer.fromJson({
+        'id': 'c',
+        'index': 1,
+        'name': 'cam',
+        'kind': 'camera',
+        'in_frame': 0,
+        'out_frame': 300,
+        'label': 0,
+        'switches': {},
+        'camera': {'value': 1200.0, 'animated': false},
+      });
+      expect(cam.cameraZoom!.value, 1200.0);
+      expect(cam.cameraZoom!.animated, isFalse);
+
+      final solid = BridgeLayer.fromJson({
+        'id': 's',
+        'index': 2,
+        'name': 'solid',
+        'kind': 'solid',
+        'in_frame': 0,
+        'out_frame': 300,
+        'label': 0,
+        'switches': {},
+        'colour': [1.0, 0.0, 0.0, 1.0],
+        'solid_size': [800, 600],
+      });
+      expect(solid.solidSize, [800, 600]);
+      expect(solid.colour, [1.0, 0.0, 0.0, 1.0]);
+    });
+
+    test('a sequence layer parses its clips', () {
+      final layer = BridgeLayer.fromJson({
+        'id': 'seq',
+        'index': 0,
+        'name': 'Sequence',
+        'kind': 'sequence',
+        'in_frame': 0,
+        'out_frame': 300,
+        'label': 0,
+        'switches': {},
+        'clips': [
+          {
+            'id': 'clip-1',
+            'source_kind': 'footage',
+            'source_id': 'foo',
+            'source_in_secs': 0.0,
+            'source_out_secs': 5.0,
+            'place_start_frame': 0,
+            'place_end_frame': 300,
+            'place_start_secs': 0.0,
+            'place_duration_secs': 5.0,
+            'retime': {
+              'reverse': false,
+              'interpolation': 'nearest',
+              'boundaries': [
+                {'t_seconds': 0.0, 's_seconds': 0.0, 'smooth': false},
+                {'t_seconds': 5.0, 's_seconds': 5.0, 'smooth': false},
+              ],
+              'segments': [
+                {'kind': 'rate', 'v0': 1.0, 'v1': 1.0, 'ease': 'Linear'},
+              ],
+            },
+          },
+        ],
+      });
+      expect(layer.clips.length, 1);
+      final clip = layer.clips.single;
+      expect(clip.id, 'clip-1');
+      expect(clip.sourceKind, 'footage');
+      expect(clip.sourceId, 'foo');
+      expect(clip.placeStartFrame, 0);
+      expect(clip.placeEndFrame, 300);
+      expect(clip.sourceOutSecs, 5.0);
+      expect(clip.retime!.boundaries.length, 2);
+    });
+
+    test('an effect parses its identity and animated param keys', () {
+      final effect = BridgeEffect.fromJson({
+        'id': 'e',
+        'name': 'blur',
+        'namespace': 'builtin',
+        'version': 1,
+        'sample_temporally': true,
+        'enabled': true,
+        'params': [
+          {
+            'name': 'amount',
+            'kind': 'scalar',
+            'value': 20.0,
+            'animated': true,
+            'keys': [
+              {'frame': 0, 'value': 5.0, 'interp_in': 'Linear', 'interp_out': 'Linear'},
+              {'frame': 60, 'value': 20.0, 'interp_in': 'Linear', 'interp_out': 'Linear'},
+            ],
+          },
+          {'name': 'quality', 'kind': 'enum', 'value': 1},
+        ],
+      });
+      expect(effect.namespace, 'builtin');
+      expect(effect.version, 1);
+      expect(effect.sampleTemporally, isTrue);
+      final amount = effect.params.firstWhere((p) => p.name == 'amount');
+      expect(amount.animated, isTrue);
+      expect(amount.keys.length, 2);
+      expect(amount.keys[1].frame, 60);
+      expect(amount.keys[1].value, 20.0);
+      final quality = effect.params.firstWhere((p) => p.name == 'quality');
+      expect(quality.animated, isFalse);
+      expect(quality.keys, isEmpty);
+    });
+
+    test('an effect parses per-channel colour keys', () {
+      final effect = BridgeEffect.fromJson({
+        'id': 'e',
+        'name': 'tint',
+        'enabled': true,
+        'params': [
+          {
+            'name': 'colour',
+            'kind': 'colour',
+            'value': [1.0, 0.0, 0.0, 1.0],
+            'animated': true,
+            'keys_r': [
+              {'frame': 0, 'value': 1.0, 'interp_in': 'Linear', 'interp_out': 'Linear'},
+            ],
+          },
+        ],
+      });
+      final colour = effect.params.single;
+      expect(colour.animated, isTrue);
+      expect(colour.channelKeys.containsKey('keys_r'), isTrue);
+      expect(colour.channelKeys['keys_r']!.single.value, 1.0);
+      // An older library with no identity defaults sensibly.
+      expect(effect.namespace, 'builtin');
+      expect(effect.version, 0);
+    });
+  });
+
   group('AppStateStub v0.4 pass-throughs', () {
     test('the column and retime ops route to the bridge', () {
       final fake = _FakeBridge();

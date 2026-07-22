@@ -2639,10 +2639,66 @@ the window exactly — and because Flutter applies that same scaling to where yo
 mouse clicks land, the buttons stay clickable and the text stays sharp. (The one
 genuinely seamless way, matching what the old egui app does internally, needs an
 experimental Flutter feature the pinned version keeps switched off — so this is
-the best available, and it is a good one.) The one piece of section E that could
-*not* be done is popping a panel out into its own separate desktop window: the
-pinned Flutter version only offers that behind an experimental, switched-off flag
-that our checks forbid using, and the add-on packages that fake it run each
-window as a wholly separate program that could not share the one live document —
-so pop-out stays the calm "arrives with multi-window support" note for now, with
-the full reasoning written down so a future version can pick it straight back up.
+the best available, and it is a good one.) The last piece of section E —
+**popping a panel out into its own desktop window** — was first judged
+impossible, then reopened when half of that judgement turned out to be wrong.
+Half stands: the pinned Flutter version only offers built-in multi-window behind
+an experimental, switched-off flag our checks forbid using, so we do not touch
+it. The other half was a misread. The add-on package we use
+(`desktop_multi_window`) does give each extra window its *own* Flutter engine
+with its own private memory — but crucially those engines all live inside the
+*same running program*. And the one thing a popped-out panel actually needs is
+not the main window's memory but the **document**, which the engine keeps in one
+shared place for the whole program (the single `lumit_bridge.dll` loaded once).
+So a popped-out panel simply opens its own door to that same shared engine —
+exactly the trick the picture-drawing helper already uses — and edits land in the
+same undo history everyone sees. What travels to the new window is a short note
+saying which panel to show and which colours to wear; the panel then reads the
+shared document and pushes its edits straight back. A few panels are offered this
+way (Project, Hierarchy, Effect controls, Effects & presets, Scopes); the Viewer
+and Timeline stay put because they lean on machinery that only makes sense in the
+main window. The new window checks the document about twice a second so an edit
+made in the main window shows up; the reverse — the main window noticing an edit
+made in a popped-out one — waits until you next touch the main window, an honest
+rough edge written down rather than papered over. The parts that actually open a
+real window can only be *built* on the owner's Windows machine (the tool that
+compiles them does not run in the assistant's environment), so the checks for
+this feature are run there.
+
+**The "engine-surface close" wave (bridge v0.9), in plain terms.** A run of
+small gaps all came down to the same thing: the engine *knew* something the
+Flutter side could not yet *see* or *ask for*. This wave closed those.
+
+- The picture-description the Flutter side reads (the "snapshot") learned to
+  carry a few more facts it had been leaving out: the clips laid along a
+  sequence row; where each layer's own clock sits on the timeline (so the
+  Timeline can draw the little "held frame" hatch when a slowed clip runs out of
+  footage); which markers are the music beats the app found versus ones you
+  dropped by hand; the words, size and colour of a text layer, a solid's size,
+  a camera's zoom; and, for each effect, exactly which effect it is and whether
+  each of its dials is animated. All of this was *already* in the engine — the
+  snapshot just wasn't repeating it — so adding it is safe and an older reader
+  simply ignores the new fields.
+- Drawing a mask by dragging a box in the Viewer now sends the box's real size
+  and position to the engine, instead of dropping a fixed starter shape in the
+  middle and ignoring where you drew.
+- Effect dials got a stopwatch and keyframe navigator, just like the transform
+  rows already had — turn animation on, drop a key at the playhead, nudge or
+  remove one — by reusing the very same machinery the transform keyframes use.
+- "Save these effects as a preset" and "load a preset onto this layer" now work:
+  the engine hands the Flutter side a small text file (a `.lumfx`) that is
+  byte-for-byte the same as the one the egui app writes, so presets pass between
+  the two apps; the Flutter side only has to pop up the file picker.
+- A **crash journal** is now written on every edit. The journal is a running
+  list of the edits you have made since the last save, kept in a little file
+  beside the app's cache; if the app ever stops unexpectedly, reopening the
+  project replays that list so your unsaved work comes back. The egui app has
+  always done this; now the Flutter bridge does too.
+- The **realtime tier** got wired up. During playback, if the machine can't
+  keep up at full resolution, a small controller (built and tested long ago but
+  never plugged in) drops the preview to half, a third, or a quarter resolution
+  and earns it back when things calm down — quick to worsen, slow to improve, so
+  the picture doesn't flicker between qualities. The Viewer can now ask the
+  bridge "what resolution are we at?" to show a readout, and in *Auto* mode it
+  renders the next frame at whatever the controller chose. Picking a fixed
+  resolution by hand simply overrides it.

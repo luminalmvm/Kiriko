@@ -191,13 +191,15 @@ pub(crate) fn segment_to_rate(
     };
     // Commit, then attach the drift to the refreshed snapshot the reply carries
     // (an additive field an older reader ignores).
-    if let Err(e) = bridge.store.commit(Op::SetLayerRetime {
+    let op = Op::SetLayerRetime {
         comp,
         layer: l.id,
         retime: Some(new_rt),
-    }) {
+    };
+    if let Err(e) = bridge.store.commit(op.clone()) {
         return err_json(format!("segment to rate: {e}"));
     }
+    crate::state::journal_append(bridge, &op);
     let mut v = snapshot_value(bridge);
     v["drift"] = json!(drift);
     v.to_string()
@@ -394,6 +396,7 @@ mod tests {
             store,
             path: None,
             media: crate::media::MediaCache::default(),
+            journal: None,
         };
         (b, comp_id, layer_id)
     }

@@ -50,6 +50,56 @@ Closed in the final sweep (2026-07-22), removed from the burn-down:
   and the three cache budgets (`effect_controls_panel.dart`, `dialogs.dart`,
   `settings_window.dart`).
 
+Closed in the v0.9 engine-surface wave (2026-07-22), removed from the burn-down
+— every one was *expose-what-exists* or a clean wire, not an engine-model change
+(evidence: the model already held clips, marker kinds, `start_offset`, the text/
+solid/camera assets, and the full `EffectKey` + parameter `Property` animations;
+lumit-eval's `RealtimeController` was built and tested, only unwired):
+
+- **Recovery journal-append wired** — `Bridge` now carries a `JournalFile` armed
+  at every document-install point (`new_project`/`open_project`/
+  `restore_journal`), and `state::commit`/`journal_append` append every op after
+  a successful store commit (the direct-commit ops — `new_composition`,
+  `import_footage`, the retime `→Rate` setter — append too), matching egui's
+  `AppState::commit`. Save/new clear it. `restore_journal` now recovers THIS
+  frontend's unsaved work.
+- **Beat markers drawn distinctly** — the snapshot now carries `marker_details`
+  (`[{frame, kind, confidence?, label, duration_frames?}]`) alongside the bare
+  `markers` frames (additive). `kind` is the model's `MarkerKind`
+  (`user`/`beat`/`chapter`); a beat carries its 0..1 confidence. Dart:
+  `BridgeMarker` on `BridgeComp.markerDetails`.
+- **Sequence sub-bars** — a Sequence layer's `clips` ride the snapshot (stable
+  ids, comp-frame placement, source refs, the clip's retime). Dart: `BridgeClip`
+  on `BridgeLayer.clips`.
+- **Overrun HOLD hatch — the data** — a layer now carries `start_offset_frame`/
+  `start_offset_secs` and its `in_secs`/`out_secs`, the ingredients
+  `overrun_span_secs` (`speed_rows.rs:68`) needs that the frame-only read-back
+  lacked. (Drawing the hatch itself is Dart-side Timeline work; the missing
+  engine data — the blocker — is closed.)
+- **Property editors — read-back** — text content/size/fill, a solid's size (the
+  colour already crossed) and a camera's zoom now read back from the snapshot
+  (`BridgeLayer.text`/`solidSize`/`cameraZoom`), off the session-edit map.
+- **Viewer mask draw — geometry** — `add_mask_geometry(comp, layer, kind, x, y,
+  w, h)` builds a rectangle/ellipse/star from a drawn drag rect exactly as
+  egui's Shape tool does (`overlays.rs`), so the drawn size/position is honoured.
+  Dart: `AppStateStub.addMaskGeometry`.
+- **Resolution picker — realtime-tier readout** — lumit-eval's
+  `RealtimeController` (K-171) is wired into the Viewer render path: a genuine
+  render reports its measured cost (`realtime::observe`, gated so a manual-scale
+  render never corrupts the Auto model), and `playback_tier`/`reset_realtime`
+  expose the tier + scale. Dart: `BridgePlaybackTier`, `AppStateStub.playbackTier`.
+- **Effects presets — `.lumfx`** — `save_effect_preset` returns the stack as
+  `.lumfx` JSON byte-compatible with `lumit-ui`'s `preset.rs` (a round-trip test
+  pins the two), `load_effect_preset` appends with fresh ids (K-065); the
+  snapshot also now carries each effect's full `EffectKey` (namespace + version)
+  and each animatable parameter's animation state. Dart side needs only the file
+  dialogs.
+- **Effect controls — per-parameter stopwatch/navigator** — the effect-param
+  keyframe ops (`toggle`/`add`/`remove`/`shift`/`set_interp`, with a `channel`
+  selector for point/colour) mirror the transform keyframe ops exactly, driving
+  each parameter's `Property` animation. Dart:
+  `AppStateStub.toggleEffectParamAnimated` and kin.
+
 ## Blocked — awaiting engine/bridge capability, with evidence
 
 Each row states the specific missing capability. None can land Dart-side without
@@ -63,13 +113,8 @@ annotated honestly rather than faked.
   call the Dart side awaits off its UI isolate), where egui runs it off-thread
   (`detect_beats`/`poll_beats`). If long-audio latency bites, a start/poll pair
   like the export ops is the follow-up — the maths is identical, only the
-  threading differs.
-- **Recovery `restore_journal` — bridge journal-append not wired.**
-  `restore_journal` replays whatever on-disk crash journal a prior session left,
-  but the bridge does **not yet write** the journal on every commit, so it
-  recovers a journal the egui app (say) wrote rather than one this bridge wrote.
-  Named follow-up: wire journal-append into the bridge commit path, matching
-  egui's `AppState::commit`.
+  threading differs. **Not converted in the v0.9 wave** (it functions today; the
+  conversion is a threading refactor, not a missing capability).
 
 **Section B — performance follow-ups:**
 
@@ -85,7 +130,9 @@ annotated honestly rather than faked.
   needs those consumers to probe-on-demand or the ops silently degrade to their
   unprobed fallback. Named follow-up: a probe worker drained on
   `lumit_bridge_snapshot` polls (mirroring egui's `MediaRegistry::poll`) **plus**
-  a synchronous `ensure_probed` fallback for the consumers above.
+  a synchronous `ensure_probed` fallback for the consumers above. **Not done in
+  the v0.9 wave** (functions synchronously today; the worker + fallbacks are a
+  threading refactor, not a missing capability).
 
 **Section C — timeline and graph:**
 
@@ -102,62 +149,69 @@ annotated honestly rather than faked.
   (§9.4); **kink badges** (§6.1); **numeric % and t·s entry fields** (§9.3); the
   graph's **own overrun hatching** (§7.2 — egui hatches overrun only on the clip
   bar, `panel.rs:992`).
-- **Beat markers drawn distinctly** — the snapshot serialises markers as bare
-  comp-frame indices (`snapshot.rs:137`, `Vec<i64>`) with no beat/user/chapter
-  kind, so beat markers render as ruler flags but cannot be styled apart. Needs
-  a marker-kind field on the snapshot.
-- **Sequence sub-bars** (clip boundaries inside a sequence layer's bar) —
-  `BridgeLayer` carries no `clips`, so clip boundaries are not reachable from
-  Dart.
-- **Overrun HOLD hatch on clip bars** (`panel.rs:992-1085`) —
-  `overrun_span_secs` (`speed_rows.rs:68`) needs the layer's `start_offset`, its
-  local in/out points and the source duration; the snapshot carries the retime
-  store and the media duration but **not** `start_offset` nor the layer's local
-  in/out, so the held span cannot be located.
 
 **Section D — editors, viewer and panels:**
 
-- **Property editors — read-back** for text content, solid size and camera zoom.
-  The setters exist and a solid's colour reads back from the snapshot; text
-  content, solid size and camera zoom are held in a session-edit map because the
-  snapshot does not carry those fields. True read-back awaits them.
-- **Viewer mask draw — geometry.** The Shape tool draws a rubber-band and
-  commits a mask via `addMask` (a kind only). The egui path commits real
-  rectangle/ellipse/star **geometry** (`SetLayerMasks`); the bridge `addMask` op
-  takes no geometry, so the drawn size/position is not honoured — awaits a
-  geometry-carrying mask op.
 - **Viewer transform gizmo — full manipulator.** The selected 2D layer draws an
   anchor crosshair, draggable to move its Position. The pan-behind anchor maths,
   the bounding box and the scale handles await the `LayerMap` (layer↔screen
   transform) port from `overlays.rs`.
-- **Resolution picker — realtime-tier readout.** The scale plumbing landed
-  (above); the realtime-tier readout is engine `RealtimeController` machinery the
-  bridge does not run — it awaits the engine playback machinery.
-- **Effects presets — `.lumfx`.** Save/load cannot round-trip byte-compatibly
-  from the snapshot, which flattens each effect's `EffectKey` (namespace and
-  version dropped, only the match name survives) and each parameter's animation.
-  A faithful preset awaits a preset bridge op (serialising the engine
-  `EffectInstance`) or an `EffectInstance` read-back in the snapshot.
-- **Effect controls — per-parameter stopwatch/navigator.** There are only
-  effect-param value setters (`setEffectParamScalar/Colour/Choice/Bool/Seed/
-  Point`), no effect-param **keyframe** ops — so no stopwatch/navigator on effect
-  params until those land.
 
 **Section E — chrome and shell:**
 
-- **Pop out a panel into its own OS window (multi-window)** — BLOCKED, with
-  evidence. The pinned SDK is **stable 3.44.7**. Its multi-window support exists
-  only as `packages/flutter/lib/src/widgets/_window.dart` — every symbol is
-  `@internal` (importing it fails `flutter analyze`) and each API throws
-  `UnsupportedError` unless `isWindowingEnabled`, a build-time flag OFF by
-  default. Enabling it would need a channel change + a feature flag + `@internal`
-  use — all barred by the analyze gate and the pinned-SDK constraint. The
-  community route (`desktop_multi_window` and kin) gives each window its own
-  Flutter engine/isolate — a **separate Dart heap** — so a popped-out panel could
-  not host the body over the SAME `AppStateStub` (the F0 spec's requirement).
-  Kept as the graceful-degradation notice (`shell/shell.dart` `onPopOut`); no
-  real window is opened, tests never spawn one. Re-attempt when the official
-  windowing API ships on stable un-gated (flutter/flutter#30701 / #142845).
+- **Pop out a panel into its own OS window (multi-window)** — BUILT behind
+  seams, pending on-machine verification (2026-07-22, re-attempt). The earlier
+  block rested on two findings; the **second was wrong**, so the row reopened.
+  - *SDK finding (stands).* The pinned stable SDK ships multi-window only as
+    `_window.dart` — every symbol `@internal` (importing it fails `flutter
+    analyze`), each API throwing unless `isWindowingEnabled` (a build-time flag
+    OFF by default). Its own API is therefore still not used. Not fought.
+  - *Community finding (corrected).* The old note said each window runs in its
+    own engine/isolate with a **separate Dart heap** and concluded a popout
+    could not reach the document. The heap fact is true; the conclusion is not.
+    `desktop_multi_window` (0.3.0, Apache-2.0, MixinNetwork; no third-party deps,
+    SDK `>=3.5.0` — compatible with `^3.12.2`) runs each secondary window as a
+    second Flutter engine in the **same OS process** (engine-per-window;
+    verified against the package's `window_controller.dart` + pub metadata, and
+    the same in-process model `multi_window_native` uses). A popout does not
+    need the main window's Dart objects — it needs the DOCUMENT, and that is
+    process-wide: the popout opens its OWN `LumitBridge.tryLoad()` handle to the
+    one already-loaded `lumit_bridge.dll`, reaching the same
+    `static BRIDGE: OnceLock<Mutex<Bridge>>` (the exact fact `bridge.dart`
+    already records for the render isolate: "same process, so the same engine
+    state behind the bridge's process-wide `Mutex`").
+  - *Built.* `lib/popout/`: `popout_arguments.dart` (panel + theme snapshot
+    serialised across the window boundary, panel-split gate), `popout_app_state.dart`
+    (`PopoutAppState extends AppStateStub` adding a public `resync` from the
+    shared surface only — the file it extends is another agent's, untouched),
+    `popout_host.dart` (theme from the snapshot, the panel body over the popout
+    state, ~2 Hz snapshot poll, clean disposal), `popout_windows.dart` (the
+    fake-injectable opener seam), `desktop_window_opener.dart` (the one file that
+    touches the plugin; close detected by diffing `WindowController.getAll()` on
+    `onWindowsChanged`), `popout_main.dart` (the sub-window entrypoint). Wired at
+    `shell/shell.dart onPopOut` (float on open, re-dock on close) +
+    `dock_widget.dart` (offer gated to hostable panels), `main.dart` (popout
+    dispatch), and `windows/runner/flutter_window.cpp` (sub-window plugin
+    callback).
+  - *Panel split.* Offered for the read-mostly panels a second engine hosts
+    honestly — Project, Hierarchy, Effect controls, Effects & presets, Scopes
+    (Scopes renders pixels via the CPU render path, which works from any engine).
+    The **Viewer and Timeline stay in-window**: the Viewer owns the shared-texture
+    registrar (a per-view concern) and the Timeline owns the playhead/transport
+    and the cache-bar warm set tied to the main preview — a second engine would
+    fork that state.
+  - *Staleness model (caveat).* The popout sees a main-window edit via its own
+    ~2 Hz `resync` poll; its own edits reach the shared journal and self-refresh.
+    The **main window** sees a popout's edit only on its next interaction —
+    `AppStateStub` has no public resync and this agent does not own that file, so
+    no main-window polling was added (documented, not faked).
+  - *Verification (caveat).* The native plugin, the `main.dart` dispatch and the
+    runner callback compile only in a real `flutter build windows` on the owner's
+    machine. The `flutter analyze` / `flutter test` / `flutter pub get` gates
+    could not be run in the implementing environment (no Dart/Flutter toolchain);
+    tests are behind seams (a fake opener, a fake bridge) and never open a real
+    window (`test/popout_test.dart`). Window sizing/title is a `window_manager`
+    follow-up. Close the row once the gates run green on the owner's machine.
 
 ## Deferred, not blocked
 

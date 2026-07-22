@@ -72,9 +72,12 @@ mod edits;
 mod export;
 mod ffi;
 mod framecache;
+mod fxkeys;
 mod fxparams;
 mod items;
 mod media;
+mod preset;
+mod realtime;
 mod recovery;
 #[cfg(feature = "render")]
 mod render;
@@ -112,10 +115,21 @@ use serde_json::json;
 /// (`set_cache_budget`/`clear_cache`/`cache_stats`), engine-side render
 /// cancellation (`render_comp_frame_gen` carrying a latest-wins generation, and
 /// `render_cancel_stale`), and the Project-panel thumbnail path (`thumbnail`).
-/// Every addition is *additive*, so an older Dart client still reads every field
-/// it knew, but the ABI number rises so a client that needs the new calls can
-/// insist on them.
-pub(crate) const ABI_VERSION: u32 = 8;
+/// v9 (this build) closes the last engine-surface parity blockers. Snapshot
+/// completions (all additive): sequence-layer `clips`, layer `start_offset`
+/// (frame + seconds) and local in/out seconds (the overrun-hatch ingredients),
+/// `marker_details` (marker kind + beat confidence), the text/solid-size/
+/// camera-zoom asset read-back, and effect `EffectKey` identity (namespace +
+/// version) plus each animatable parameter's animation state. New ops:
+/// `add_mask_geometry` (a mask from a drawn drag rect), the effect-param
+/// keyframe ops (`toggle`/`add`/`remove`/`shift`/`set_interp`), the effect
+/// preset ops (`save_effect_preset`/`load_effect_preset`, byte-compatible with
+/// the egui `.lumfx`), and the realtime tier readout (`playback_tier`/
+/// `reset_realtime`). Journal-append is now wired into every bridge commit, so
+/// `restore_journal` recovers this frontend's own unsaved work. Every addition
+/// is *additive*, so an older Dart client still reads every field it knew, but
+/// the ABI number rises so a client that needs the new calls can insist on them.
+pub(crate) const ABI_VERSION: u32 = 9;
 
 /// `{"ok":false,"error":"…"}`. serde escapes any control character, so the
 /// resulting string never carries an interior NUL and always makes a `CString`.

@@ -197,6 +197,61 @@ pub(crate) fn add_mask(bridge: &mut Bridge, comp_id: &str, layer_id: &str, kind:
     commit(bridge, Op::SetLayerMasks { comp, layer, masks }, "add mask")
 }
 
+/// Add a mask with real drawn geometry from a drag rect (v0.9) — the bridge
+/// twin of the egui Shape tool (`overlays.rs`), which commits a
+/// rectangle/ellipse/star built from the rubber-band the user dragged. `kind` is
+/// `rectangle`/`ellipse`/`star`; `x`/`y`/`w`/`h` are the drag rect in comp
+/// pixels (the Viewer maps screen → comp before calling). The mask is built
+/// exactly as `overlays.rs` builds it — a rectangle spans the rect, an ellipse
+/// inscribes it, a star centres in it with its outer radius half the shorter
+/// side and its inner radius 0.42 of that — then appended and committed as one
+/// [`Op::SetLayerMasks`], so the drawn size and position are honoured (the older
+/// `add_mask` placed a fixed starter shape regardless of the drag). A degenerate
+/// (near-zero) rect is a calm error rather than an invisible mask.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_mask_geometry(
+    bridge: &mut Bridge,
+    comp_id: &str,
+    layer_id: &str,
+    kind: &str,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> String {
+    let ctx = "add mask geometry";
+    let (comp, layer) = match parse_comp_layer(comp_id, layer_id) {
+        Ok(pair) => pair,
+        Err(e) => return err_json(format!("{ctx}: {e}")),
+    };
+    // Normalise the rect so a drag in any direction gives a positive extent
+    // (mirrors overlays.rs's min/max), then reject a degenerate one.
+    let (x0, w) = if w < 0.0 { (x + w, -w) } else { (x, w) };
+    let (y0, h) = if h < 0.0 { (y + h, -h) } else { (y, h) };
+    if !(w > 1.0 && h > 1.0) {
+        return err_json(format!("{ctx}: the drawn shape is too small"));
+    }
+    let doc = bridge.store.snapshot();
+    let Some(c) = doc.comp(comp) else {
+        return err_json(format!("{ctx}: unknown composition"));
+    };
+    let Some(l) = c.layers.iter().find(|l| l.id == layer) else {
+        return err_json(format!("{ctx}: unknown layer"));
+    };
+    let mask = match kind {
+        "rectangle" => lumit_core::mask::Mask::rectangle(x0, y0, w, h),
+        "ellipse" => lumit_core::mask::Mask::ellipse(x0 + w * 0.5, y0 + h * 0.5, w * 0.5, h * 0.5),
+        "star" => {
+            let outer = w.min(h) * 0.5;
+            lumit_core::mask::Mask::star(x0 + w * 0.5, y0 + h * 0.5, outer, outer * 0.42, 5)
+        }
+        other => return err_json(format!("{ctx}: unknown mask kind '{other}'")),
+    };
+    let mut masks = l.masks.clone();
+    masks.push(mask);
+    commit(bridge, Op::SetLayerMasks { comp, layer, masks }, ctx)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -407,5 +462,74 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("unknown mask kind"));
+    }
+
+    /// v0.9: a mask drawn from a drag rect honours the drawn size/position
+    /// (a rectangle spans the rect exactly), unlike the fixed-starter `add_mask`.
+    #[test]
+    fn add_mask_geometry_honours_the_drawn_rect() {
+        let (mut b, comp, layer) = comp_with_layer();
+        // A rect at (100, 200) sized 300×150.
+        let reply = parse(&add_mask_geometry(
+            &mut b,
+            &comp,
+            &layer,
+            "rectangle",
+            100.0,
+            200.0,
+            300.0,
+            150.0,
+        ));
+        assert_eq!(reply["ok"], json!(true));
+        let doc = b.store.snapshot();
+        let l = doc
+            .comp(Uuid::parse_str(&comp).unwrap())
+            .unwrap()
+            .layers
+            .iter()
+            .find(|l| l.id == Uuid::parse_str(&layer).unwrap())
+            .unwrap();
+        assert_eq!(l.masks.len(), 1);
+        let verts = &l.masks[0].path.vertices;
+        assert_eq!(verts.len(), 4);
+        // The four corners span exactly the drawn rect.
+        assert_eq!(verts[0].pos, (100.0, 200.0));
+        assert_eq!(verts[1].pos, (400.0, 200.0));
+        assert_eq!(verts[2].pos, (400.0, 350.0));
+        assert_eq!(verts[3].pos, (100.0, 350.0));
+    }
+
+    /// A drag in any direction normalises to a positive extent, and a degenerate
+    /// (near-zero) drag is a calm error rather than an invisible mask.
+    #[test]
+    fn add_mask_geometry_normalises_and_rejects_a_tiny_drag() {
+        let (mut b, comp, layer) = comp_with_layer();
+        // A negative-extent drag (dragged up-left) still spans the same rect.
+        let reply = parse(&add_mask_geometry(
+            &mut b,
+            &comp,
+            &layer,
+            "rectangle",
+            400.0,
+            350.0,
+            -300.0,
+            -150.0,
+        ));
+        assert_eq!(reply["ok"], json!(true));
+        let doc = b.store.snapshot();
+        let l = doc
+            .comp(Uuid::parse_str(&comp).unwrap())
+            .unwrap()
+            .layers
+            .iter()
+            .find(|l| l.id == Uuid::parse_str(&layer).unwrap())
+            .unwrap();
+        assert_eq!(l.masks[0].path.vertices[0].pos, (100.0, 200.0));
+        // A one-pixel drag is refused.
+        let tiny = parse(&add_mask_geometry(
+            &mut b, &comp, &layer, "ellipse", 10.0, 10.0, 0.5, 0.5,
+        ));
+        assert_eq!(tiny["ok"], json!(false));
+        assert!(tiny["error"].as_str().unwrap().contains("too small"));
     }
 }

@@ -2109,6 +2109,298 @@ pub unsafe extern "C" fn lumit_bridge_free_buffer(ptr: *mut u8, len: usize) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Bridge v0.9: mask geometry, effect-param keyframe ops, effect presets, and
+// the realtime preview-tier readout. Each guards its body and returns JSON.
+// ---------------------------------------------------------------------------
+
+/// Add a mask built from a drawn drag rect (`rectangle`/`ellipse`/`star`) at
+/// `(x, y)` sized `w`×`h` in comp pixels — the geometry-carrying mask op.
+///
+/// # Safety
+/// The three string pointers must each be null or a valid NUL-terminated UTF-8
+/// C string alive for the call.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_add_mask_geometry(
+    comp_id: *const c_char,
+    layer_id: *const c_char,
+    kind: *const c_char,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> *mut c_char {
+    let (Some(comp), Some(layer), Some(kind)) = (
+        c_str_to_string(comp_id),
+        c_str_to_string(layer_id),
+        c_str_to_string(kind),
+    ) else {
+        return to_c_string(err_json(
+            "add mask geometry: an argument was null or not valid UTF-8",
+        ));
+    };
+    guard(move || {
+        with_bridge(|b| crate::columns::add_mask_geometry(b, &comp, &layer, &kind, x, y, w, h))
+    })
+}
+
+/// Effect-param stopwatch: toggle keyframing on `(effect, param, channel)` at
+/// the playhead `frame`.
+///
+/// # Safety
+/// The four string pointers must each be null or a valid NUL-terminated UTF-8 C
+/// string alive for the call.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_toggle_effect_param_animated(
+    comp_id: *const c_char,
+    layer_id: *const c_char,
+    effect_id: *const c_char,
+    param_name: *const c_char,
+    channel: i64,
+    frame: i64,
+) -> *mut c_char {
+    let (Some(comp), Some(layer), Some(effect), Some(param)) = (
+        c_str_to_string(comp_id),
+        c_str_to_string(layer_id),
+        c_str_to_string(effect_id),
+        c_str_to_string(param_name),
+    ) else {
+        return to_c_string(err_json(
+            "toggle effect keyframing: an argument was null or not valid UTF-8",
+        ));
+    };
+    guard(move || {
+        with_bridge(|b| {
+            crate::fxkeys::toggle_effect_param_animated(
+                b, &comp, &layer, &effect, &param, channel, frame,
+            )
+        })
+    })
+}
+
+/// Insert or replace an effect-param keyframe at the playhead `frame` with
+/// `value`.
+///
+/// # Safety
+/// The four string pointers must each be null or a valid NUL-terminated UTF-8 C
+/// string alive for the call.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_add_effect_param_keyframe(
+    comp_id: *const c_char,
+    layer_id: *const c_char,
+    effect_id: *const c_char,
+    param_name: *const c_char,
+    channel: i64,
+    frame: i64,
+    value: f64,
+) -> *mut c_char {
+    let (Some(comp), Some(layer), Some(effect), Some(param)) = (
+        c_str_to_string(comp_id),
+        c_str_to_string(layer_id),
+        c_str_to_string(effect_id),
+        c_str_to_string(param_name),
+    ) else {
+        return to_c_string(err_json(
+            "add effect keyframe: an argument was null or not valid UTF-8",
+        ));
+    };
+    guard(move || {
+        with_bridge(|b| {
+            crate::fxkeys::add_effect_param_keyframe(
+                b, &comp, &layer, &effect, &param, channel, frame, value,
+            )
+        })
+    })
+}
+
+/// Remove the effect-param keyframe at the playhead `frame`.
+///
+/// # Safety
+/// The four string pointers must each be null or a valid NUL-terminated UTF-8 C
+/// string alive for the call.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_remove_effect_param_keyframe(
+    comp_id: *const c_char,
+    layer_id: *const c_char,
+    effect_id: *const c_char,
+    param_name: *const c_char,
+    channel: i64,
+    frame: i64,
+) -> *mut c_char {
+    let (Some(comp), Some(layer), Some(effect), Some(param)) = (
+        c_str_to_string(comp_id),
+        c_str_to_string(layer_id),
+        c_str_to_string(effect_id),
+        c_str_to_string(param_name),
+    ) else {
+        return to_c_string(err_json(
+            "remove effect keyframe: an argument was null or not valid UTF-8",
+        ));
+    };
+    guard(move || {
+        with_bridge(|b| {
+            crate::fxkeys::remove_effect_param_keyframe(
+                b, &comp, &layer, &effect, &param, channel, frame,
+            )
+        })
+    })
+}
+
+/// Slide the effect-param keyframes at comp `frames_json` (a JSON array of comp
+/// frame indices) by `delta` frames.
+///
+/// # Safety
+/// The five string pointers must each be null or a valid NUL-terminated UTF-8 C
+/// string alive for the call.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_shift_effect_param_keyframes(
+    comp_id: *const c_char,
+    layer_id: *const c_char,
+    effect_id: *const c_char,
+    param_name: *const c_char,
+    channel: i64,
+    frames_json: *const c_char,
+    delta: i64,
+) -> *mut c_char {
+    let (Some(comp), Some(layer), Some(effect), Some(param), Some(frames)) = (
+        c_str_to_string(comp_id),
+        c_str_to_string(layer_id),
+        c_str_to_string(effect_id),
+        c_str_to_string(param_name),
+        c_str_to_string(frames_json),
+    ) else {
+        return to_c_string(err_json(
+            "shift effect keyframes: an argument was null or not valid UTF-8",
+        ));
+    };
+    guard(move || {
+        with_bridge(|b| {
+            crate::fxkeys::shift_effect_param_keyframes(
+                b, &comp, &layer, &effect, &param, channel, &frames, delta,
+            )
+        })
+    })
+}
+
+/// Set the interpolation of the effect-param keyframe nearest the playhead
+/// `frame`. Each side names `Hold`/`Linear`/`Bezier`; a Bezier side reads its
+/// `(speed, influence)` from the matching pair.
+///
+/// # Safety
+/// The six string pointers must each be null or a valid NUL-terminated UTF-8 C
+/// string alive for the call.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn lumit_bridge_set_effect_param_keyframe_interp(
+    comp_id: *const c_char,
+    layer_id: *const c_char,
+    effect_id: *const c_char,
+    param_name: *const c_char,
+    channel: i64,
+    frame: i64,
+    interp_in: *const c_char,
+    interp_out: *const c_char,
+    speed_in: f64,
+    influence_in: f64,
+    speed_out: f64,
+    influence_out: f64,
+) -> *mut c_char {
+    let (Some(comp), Some(layer), Some(effect), Some(param), Some(int_in), Some(int_out)) = (
+        c_str_to_string(comp_id),
+        c_str_to_string(layer_id),
+        c_str_to_string(effect_id),
+        c_str_to_string(param_name),
+        c_str_to_string(interp_in),
+        c_str_to_string(interp_out),
+    ) else {
+        return to_c_string(err_json(
+            "set effect keyframe interp: an argument was null or not valid UTF-8",
+        ));
+    };
+    guard(move || {
+        with_bridge(|b| {
+            crate::fxkeys::set_effect_param_keyframe_interp(
+                b,
+                &comp,
+                &layer,
+                &effect,
+                &param,
+                channel,
+                frame,
+                &int_in,
+                &int_out,
+                speed_in,
+                influence_in,
+                speed_out,
+                influence_out,
+            )
+        })
+    })
+}
+
+/// Serialise a layer's effect stack to a `.lumfx` preset JSON string (in the
+/// reply's `preset` field) — the Dart side writes it to a file.
+///
+/// # Safety
+/// The three string pointers must each be null or a valid NUL-terminated UTF-8
+/// C string alive for the call.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_save_effect_preset(
+    comp_id: *const c_char,
+    layer_id: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let (Some(comp), Some(layer), Some(name)) = (
+        c_str_to_string(comp_id),
+        c_str_to_string(layer_id),
+        c_str_to_string(name),
+    ) else {
+        return to_c_string(err_json(
+            "save effect preset: an argument was null or not valid UTF-8",
+        ));
+    };
+    guard(move || with_bridge(|b| crate::preset::save_effect_preset(b, &comp, &layer, &name)))
+}
+
+/// Load a `.lumfx` preset (its JSON `text`, read from a file by Dart) onto a
+/// layer, appending its effects with fresh ids as one undo step.
+///
+/// # Safety
+/// The three string pointers must each be null or a valid NUL-terminated UTF-8
+/// C string alive for the call.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_load_effect_preset(
+    comp_id: *const c_char,
+    layer_id: *const c_char,
+    text: *const c_char,
+) -> *mut c_char {
+    let (Some(comp), Some(layer), Some(text)) = (
+        c_str_to_string(comp_id),
+        c_str_to_string(layer_id),
+        c_str_to_string(text),
+    ) else {
+        return to_c_string(err_json(
+            "load effect preset: an argument was null or not valid UTF-8",
+        ));
+    };
+    guard(move || with_bridge(|b| crate::preset::load_effect_preset(b, &comp, &layer, &text)))
+}
+
+/// The realtime preview tier currently in force: `{ok, tier, scale}` (tier
+/// 1 = Full … 4 = Quarter; scale = 1/tier). Stateless read of the session
+/// controller — the Viewer readout and Auto-mode scale source.
+#[no_mangle]
+pub extern "C" fn lumit_bridge_playback_tier() -> *mut c_char {
+    guard(crate::realtime::playback_tier)
+}
+
+/// Reset the realtime tier controller to Full (called when playback stops, the
+/// comp changes, or the user switches back to Auto). Returns the fresh tier.
+#[no_mangle]
+pub extern "C" fn lumit_bridge_reset_realtime() -> *mut c_char {
+    guard(crate::realtime::reset_reply)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -2128,7 +2420,7 @@ mod tests {
         assert!(!ptr.is_null());
         let copied = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
         assert_eq!(parse(&copied)["ok"], json!(true));
-        assert_eq!(parse(&copied)["abi"], json!(8));
+        assert_eq!(parse(&copied)["abi"], json!(9));
         unsafe { lumit_bridge_free_string(ptr) };
 
         let snap_ptr = lumit_bridge_snapshot();

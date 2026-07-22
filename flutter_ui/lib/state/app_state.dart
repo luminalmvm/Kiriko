@@ -1095,6 +1095,83 @@ class AppStateStub extends ChangeNotifier {
   void applyKeyframeBatch(String compId, String layerId, String opsJson) =>
       _editOp((e) => e.applyKeyframeBatch(compId, layerId, opsJson));
 
+  // Bridge v0.9 pass-throughs: mask geometry, effect-param keyframes, effect
+  // presets, and the realtime tier readout.
+
+  /// Add a mask built from a drawn drag rect (`rectangle`/`ellipse`/`star`) at
+  /// `(x, y)` sized `w`×`h` in comp pixels — the geometry-carrying Shape-tool
+  /// commit (the drawn size/position is honoured, unlike [addMask]).
+  void addMaskGeometry(String compId, String layerId, String kind, double x,
+          double y, double w, double h) =>
+      _editOp((e) => e.addMaskGeometry(compId, layerId, kind, x, y, w, h));
+
+  /// The effect-param stopwatch: toggle keyframing on `(effectId, paramName,
+  /// channel)` at the playhead. [channel] is 0 for a scalar, 0/1 for a point,
+  /// 0..3 for a colour.
+  void toggleEffectParamAnimated(String compId, String layerId, String effectId,
+          String paramName, int channel, int frame) =>
+      _editOp((e) => e.toggleEffectParamAnimated(
+          compId, layerId, effectId, paramName, channel, frame));
+
+  /// Insert or replace an effect-param keyframe at the playhead with [value].
+  void addEffectParamKeyframe(String compId, String layerId, String effectId,
+          String paramName, int channel, int frame, double value) =>
+      _editOp((e) => e.addEffectParamKeyframe(
+          compId, layerId, effectId, paramName, channel, frame, value));
+
+  /// Remove the effect-param keyframe at the playhead.
+  void removeEffectParamKeyframe(String compId, String layerId, String effectId,
+          String paramName, int channel, int frame) =>
+      _editOp((e) => e.removeEffectParamKeyframe(
+          compId, layerId, effectId, paramName, channel, frame));
+
+  /// Slide the effect-param keyframes at comp [framesJson] by [delta] frames.
+  void shiftEffectParamKeyframes(String compId, String layerId, String effectId,
+          String paramName, int channel, String framesJson, int delta) =>
+      _editOp((e) => e.shiftEffectParamKeyframes(
+          compId, layerId, effectId, paramName, channel, framesJson, delta));
+
+  /// Set the interpolation of the effect-param keyframe nearest the playhead.
+  void setEffectParamKeyframeInterp(
+          String compId,
+          String layerId,
+          String effectId,
+          String paramName,
+          int channel,
+          int frame,
+          String interpIn,
+          String interpOut,
+          double speedIn,
+          double influenceIn,
+          double speedOut,
+          double influenceOut) =>
+      _editOp((e) => e.setEffectParamKeyframeInterp(compId, layerId, effectId,
+          paramName, channel, frame, interpIn, interpOut, speedIn, influenceIn,
+          speedOut, influenceOut));
+
+  /// Load a `.lumfx` preset ([text] read from a file) onto a layer, appending
+  /// its effects with fresh ids as one undo step.
+  void loadEffectPreset(String compId, String layerId, String text) =>
+      _editOp((e) => e.loadEffectPreset(compId, layerId, text));
+
+  /// Serialise a layer's effect stack to a `.lumfx` JSON string (the Dart side
+  /// writes it to a file). Null with no bridge or an older library.
+  String? saveEffectPresetJson(String compId, String layerId, String name) {
+    final b = bridge;
+    if (b is LumitBridge) return b.saveEffectPresetJson(compId, layerId, name);
+    return null;
+  }
+
+  /// The realtime preview tier currently in force (Full/Half/Third/Quarter and
+  /// its scale) — the Viewer readout and, in Auto mode, the next-frame scale.
+  /// Falls back to Full with no bridge or an older library.
+  BridgePlaybackTier playbackTier() => editOps?.playbackTier() ?? BridgePlaybackTier.full;
+
+  /// Reset the realtime tier controller to Full (playback stopped, comp
+  /// changed, or the resolution picker switched back to Auto).
+  BridgePlaybackTier resetRealtime() =>
+      editOps?.resetRealtime() ?? BridgePlaybackTier.full;
+
   // Recovery + boot log.
 
   /// List the rotating autosaves beside a project (empty [path] = the loaded

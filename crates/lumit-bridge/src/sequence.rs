@@ -18,8 +18,105 @@ use crate::err_json;
 use crate::state::{parse_comp_layer, Bridge};
 use lumit_core::model::{Composition, Layer, LayerKind};
 use lumit_core::ops::Op;
-use lumit_core::sequence::Clip;
+use lumit_core::sequence::{Clip, ClipSource};
+use lumit_core::time::{CompTime, Rational};
+use serde_json::{json, Value};
 use uuid::Uuid;
+
+/// One clip on a Sequence layer serialised for the snapshot (v0.9), faithful to
+/// [`Clip`] so the Timeline can draw the sub-bars and ops can address a clip by
+/// its stable `id`. Placement is on the layer's own timeline;
+/// `place_start`/`place_end` are given as comp frames (layer-local time plus the
+/// layer's start offset, then the comp's own rate — the same map keyframes use)
+/// and kept in seconds alongside. The source trim (`source_in`/`source_out`)
+/// stays in seconds (the source's frame grid is its own, not the comp's), and
+/// the clip's own retime rides along so a ramped clip round-trips. `source_kind`
+/// names what the clip plays (a footage item or a nested comp).
+pub(crate) fn clip_value(c: &Composition, l: &Layer, clip: &Clip) -> Value {
+    // A clip-local layer time to a comp frame: the clip's placement is in
+    // layer-local seconds, so add the layer's start offset before the rate.
+    let place_frame = |secs: Rational| -> i64 {
+        let comp_time = secs
+            .checked_add(l.start_offset.0)
+            .map(CompTime)
+            .unwrap_or(CompTime(secs));
+        c.frame_rate.frame_at(comp_time)
+    };
+    let (source_kind, source_id) = match clip.source {
+        ClipSource::Footage(id) => ("footage", id),
+        ClipSource::Comp(id) => ("comp", id),
+    };
+    json!({
+        "id": clip.id.to_string(),
+        "source_kind": source_kind,
+        "source_id": source_id.to_string(),
+        "source_in_secs": clip.source_in.to_f64(),
+        "source_out_secs": clip.source_out.to_f64(),
+        "place_start_frame": place_frame(clip.place_start),
+        "place_end_frame": place_frame(clip.place_end()),
+        "place_start_secs": clip.place_start.to_f64(),
+        "place_duration_secs": clip.place_duration.to_f64(),
+        "retime": clip_retime_value(clip),
+    })
+}
+
+/// A clip's retime store as `{reverse, interpolation, boundaries, segments}`,
+/// the same shape the footage-layer retime read-back emits, but with the
+/// boundary times kept clip-local (a clip's placement, not the layer's start
+/// offset, positions it). Times are seconds; the Timeline maps them into place
+/// using the clip's `place_start`.
+fn clip_retime_value(clip: &Clip) -> Value {
+    use lumit_core::retime::{Ease, Interpolation, RetimeSegment};
+    let ease_name = |e: Ease| match e {
+        Ease::Linear => "Linear",
+        Ease::Slow => "Slow",
+        Ease::Fast => "Fast",
+        Ease::Smooth => "Smooth",
+        Ease::Sharp => "Sharp",
+    };
+    let r = &clip.retime;
+    let boundaries: Vec<Value> = r
+        .boundaries
+        .iter()
+        .map(|b| {
+            json!({
+                "t_seconds": b.t.to_f64(),
+                "s_seconds": b.s.to_f64(),
+                "smooth": b.smooth,
+            })
+        })
+        .collect();
+    let segments: Vec<Value> = r
+        .segments
+        .iter()
+        .map(|s| match s {
+            RetimeSegment::Rate(seg) => json!({
+                "kind": "rate",
+                "v0": seg.v0.to_f64(),
+                "v1": seg.v1.to_f64(),
+                "ease": ease_name(seg.ease),
+            }),
+            RetimeSegment::Map(seg) => json!({
+                "kind": "map",
+                "m0": seg.m0.to_f64(),
+                "m1": seg.m1.to_f64(),
+                "b0": seg.b0.to_f64(),
+                "b1": seg.b1.to_f64(),
+            }),
+        })
+        .collect();
+    let interp = match &r.interpolation {
+        Interpolation::Nearest => "nearest",
+        Interpolation::Blend => "blend",
+        Interpolation::Flow(_) => "flow",
+    };
+    json!({
+        "reverse": r.allow_reverse,
+        "interpolation": interp,
+        "boundaries": boundaries,
+        "segments": segments,
+    })
+}
 
 /// Resolve a comp id and layer id to the comp (cloned), the layer (cloned) and
 /// its clip list — refusing calmly when the layer is not a Sequence. A `not_seq`
@@ -274,6 +371,37 @@ mod tests {
         let reply = parse(&cut_clip_at_playhead(&mut b, &comp, &layer, 600));
         assert_eq!(reply["ok"], json!(false));
         assert!(reply["error"].as_str().unwrap().contains("no clip"));
+    }
+
+    /// v0.9: a Sequence layer serialises its `clips` into the snapshot — stable
+    /// ids, comp-frame placement, source refs and the clip's retime — so the
+    /// Timeline can draw the sub-bars and ops can address a clip.
+    #[test]
+    fn sequence_layer_serialises_its_clips() {
+        let (b, _comp, layer) = bridge_with_sequence();
+        let snap = parse(&snapshot(&b));
+        let comp_item = find_comp(&snap);
+        let l = comp_item["comp"]["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["id"] == json!(layer))
+            .unwrap();
+        let clips = l["clips"].as_array().unwrap();
+        assert_eq!(clips.len(), 1);
+        let clip = &clips[0];
+        assert_eq!(clip["source_kind"], json!("footage"));
+        assert!(clip["id"].as_str().unwrap().parse::<Uuid>().is_ok());
+        // The clip spans layer-local [0, 5] s; at 60 fps and start_offset 0 that
+        // is comp frames [0, 300].
+        assert_eq!(clip["place_start_frame"], json!(0));
+        assert_eq!(clip["place_end_frame"], json!(300));
+        assert_eq!(clip["source_in_secs"], json!(0.0));
+        assert_eq!(clip["source_out_secs"], json!(5.0));
+        // An identity retime reads back as a single rate segment at 1x.
+        let retime = &clip["retime"];
+        assert_eq!(retime["interpolation"], json!("nearest"));
+        assert!(retime["boundaries"].as_array().unwrap().len() >= 2);
     }
 
     #[test]

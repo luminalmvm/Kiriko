@@ -278,15 +278,53 @@ class BridgeEffectParam {
   /// none (or an older library that does not carry it).
   final BridgeParamRange? range;
 
+  /// Whether this parameter is keyframed (snapshot v0.9) — the stopwatch state
+  /// for the Effect controls. False for a non-animatable kind or an older
+  /// library that does not carry the flag.
+  final bool animated;
+
+  /// A scalar parameter's keyframes (snapshot v0.9), empty when not animated.
+  final List<BridgeKeyframe> keys;
+
+  /// A colour/point parameter's per-channel keyframes (snapshot v0.9), keyed by
+  /// the channel name (`keys_r`/`keys_g`/`keys_b`/`keys_a` for a colour,
+  /// `keys_x`/`keys_y` for a point). Empty for a scalar or non-animated param.
+  final Map<String, List<BridgeKeyframe>> channelKeys;
+
   const BridgeEffectParam({
     required this.name,
     required this.kind,
     required this.value,
     this.range,
+    this.animated = false,
+    this.keys = const [],
+    this.channelKeys = const {},
   });
 
   factory BridgeEffectParam.fromJson(Map<String, dynamic> m) {
     final rawRange = m['range'];
+    List<BridgeKeyframe> parseKeys(Object? raw) {
+      final out = <BridgeKeyframe>[];
+      if (raw is List) {
+        for (final k in raw) {
+          if (k is Map) out.add(BridgeKeyframe.fromJson(k.cast<String, dynamic>()));
+        }
+      }
+      return out;
+    }
+
+    final channelKeys = <String, List<BridgeKeyframe>>{};
+    for (final field in const [
+      'keys_r',
+      'keys_g',
+      'keys_b',
+      'keys_a',
+      'keys_x',
+      'keys_y',
+    ]) {
+      final parsed = parseKeys(m[field]);
+      if (parsed.isNotEmpty) channelKeys[field] = parsed;
+    }
     return BridgeEffectParam(
       name: m['name'] is String ? m['name'] as String : '',
       kind: m['kind'] is String ? m['kind'] as String : 'unknown',
@@ -294,22 +332,42 @@ class BridgeEffectParam {
       range: rawRange is Map
           ? BridgeParamRange.fromJson(rawRange.cast<String, dynamic>())
           : null,
+      animated: m['animated'] == true,
+      keys: parseKeys(m['keys']),
+      channelKeys: channelKeys,
     );
   }
 }
 
-/// One effect instance in a layer's stack (snapshot v3).
+/// One effect instance in a layer's stack (snapshot v3). Snapshot v0.9 adds the
+/// full effect identity — the [namespace] (`builtin`/`ofx`/`lfx`/`placeholder`)
+/// and [version] alongside the match [name] — plus [sampleTemporally], so a
+/// `.lumfx` preset round-trips byte-faithfully.
 class BridgeEffect {
   final String id;
   final String name;
   final bool enabled;
   final List<BridgeEffectParam> params;
 
+  /// The effect's namespace (snapshot v0.9), defaulting to `builtin` for an
+  /// older library that does not carry it.
+  final String namespace;
+
+  /// The effect's schema version (snapshot v0.9); 0 for an older library.
+  final int version;
+
+  /// Whether a temporal re-render effect re-evaluates this effect at each
+  /// sub-frame (snapshot v0.9); defaults true (the model default).
+  final bool sampleTemporally;
+
   const BridgeEffect({
     required this.id,
     required this.name,
     required this.enabled,
     required this.params,
+    this.namespace = 'builtin',
+    this.version = 0,
+    this.sampleTemporally = true,
   });
 
   factory BridgeEffect.fromJson(Map<String, dynamic> m) {
@@ -327,6 +385,9 @@ class BridgeEffect {
       name: m['name'] is String ? m['name'] as String : '',
       enabled: m['enabled'] == true,
       params: params,
+      namespace: m['namespace'] is String ? m['namespace'] as String : 'builtin',
+      version: _asInt(m['version']),
+      sampleTemporally: m['sample_temporally'] != false,
     );
   }
 }
@@ -635,12 +696,146 @@ class BridgeExportState {
       );
 }
 
+/// One marker with its kind (snapshot v0.9): the comp [frame] it lands on, its
+/// [kind] (`user`/`beat`/`chapter`), an optional beat [confidence] (0..1, only
+/// on a beat marker), its [label] and, for a spanning marker, [durationFrames].
+class BridgeMarker {
+  final int frame;
+  final String kind;
+  final double? confidence;
+  final String label;
+  final int? durationFrames;
+
+  const BridgeMarker({
+    required this.frame,
+    required this.kind,
+    this.confidence,
+    this.label = '',
+    this.durationFrames,
+  });
+
+  bool get isBeat => kind == 'beat';
+
+  factory BridgeMarker.fromJson(Map<String, dynamic> m) => BridgeMarker(
+        frame: _asInt(m['frame']),
+        kind: m['kind'] is String ? m['kind'] as String : 'user',
+        confidence:
+            m['confidence'] is num ? (m['confidence'] as num).toDouble() : null,
+        label: m['label'] is String ? m['label'] as String : '',
+        durationFrames:
+            m['duration_frames'] is num ? _asInt(m['duration_frames']) : null,
+      );
+}
+
+/// A text layer's document read-back (snapshot v0.9): the [content], the pixel
+/// [size] at natural scale, and the scene-linear RGBA [fill].
+class BridgeTextDocument {
+  final String content;
+  final double size;
+  final List<double> fill;
+
+  const BridgeTextDocument({
+    required this.content,
+    required this.size,
+    required this.fill,
+  });
+
+  factory BridgeTextDocument.fromJson(Map<String, dynamic> m) {
+    final rawFill = m['fill'];
+    final fill = rawFill is List
+        ? [for (final c in rawFill) _asDouble(c)]
+        : const <double>[0, 0, 0, 1];
+    return BridgeTextDocument(
+      content: m['content'] is String ? m['content'] as String : '',
+      size: _asDouble(m['size']),
+      fill: fill,
+    );
+  }
+}
+
+/// One clip on a Sequence layer (snapshot v0.9). [id] is stable (ops address a
+/// clip by it); [sourceKind] is `footage`/`comp` and [sourceId] names it;
+/// [placeStartFrame]/[placeEndFrame] are the clip's span on the comp timeline,
+/// with the source trim [sourceInSecs]/[sourceOutSecs] and the clip's own
+/// [retime] carried in seconds.
+class BridgeClip {
+  final String id;
+  final String sourceKind;
+  final String sourceId;
+  final double sourceInSecs;
+  final double sourceOutSecs;
+  final int placeStartFrame;
+  final int placeEndFrame;
+  final double placeStartSecs;
+  final double placeDurationSecs;
+  final BridgeRetime? retime;
+
+  const BridgeClip({
+    required this.id,
+    required this.sourceKind,
+    required this.sourceId,
+    required this.sourceInSecs,
+    required this.sourceOutSecs,
+    required this.placeStartFrame,
+    required this.placeEndFrame,
+    required this.placeStartSecs,
+    required this.placeDurationSecs,
+    this.retime,
+  });
+
+  factory BridgeClip.fromJson(Map<String, dynamic> m) => BridgeClip(
+        id: m['id'] is String ? m['id'] as String : '',
+        sourceKind: m['source_kind'] is String ? m['source_kind'] as String : 'footage',
+        sourceId: m['source_id'] is String ? m['source_id'] as String : '',
+        sourceInSecs: _asDouble(m['source_in_secs']),
+        sourceOutSecs: _asDouble(m['source_out_secs']),
+        placeStartFrame: _asInt(m['place_start_frame']),
+        placeEndFrame: _asInt(m['place_end_frame']),
+        placeStartSecs: _asDouble(m['place_start_secs']),
+        placeDurationSecs: _asDouble(m['place_duration_secs']),
+        retime: m['retime'] is Map
+            ? BridgeRetime.fromJson((m['retime'] as Map).cast<String, dynamic>())
+            : null,
+      );
+}
+
+/// The realtime preview tier (`playbackTier`/`resetRealtime`, ABI 9): the
+/// current [tier] (1 = Full, 2 = Half, 3 = Third, 4 = Quarter) and its [scale]
+/// (`1/tier`). In Auto resolution mode the Viewer renders the next frame at
+/// [scale] and shows the tier; a manual resolution pick ignores it. [full] is
+/// the idle default (Full, scale 1) — also what an older library reports.
+class BridgePlaybackTier {
+  final int tier;
+  final double scale;
+
+  const BridgePlaybackTier({required this.tier, required this.scale});
+
+  static const full = BridgePlaybackTier(tier: 1, scale: 1.0);
+
+  /// The tier name for the Viewer readout ("Full"/"Half"/"Third"/"Quarter").
+  String get label => switch (tier) {
+        1 => 'Full',
+        2 => 'Half',
+        3 => 'Third',
+        4 => 'Quarter',
+        _ => 'Full',
+      };
+
+  factory BridgePlaybackTier.fromJson(Map<String, dynamic> m) =>
+      BridgePlaybackTier(
+        tier: m['tier'] is num ? (m['tier'] as num).toInt() : 1,
+        scale: m['scale'] is num ? (m['scale'] as num).toDouble() : 1.0,
+      );
+}
+
 /// One composition layer as the Timeline reads it. `inFrame`/`outFrame` are comp
 /// frames derived from the comp's own rate; `index` is the stack position
 /// (0 = top). Snapshot v3 adds the [transform] read-back, the [effects] stack,
 /// and the identity links ([sourceItemId], [sourceCompId], [colour]). Snapshot
 /// v4 adds the [blendMode], [matte], [parent] columns and a footage layer's
-/// [retime].
+/// [retime]. Snapshot v0.9 adds [startOffsetFrame]/[startOffsetSecs]/[inSecs]/
+/// [outSecs] (the overrun-hatch ingredients), the asset read-back ([text],
+/// [cameraZoom], [solidSize]) and a sequence layer's [clips].
 class BridgeLayer {
   final String id;
   final int index;
@@ -680,6 +875,26 @@ class BridgeLayer {
   /// source rate.
   final BridgeRetime? retime;
 
+  /// Where layer time 0 sits on the comp timeline, as a comp frame and in
+  /// seconds (snapshot v0.9). With [inSecs]/[outSecs] these are the overrun HOLD
+  /// hatch ingredients the frame-only read-back lacked.
+  final int startOffsetFrame;
+  final double startOffsetSecs;
+  final double inSecs;
+  final double outSecs;
+
+  /// A text layer's document read-back (snapshot v0.9), else null.
+  final BridgeTextDocument? text;
+
+  /// A camera layer's zoom read-back as a property (snapshot v0.9), else null.
+  final BridgeTransformProperty? cameraZoom;
+
+  /// A solid layer's `[width, height]` (snapshot v0.9), else null.
+  final List<int>? solidSize;
+
+  /// A sequence layer's clips (snapshot v0.9); empty for other kinds.
+  final List<BridgeClip> clips;
+
   const BridgeLayer({
     required this.id,
     required this.index,
@@ -698,6 +913,14 @@ class BridgeLayer {
     this.matte,
     this.parent,
     this.retime,
+    this.startOffsetFrame = 0,
+    this.startOffsetSecs = 0,
+    this.inSecs = 0,
+    this.outSecs = 0,
+    this.text,
+    this.cameraZoom,
+    this.solidSize,
+    this.clips = const [],
   });
 
   factory BridgeLayer.fromJson(Map<String, dynamic> m) {
@@ -754,6 +977,33 @@ class BridgeLayer {
       retime: m['retime'] is Map
           ? BridgeRetime.fromJson((m['retime'] as Map).cast<String, dynamic>())
           : null,
+      startOffsetFrame: _asInt(m['start_offset_frame']),
+      startOffsetSecs: _asDouble(m['start_offset_secs']),
+      inSecs: _asDouble(m['in_secs']),
+      outSecs: _asDouble(m['out_secs']),
+      text: m['text'] is Map
+          ? BridgeTextDocument.fromJson((m['text'] as Map).cast<String, dynamic>())
+          : null,
+      cameraZoom: m['camera'] is Map
+          ? BridgeTransformProperty.fromJson(
+              (m['camera'] as Map).cast<String, dynamic>())
+          : null,
+      solidSize: m['solid_size'] is List && (m['solid_size'] as List).length == 2
+          ? [
+              _asInt((m['solid_size'] as List)[0]),
+              _asInt((m['solid_size'] as List)[1]),
+            ]
+          : null,
+      clips: () {
+        final out = <BridgeClip>[];
+        final raw = m['clips'];
+        if (raw is List) {
+          for (final c in raw) {
+            if (c is Map) out.add(BridgeClip.fromJson(c.cast<String, dynamic>()));
+          }
+        }
+        return out;
+      }(),
     );
   }
 }
@@ -767,6 +1017,12 @@ class BridgeComp {
   final int frameCount;
   final List<BridgeLayer> layers;
   final List<int> markers;
+
+  /// The markers with their kind (snapshot v0.9): the same markers as [markers]
+  /// but carrying `user`/`beat`/`chapter` and a beat's confidence, so beat
+  /// markers can be drawn apart. Empty for an older library (fall back to
+  /// [markers]).
+  final List<BridgeMarker> markerDetails;
 
   /// The work area as `[inFrame, outFrame]` (snapshot v3), or null for the full
   /// comp — the preview/export span the B/N keys set.
@@ -782,6 +1038,7 @@ class BridgeComp {
     required this.frameCount,
     required this.layers,
     required this.markers,
+    this.markerDetails = const [],
     this.workArea,
     this.motionBlur,
   });
@@ -803,6 +1060,15 @@ class BridgeComp {
         if (frame is num) markers.add(frame.toInt());
       }
     }
+    final markerDetails = <BridgeMarker>[];
+    final rawDetails = m['marker_details'];
+    if (rawDetails is List) {
+      for (final d in rawDetails) {
+        if (d is Map) {
+          markerDetails.add(BridgeMarker.fromJson(d.cast<String, dynamic>()));
+        }
+      }
+    }
     List<int>? workArea;
     final rawWorkArea = m['work_area'];
     if (rawWorkArea is List && rawWorkArea.length == 2) {
@@ -817,6 +1083,7 @@ class BridgeComp {
       frameCount: _asInt(m['frame_count']),
       layers: layers,
       markers: markers,
+      markerDetails: markerDetails,
       workArea: workArea,
       motionBlur: m['motion_blur'] is Map
           ? BridgeMotionBlur.fromJson(
@@ -1175,6 +1442,57 @@ typedef _Str3IntC = Pointer<Char> Function(
     Pointer<Char>, Pointer<Char>, Pointer<Char>, Int64);
 typedef _Str3IntDart = Pointer<Char> Function(
     Pointer<Char>, Pointer<Char>, Pointer<Char>, int);
+
+// Bridge v0.9 signatures.
+// Mask geometry: comp, layer, kind + a drag rect (x, y, w, h).
+typedef _MaskGeomC = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
+    Pointer<Char>, Double, Double, Double, Double);
+typedef _MaskGeomDart = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
+    Pointer<Char>, double, double, double, double);
+// Effect-param keyframe toggle/remove: comp, layer, effect, param, channel,
+// frame.
+typedef _EffectKeyC = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
+    Pointer<Char>, Pointer<Char>, Int64, Int64);
+typedef _EffectKeyDart = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
+    Pointer<Char>, Pointer<Char>, int, int);
+// Effect-param add-keyframe: the above + a value.
+typedef _EffectAddKeyC = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
+    Pointer<Char>, Pointer<Char>, Int64, Int64, Double);
+typedef _EffectAddKeyDart = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
+    Pointer<Char>, Pointer<Char>, int, int, double);
+// Effect-param shift: comp, layer, effect, param, channel, frames_json, delta.
+typedef _EffectShiftC = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
+    Pointer<Char>, Pointer<Char>, Int64, Pointer<Char>, Int64);
+typedef _EffectShiftDart = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
+    Pointer<Char>, Pointer<Char>, int, Pointer<Char>, int);
+// Effect-param keyframe interp: comp, layer, effect, param, channel, frame,
+// interp_in, interp_out, speed_in, influence_in, speed_out, influence_out.
+typedef _EffectKeyInterpC = Pointer<Char> Function(
+    Pointer<Char>,
+    Pointer<Char>,
+    Pointer<Char>,
+    Pointer<Char>,
+    Int64,
+    Int64,
+    Pointer<Char>,
+    Pointer<Char>,
+    Double,
+    Double,
+    Double,
+    Double);
+typedef _EffectKeyInterpDart = Pointer<Char> Function(
+    Pointer<Char>,
+    Pointer<Char>,
+    Pointer<Char>,
+    Pointer<Char>,
+    int,
+    int,
+    Pointer<Char>,
+    Pointer<Char>,
+    double,
+    double,
+    double,
+    double);
 
 /// The set of document operations the frontend drives the engine through. The
 /// real implementation is [LumitBridge] (dart:ffi over the shared library); the
@@ -1565,6 +1883,36 @@ abstract class EditOpsBridge {
   List<BridgeAutosave> listAutosaves(String path);
   BridgeReply restoreJournal(String path);
   List<String> bootLog();
+
+  // Bridge v0.9: mask geometry, effect-param keyframes, presets, realtime tier.
+  BridgeReply addMaskGeometry(String compId, String layerId, String kind,
+      double x, double y, double w, double h);
+  BridgeReply toggleEffectParamAnimated(String compId, String layerId,
+      String effectId, String paramName, int channel, int frame);
+  BridgeReply addEffectParamKeyframe(String compId, String layerId,
+      String effectId, String paramName, int channel, int frame, double value);
+  BridgeReply removeEffectParamKeyframe(String compId, String layerId,
+      String effectId, String paramName, int channel, int frame);
+  BridgeReply shiftEffectParamKeyframes(String compId, String layerId,
+      String effectId, String paramName, int channel, String framesJson,
+      int delta);
+  BridgeReply setEffectParamKeyframeInterp(
+      String compId,
+      String layerId,
+      String effectId,
+      String paramName,
+      int channel,
+      int frame,
+      String interpIn,
+      String interpOut,
+      double speedIn,
+      double influenceIn,
+      double speedOut,
+      double influenceOut);
+  BridgeReply saveEffectPreset(String compId, String layerId, String name);
+  BridgeReply loadEffectPreset(String compId, String layerId, String text);
+  BridgePlaybackTier playbackTier();
+  BridgePlaybackTier resetRealtime();
 }
 
 /// The loaded `lumit_bridge` library, bound to typed calls. Construct with
@@ -1657,6 +2005,18 @@ class LumitBridge
   final _EffectPointDart _setEffectParamPoint;
   final _Str3IntDart _reorderEffect;
   final _Str3Dart _applyKeyframeBatch;
+  // Bridge v0.9. Bound defensively (an older `.dll` lacks these): each stays
+  // null and its method degrades to an unsupported reply.
+  _MaskGeomDart? _addMaskGeometry;
+  _EffectKeyDart? _toggleEffectParamAnimated;
+  _EffectAddKeyDart? _addEffectParamKeyframe;
+  _EffectKeyDart? _removeEffectParamKeyframe;
+  _EffectShiftDart? _shiftEffectParamKeyframes;
+  _EffectKeyInterpDart? _setEffectParamKeyframeInterp;
+  _Str3Dart? _saveEffectPreset;
+  _Str3Dart? _loadEffectPreset;
+  _NoArgDart? _playbackTier;
+  _NoArgDart? _resetRealtime;
 
   /// Bound only when the loaded library exports it. An older `.dll` (predating
   /// the composited-comp path) lacks the symbol; rather than failing the whole
@@ -1986,6 +2346,67 @@ class LumitBridge
     } catch (_) {
       _thumbnail = null;
     }
+    // The ABI-9 symbols (mask geometry, effect-param keyframes, presets, the
+    // realtime tier readout) are optional: an older library omits them, so bind
+    // each group defensively and leave the method degrading to an unsupported
+    // reply when the symbol is missing.
+    try {
+      _addMaskGeometry = lib.lookupFunction<_MaskGeomC, _MaskGeomDart>(
+        'lumit_bridge_add_mask_geometry',
+      );
+    } catch (_) {
+      _addMaskGeometry = null;
+    }
+    try {
+      _toggleEffectParamAnimated =
+          lib.lookupFunction<_EffectKeyC, _EffectKeyDart>(
+        'lumit_bridge_toggle_effect_param_animated',
+      );
+      _addEffectParamKeyframe =
+          lib.lookupFunction<_EffectAddKeyC, _EffectAddKeyDart>(
+        'lumit_bridge_add_effect_param_keyframe',
+      );
+      _removeEffectParamKeyframe =
+          lib.lookupFunction<_EffectKeyC, _EffectKeyDart>(
+        'lumit_bridge_remove_effect_param_keyframe',
+      );
+      _shiftEffectParamKeyframes =
+          lib.lookupFunction<_EffectShiftC, _EffectShiftDart>(
+        'lumit_bridge_shift_effect_param_keyframes',
+      );
+      _setEffectParamKeyframeInterp =
+          lib.lookupFunction<_EffectKeyInterpC, _EffectKeyInterpDart>(
+        'lumit_bridge_set_effect_param_keyframe_interp',
+      );
+    } catch (_) {
+      _toggleEffectParamAnimated = null;
+      _addEffectParamKeyframe = null;
+      _removeEffectParamKeyframe = null;
+      _shiftEffectParamKeyframes = null;
+      _setEffectParamKeyframeInterp = null;
+    }
+    try {
+      _saveEffectPreset = lib.lookupFunction<_Str3C, _Str3Dart>(
+        'lumit_bridge_save_effect_preset',
+      );
+      _loadEffectPreset = lib.lookupFunction<_Str3C, _Str3Dart>(
+        'lumit_bridge_load_effect_preset',
+      );
+    } catch (_) {
+      _saveEffectPreset = null;
+      _loadEffectPreset = null;
+    }
+    try {
+      _playbackTier = lib.lookupFunction<_NoArgC, _NoArgDart>(
+        'lumit_bridge_playback_tier',
+      );
+      _resetRealtime = lib.lookupFunction<_NoArgC, _NoArgDart>(
+        'lumit_bridge_reset_realtime',
+      );
+    } catch (_) {
+      _playbackTier = null;
+      _resetRealtime = null;
+    }
   }
 
   /// The filesystem path the library was actually opened from, when a candidate
@@ -2031,8 +2452,13 @@ class LumitBridge
     }
     final cwd = Directory.current.path;
     final sep = Platform.pathSeparator;
-    paths.add('$cwd$sep..$sep..$sep..${sep}target${sep}debug$sep$name');
-    paths.add('$cwd$sep..${sep}target${sep}debug$sep$name');
+    // Release before debug: the shipped build instruction is
+    // `cargo build -p lumit-bridge --release --features shared-texture`, so a
+    // machine with both prefers the optimised library.
+    for (final profile in ['release', 'debug']) {
+      paths.add('$cwd$sep..$sep..$sep..${sep}target$sep$profile$sep$name');
+      paths.add('$cwd$sep..${sep}target$sep$profile$sep$name');
+    }
     paths.add(name);
     return paths;
   }
@@ -3039,6 +3465,215 @@ class LumitBridge
       }
     } catch (_) {}
     return const [];
+  }
+
+  // ---- Bridge v0.9 ----
+
+  @override
+  BridgeReply addMaskGeometry(String compId, String layerId, String kind,
+      double x, double y, double w, double h) {
+    final fn = _addMaskGeometry;
+    if (fn == null) return const BridgeReply.err('library lacks add mask geometry');
+    final c = compId.toNativeUtf8();
+    final l = layerId.toNativeUtf8();
+    final k = kind.toNativeUtf8();
+    try {
+      return BridgeReply.parse(
+          _readReply(fn(c.cast(), l.cast(), k.cast(), x, y, w, h)));
+    } finally {
+      malloc.free(c);
+      malloc.free(l);
+      malloc.free(k);
+    }
+  }
+
+  @override
+  BridgeReply toggleEffectParamAnimated(String compId, String layerId,
+      String effectId, String paramName, int channel, int frame) {
+    final fn = _toggleEffectParamAnimated;
+    if (fn == null) return const BridgeReply.err('library lacks effect keyframing');
+    return _effectKeyOp(fn, compId, layerId, effectId, paramName, channel, frame);
+  }
+
+  @override
+  BridgeReply removeEffectParamKeyframe(String compId, String layerId,
+      String effectId, String paramName, int channel, int frame) {
+    final fn = _removeEffectParamKeyframe;
+    if (fn == null) return const BridgeReply.err('library lacks effect keyframing');
+    return _effectKeyOp(fn, compId, layerId, effectId, paramName, channel, frame);
+  }
+
+  BridgeReply _effectKeyOp(_EffectKeyDart fn, String compId, String layerId,
+      String effectId, String paramName, int channel, int frame) {
+    final c = compId.toNativeUtf8();
+    final l = layerId.toNativeUtf8();
+    final e = effectId.toNativeUtf8();
+    final p = paramName.toNativeUtf8();
+    try {
+      return BridgeReply.parse(
+          _readReply(fn(c.cast(), l.cast(), e.cast(), p.cast(), channel, frame)));
+    } finally {
+      malloc.free(c);
+      malloc.free(l);
+      malloc.free(e);
+      malloc.free(p);
+    }
+  }
+
+  @override
+  BridgeReply addEffectParamKeyframe(String compId, String layerId,
+      String effectId, String paramName, int channel, int frame, double value) {
+    final fn = _addEffectParamKeyframe;
+    if (fn == null) return const BridgeReply.err('library lacks effect keyframing');
+    final c = compId.toNativeUtf8();
+    final l = layerId.toNativeUtf8();
+    final e = effectId.toNativeUtf8();
+    final p = paramName.toNativeUtf8();
+    try {
+      return BridgeReply.parse(_readReply(
+          fn(c.cast(), l.cast(), e.cast(), p.cast(), channel, frame, value)));
+    } finally {
+      malloc.free(c);
+      malloc.free(l);
+      malloc.free(e);
+      malloc.free(p);
+    }
+  }
+
+  @override
+  BridgeReply shiftEffectParamKeyframes(String compId, String layerId,
+      String effectId, String paramName, int channel, String framesJson,
+      int delta) {
+    final fn = _shiftEffectParamKeyframes;
+    if (fn == null) return const BridgeReply.err('library lacks effect keyframing');
+    final c = compId.toNativeUtf8();
+    final l = layerId.toNativeUtf8();
+    final e = effectId.toNativeUtf8();
+    final p = paramName.toNativeUtf8();
+    final f = framesJson.toNativeUtf8();
+    try {
+      return BridgeReply.parse(_readReply(
+          fn(c.cast(), l.cast(), e.cast(), p.cast(), channel, f.cast(), delta)));
+    } finally {
+      malloc.free(c);
+      malloc.free(l);
+      malloc.free(e);
+      malloc.free(p);
+      malloc.free(f);
+    }
+  }
+
+  @override
+  BridgeReply setEffectParamKeyframeInterp(
+      String compId,
+      String layerId,
+      String effectId,
+      String paramName,
+      int channel,
+      int frame,
+      String interpIn,
+      String interpOut,
+      double speedIn,
+      double influenceIn,
+      double speedOut,
+      double influenceOut) {
+    final fn = _setEffectParamKeyframeInterp;
+    if (fn == null) return const BridgeReply.err('library lacks effect keyframing');
+    final c = compId.toNativeUtf8();
+    final l = layerId.toNativeUtf8();
+    final e = effectId.toNativeUtf8();
+    final p = paramName.toNativeUtf8();
+    final ii = interpIn.toNativeUtf8();
+    final io = interpOut.toNativeUtf8();
+    try {
+      return BridgeReply.parse(_readReply(fn(c.cast(), l.cast(), e.cast(),
+          p.cast(), channel, frame, ii.cast(), io.cast(), speedIn, influenceIn,
+          speedOut, influenceOut)));
+    } finally {
+      malloc.free(c);
+      malloc.free(l);
+      malloc.free(e);
+      malloc.free(p);
+      malloc.free(ii);
+      malloc.free(io);
+    }
+  }
+
+  @override
+  BridgeReply saveEffectPreset(String compId, String layerId, String name) {
+    final fn = _saveEffectPreset;
+    if (fn == null) return const BridgeReply.err('library lacks effect presets');
+    // Save returns `{ok, preset}` (not a snapshot); the caller reads `preset`
+    // off the raw reply via [saveEffectPresetJson]. Here we surface ok/err.
+    return _threeStrOptional(fn, compId, layerId, name);
+  }
+
+  /// The `.lumfx` JSON text from a save-preset reply, or null on failure — the
+  /// Dart side writes it to a file it picked. Separate from [saveEffectPreset]
+  /// because the preset text is not a snapshot.
+  String? saveEffectPresetJson(String compId, String layerId, String name) {
+    final fn = _saveEffectPreset;
+    if (fn == null) return null;
+    final c = compId.toNativeUtf8();
+    final l = layerId.toNativeUtf8();
+    final n = name.toNativeUtf8();
+    try {
+      final raw = _readReply(fn(c.cast(), l.cast(), n.cast()));
+      final decoded = jsonDecode(raw);
+      if (decoded is Map && decoded['ok'] == true && decoded['preset'] is String) {
+        return decoded['preset'] as String;
+      }
+    } catch (_) {
+    } finally {
+      malloc.free(c);
+      malloc.free(l);
+      malloc.free(n);
+    }
+    return null;
+  }
+
+  @override
+  BridgeReply loadEffectPreset(String compId, String layerId, String text) {
+    final fn = _loadEffectPreset;
+    if (fn == null) return const BridgeReply.err('library lacks effect presets');
+    return _threeStrOptional(fn, compId, layerId, text);
+  }
+
+  BridgeReply _threeStrOptional(_Str3Dart fn, String a, String b, String c) {
+    final ap = a.toNativeUtf8();
+    final bp = b.toNativeUtf8();
+    final cp = c.toNativeUtf8();
+    try {
+      return BridgeReply.parse(_readReply(fn(ap.cast(), bp.cast(), cp.cast())));
+    } finally {
+      malloc.free(ap);
+      malloc.free(bp);
+      malloc.free(cp);
+    }
+  }
+
+  @override
+  BridgePlaybackTier playbackTier() {
+    final fn = _playbackTier;
+    if (fn == null) return BridgePlaybackTier.full;
+    return _parsePlaybackTier(_callNoArg(fn));
+  }
+
+  @override
+  BridgePlaybackTier resetRealtime() {
+    final fn = _resetRealtime;
+    if (fn == null) return BridgePlaybackTier.full;
+    return _parsePlaybackTier(_callNoArg(fn));
+  }
+
+  BridgePlaybackTier _parsePlaybackTier(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map && decoded['ok'] == true) {
+        return BridgePlaybackTier.fromJson(decoded.cast<String, dynamic>());
+      }
+    } catch (_) {}
+    return BridgePlaybackTier.full;
   }
 
   // Copy a reply string out of the engine-owned pointer, then free it back to

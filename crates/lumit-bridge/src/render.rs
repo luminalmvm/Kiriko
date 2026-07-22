@@ -78,6 +78,8 @@ pub(crate) fn render_comp_frame_gen(
     // Take a cheap snapshot (an `Arc<Document>` clone) under the document lock;
     // its identity is this render's cache epoch. Released before the GPU work.
     let doc = with_bridge(|b| b.store.snapshot());
+    // The comp's own frame rate, for the realtime controller's frame budget.
+    let fps = doc.comp(comp).map(|c| c.frame_rate.fps()).unwrap_or(0.0);
     let key = crate::framecache::FrameKey::new(comp, frame, scale);
     crate::framecache::get_or_render(&doc, key, || {
         // A genuine miss: only render if this generation is still the latest
@@ -88,13 +90,23 @@ pub(crate) fn render_comp_frame_gen(
         if generation != 0 && !crate::cancel::should_render(generation) {
             return None;
         }
-        with_ready(|renderer| {
+        // Measure the wall-clock cost of this *genuine* render (a cache hit
+        // never reaches here) and report it to the realtime tier controller
+        // (K-171). `observe` only feeds the cost when `scale` matches the
+        // controller's own tier — an Auto-mode render — so a manual-scale
+        // render never corrupts the model.
+        let started = std::time::Instant::now();
+        let rendered = with_ready(|renderer| {
             renderer
                 .render_rgba(&doc, comp, frame, scale)
                 .ok()
                 .map(|(rgba, w, h)| (w, h, rgba))
         })
-        .flatten()
+        .flatten();
+        if rendered.is_some() && fps > 0.0 {
+            crate::realtime::observe(started.elapsed().as_secs_f64(), fps, scale);
+        }
+        rendered
     })
 }
 

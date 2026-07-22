@@ -12,6 +12,11 @@ dependencies:
   ffi: ^2.1.0
   iconoir_flutter: ^7.11.1
   file_selector: ^1.1.0
+  # Multi-window (pop-out panels): each secondary window is its own Flutter
+  # engine in the SAME OS process, so it shares this process's lumit_bridge.dll
+  # and therefore the same engine document (see lib/popout/). Apache-2.0, no
+  # third-party deps, SDK >=3.5.0 — compatible with this package's ^3.12.2.
+  desktop_multi_window: ^0.3.0
 
 dev_dependencies:
   flutter_test:

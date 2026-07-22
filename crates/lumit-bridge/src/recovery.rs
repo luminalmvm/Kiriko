@@ -14,10 +14,10 @@
 //! - **List autosaves** — scan the `autosaves/` folder beside a project for its
 //!   rotating slots, newest first (pure file-system read, no document touched).
 //! - **Restore journal** — open a project and replay its crash journal
-//!   (`lumit_project::JournalFile`) on top, the egui recovery path. The engine
-//!   supports the read-and-replay; the bridge does not yet *write* the journal
-//!   on every commit, so this finds a journal a prior session left rather than
-//!   one this bridge wrote — a named follow-up recorded in the parity docs.
+//!   (`lumit_project::JournalFile`) on top, the egui recovery path. The bridge
+//!   now *writes* the journal on every commit (v0.9, `crate::state::commit` /
+//!   `journal_append`), so this recovers work THIS frontend left unsaved, not
+//!   only a journal a prior egui session wrote.
 //! - **Boot log** — the honest lines the engine can report for the splash:
 //!   library version, ABI, the compiled feature set. No fabricated module lines.
 
@@ -140,6 +140,8 @@ pub(crate) fn restore_journal(bridge: &mut Bridge, path: &str) -> String {
     bridge.store = DocumentStore::new(doc);
     bridge.path = Some(project);
     bridge.media.clear();
+    // Arm the journal on the recovered document so further edits are captured.
+    crate::state::set_journal_for_current_doc(bridge);
     crate::state::refresh_media(bridge);
     let mut v: serde_json::Value = match serde_json::from_str(&snapshot(bridge)) {
         Ok(v) => v,
@@ -265,6 +267,64 @@ mod tests {
             .unwrap()
             .iter()
             .any(|i| { i["kind"] == json!("folder") || i["kind"] == json!("composition") }));
+    }
+
+    /// Journal-append on commit (v0.9): once `new_project` arms the journal,
+    /// every bridge commit records its op, so `restore_journal` recovers *this*
+    /// frontend's unsaved work. The journal is keyed by the document id, so the
+    /// test reads it back and clears it (never leaving a cache-dir orphan).
+    #[test]
+    fn commit_appends_to_the_crash_journal() {
+        use crate::state::{commit, new_project};
+        use lumit_core::markers::Marker;
+        use lumit_core::model::ProjectItem;
+        use lumit_core::ops::Op;
+        // new_project arms the journal on the fresh document.
+        let mut b = Bridge::new();
+        new_project(&mut b);
+        // The journal starts empty for the fresh document.
+        assert!(b.journal.is_some(), "new_project arms the journal");
+        let _ = b.journal.as_ref().unwrap().clear();
+        // A commit records its op.
+        new_composition(&mut b, "Scene");
+        let comp = b
+            .store
+            .snapshot()
+            .items
+            .iter()
+            .find_map(|i| match i {
+                ProjectItem::Composition(c) => Some(c.id),
+                _ => None,
+            })
+            .expect("a comp exists");
+        commit(
+            &mut b,
+            Op::SetCompMarkers {
+                comp,
+                markers: vec![Marker::user(
+                    uuid::Uuid::now_v7(),
+                    lumit_core::Rational::new(1, 1).unwrap(),
+                )],
+            },
+            "test marker",
+        );
+        let ops = b.journal.as_ref().unwrap().read().expect("journal reads");
+        assert!(
+            ops.len() >= 2,
+            "the new comp and the marker op are journalled, got {}",
+            ops.len()
+        );
+        // A save clears the journal (it covers work between saves).
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("scene.lum");
+        crate::state::save_project(&mut b, &project.to_string_lossy());
+        let after_save = b.journal.as_ref().unwrap().read().expect("journal reads");
+        assert!(
+            after_save.is_empty(),
+            "a successful save clears the journal"
+        );
+        // Tidy up the cache-dir sidecar for this unique document id.
+        let _ = b.journal.as_ref().unwrap().clear();
     }
 
     #[test]
