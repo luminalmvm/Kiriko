@@ -62,7 +62,7 @@ pub(crate) fn with_bridge<R>(f: impl FnOnce(&mut Bridge) -> R) -> R {
     f(&mut guard)
 }
 
-/// `{"ok":true,"version":"…","abi":6}` — stateless.
+/// `{"ok":true,"version":"…","abi":7}` — stateless.
 pub(crate) fn version() -> String {
     json!({
         "ok": true,
@@ -522,8 +522,9 @@ pub(crate) fn parse_transform_prop(property: &str) -> Option<TransformProp> {
 
 /// Probe every footage item not already in the cache (synchronous, `media`
 /// feature only). Without the feature this is a no-op and every footage item
-/// reports status "unprobed".
-fn refresh_media(bridge: &mut Bridge) {
+/// reports status "unprobed". Shared with [`crate::items`]'s relink, which
+/// clears the cache and re-probes the freshly-linked files.
+pub(crate) fn refresh_media(bridge: &mut Bridge) {
     #[cfg(feature = "media")]
     {
         let doc = bridge.store.snapshot();
@@ -622,7 +623,7 @@ mod tests {
         let v = parse(&version());
         assert_eq!(v["ok"], json!(true));
         assert_eq!(v["abi"], json!(crate::ABI_VERSION));
-        assert_eq!(v["abi"], json!(6));
+        assert_eq!(v["abi"], json!(7));
     }
 
     #[test]

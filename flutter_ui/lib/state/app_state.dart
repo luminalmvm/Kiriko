@@ -801,6 +801,192 @@ class AppStateStub extends ChangeNotifier {
     addMask(compId, layerId, kind);
   }
 
+  // --- Bridge v0.5 op pass-throughs ---------------------------------------
+  //
+  // The v0.5 ops live on the [EditOpsBridge] capability interface (kept off
+  // [DocumentBridge] so the older fakes need no change). Each routes through
+  // [_editOp], refreshing the snapshot and surfacing any error on the error
+  // tint; with no bridge they are quiet no-ops, and with a live library too old
+  // to carry the capability they surface one calm notice.
+
+  /// The bridge's edit-ops capability, or null when there is no bridge or the
+  /// loaded library predates it.
+  EditOpsBridge? get editOps {
+    final b = bridge;
+    return b is EditOpsBridge ? b as EditOpsBridge : null;
+  }
+
+  /// Route an edit op through the capability, applying its reply. A missing
+  /// capability (an older library) is one calm notice, never a crash.
+  void _editOp(BridgeReply Function(EditOpsBridge e) op) {
+    final b = bridge;
+    if (b == null) return; // placeholder build — a quiet no-op, as before
+    final e = editOps;
+    if (e == null) {
+      errorNotice = 'this engine build is missing the edit ops';
+      notifyListeners();
+      return;
+    }
+    _applyOp(op(e));
+  }
+
+  // Razor (sequence layers) — resolves the front comp, selected layer and
+  // playhead the way the egui razor does. A non-sequence layer is refused
+  // calmly by the engine.
+
+  /// Cut the selected Sequence layer's clip at the playhead into two.
+  void cutClipAtPlayhead() {
+    final compId = frontCompIdResolved;
+    final layerId = selectedLayer;
+    if (compId == null || layerId == null) {
+      setNotice('Select a sequence layer to cut');
+      return;
+    }
+    _editOp((e) => e.cutClipAtPlayhead(compId, layerId, previewFrame));
+  }
+
+  /// Delete the clip under the playhead in the selected Sequence layer.
+  void deleteClipAtPlayhead() {
+    final compId = frontCompIdResolved;
+    final layerId = selectedLayer;
+    if (compId == null || layerId == null) {
+      setNotice('Select a sequence layer');
+      return;
+    }
+    _editOp((e) => e.deleteClipAtPlayhead(compId, layerId, previewFrame));
+  }
+
+  // Beats — on the front comp.
+
+  /// Detect beat markers for the front comp ([sensitivity] 0..100).
+  void detectBeats(int sensitivity) {
+    final compId = frontCompIdResolved;
+    if (compId == null) {
+      setNotice('Open a composition to detect beats');
+      return;
+    }
+    _editOp((e) => e.detectBeats(compId, sensitivity));
+  }
+
+  /// Remove the detected Beat markers from the front comp.
+  void clearBeatMarkers() {
+    final compId = frontCompIdResolved;
+    if (compId == null) return;
+    _editOp((e) => e.clearBeatMarkers(compId));
+  }
+
+  // Project-item ops.
+
+  /// Delete a project item.
+  void deleteItem(String itemId) => _editOp((e) => e.deleteItem(itemId));
+
+  /// Rename a project item.
+  void renameItem(String itemId, String name) =>
+      _editOp((e) => e.renameItem(itemId, name));
+
+  /// Move a project item back to the panel root.
+  void moveToRoot(String itemId) => _editOp((e) => e.moveToRoot(itemId));
+
+  /// Relink a missing footage item (and same-folder missing siblings) at [path].
+  void relink(String itemId, String path) =>
+      _editOp((e) => e.relink(itemId, path));
+
+  // Layer-identity ops.
+
+  /// Rename a layer.
+  void renameLayer(String compId, String layerId, String name) =>
+      _editOp((e) => e.renameLayer(compId, layerId, name));
+
+  /// Convert the selected footage layer into a Sequence layer, in place.
+  void convertToSequenced(String compId, String layerId) =>
+      _editOp((e) => e.convertToSequenced(compId, layerId));
+
+  /// Trim the selected retimed footage layer to where its source runs out.
+  void trimToSourceEnd(String compId, String layerId) =>
+      _editOp((e) => e.trimToSourceEnd(compId, layerId));
+
+  // Retime setters.
+
+  /// Set a footage layer's Retime reverse policy.
+  void setRetimeReverse(String compId, String layerId, bool reverse) =>
+      _editOp((e) => e.setRetimeReverse(compId, layerId, reverse));
+
+  /// Set a footage layer's frame interpolation (`nearest`/`blend`/`flow`).
+  void setRetimeInterpolation(String compId, String layerId, String interp) =>
+      _editOp((e) => e.setRetimeInterpolation(compId, layerId, interp));
+
+  // Asset-property ops.
+
+  /// Set a text layer's content (`text`, `size` in points, scene-linear RGBA
+  /// fill).
+  void setTextContent(String compId, String layerId, String text, double size,
+          double r, double g, double b, double a) =>
+      _editOp((e) => e.setTextContent(compId, layerId, text, size, r, g, b, a));
+
+  /// Recolour and resize a solid layer's backing asset.
+  void setSolid(String compId, String layerId, double r, double g, double b,
+          double a, int width, int height) =>
+      _editOp((e) => e.setSolid(compId, layerId, r, g, b, a, width, height));
+
+  /// Set a camera layer's zoom (pixels).
+  void setCameraZoom(String compId, String layerId, double zoom) =>
+      _editOp((e) => e.setCameraZoom(compId, layerId, zoom));
+
+  // Extra effect-param setters + reorder + the linked-keyframe batch.
+
+  /// Set an enum (`Choice`) effect parameter to an option [index].
+  void setEffectParamChoice(String compId, String layerId, String effectId,
+          String paramName, int index) =>
+      _editOp((e) =>
+          e.setEffectParamChoice(compId, layerId, effectId, paramName, index));
+
+  /// Set a `Bool` effect parameter.
+  void setEffectParamBool(String compId, String layerId, String effectId,
+          String paramName, bool value) =>
+      _editOp((e) =>
+          e.setEffectParamBool(compId, layerId, effectId, paramName, value));
+
+  /// Set a `Seed` effect parameter.
+  void setEffectParamSeed(String compId, String layerId, String effectId,
+          String paramName, int seed) =>
+      _editOp((e) =>
+          e.setEffectParamSeed(compId, layerId, effectId, paramName, seed));
+
+  /// Set a `Point` effect parameter to a static `(x, y)`.
+  void setEffectParamPoint(String compId, String layerId, String effectId,
+          String paramName, double x, double y) =>
+      _editOp((e) =>
+          e.setEffectParamPoint(compId, layerId, effectId, paramName, x, y));
+
+  /// Reorder an effect within a layer's stack to [newIndex].
+  void reorderEffect(String compId, String layerId, String effectId,
+          int newIndex) =>
+      _editOp((e) => e.reorderEffect(compId, layerId, effectId, newIndex));
+
+  /// Apply several transform-keyframe edits as one undo step (the linked x/y
+  /// pair). [opsJson] is a JSON array of `{property, action, frame, value?}`.
+  void applyKeyframeBatch(String compId, String layerId, String opsJson) =>
+      _editOp((e) => e.applyKeyframeBatch(compId, layerId, opsJson));
+
+  // Recovery + boot log.
+
+  /// List the rotating autosaves beside a project (empty [path] = the loaded
+  /// one). Empty without a bridge or an older library.
+  List<BridgeAutosave> listAutosaves(String path) =>
+      editOps?.listAutosaves(path) ?? const [];
+
+  /// Open a project and replay its crash journal on top (empty [path] = the
+  /// loaded one) — the recovery modal's "restore journal" path.
+  void restoreJournal(String path) {
+    final e = editOps;
+    if (e == null) return;
+    _applyReply(e.restoreJournal(path), 'Recovered from journal');
+  }
+
+  /// The engine's honest boot lines for the splash (empty without a bridge or an
+  /// older library, so the splash keeps its canned lines then).
+  List<String> bootLog() => editOps?.bootLog() ?? const [];
+
   // --- Bridge v0.4 export -------------------------------------------------
 
   /// Resolve a delivery [presetName] into the dialogue fields it stamps plus its
@@ -1253,16 +1439,29 @@ class AppStateStub extends ChangeNotifier {
   }
 
   /// Write one rotating autosave copy now, regardless of the interval (used by
-  /// [autosaveTick] and available to a manual "save a copy" path). Rotates the
-  /// `autosaves/` folder then writes the newest slot through the bridge; the
-  /// reply is deliberately NOT adopted, so the held snapshot keeps pointing at
-  /// the real project path.
+  /// [autosaveTick] and available to a manual "save a copy" path).
+  ///
+  /// The dedicated `lumit_bridge_autosave` op (v0.5) writes a rotating copy
+  /// beside the project WITHOUT re-pointing the engine's loaded path — closing
+  /// the known drift gap where the old `saveProject`-based autosave silently
+  /// pointed Save at the autosave file. When the loaded library carries the
+  /// capability we route through it (it does its own rotation); an older
+  /// library falls back to the previous rotate-then-`saveProject` path. Either
+  /// way the reply is NOT adopted, so the held snapshot keeps the real path.
   bool _writeAutosave() {
     final b = bridge;
     final path = snapshot?.path;
     if (b == null || path == null) return false;
-    final slot1 = AutosaveScheme.rotateAndNewestSlot(path, autosaveKeep);
-    final reply = b.saveProject(slot1);
+    final e = editOps;
+    final BridgeReply reply;
+    if (e != null) {
+      // The dedicated op rotates and writes without repointing the path.
+      reply = e.autosave('', autosaveKeep);
+    } else {
+      // Older library: rotate the folder ourselves, then write via saveProject.
+      final slot1 = AutosaveScheme.rotateAndNewestSlot(path, autosaveKeep);
+      reply = b.saveProject(slot1);
+    }
     if (reply.ok) {
       // Autosave is silent in the egui frontend (no status-line notice), so
       // nothing is surfaced here beyond clearing the dirty gate.

@@ -57,14 +57,20 @@
 //! - [`ffi`] — the `extern "C"` surface: pointer marshalling, `catch_unwind`
 //!   guards, and the string/buffer ownership contracts.
 
+mod assets;
+mod beats;
 mod columns;
 mod edits;
 mod export;
 mod ffi;
+mod fxparams;
+mod items;
 mod media;
+mod recovery;
 #[cfg(feature = "render")]
 mod render;
 mod retime;
+mod sequence;
 mod snapshot;
 mod state;
 
@@ -80,13 +86,22 @@ use serde_json::json;
 /// (start/poll/cancel + the preset resolver), keyframe interpolation read-back
 /// and set, the Retime read-back and its ops, and the blend-mode, matte, parent,
 /// motion-blur and add-mask columns. v5 added footage placement
-/// (`add_footage_layer`) and layer reorder (`reorder_layer`). v6 (this build)
-/// adds the Windows zero-copy Viewer path (`shared_supported`,
-/// `render_to_shared`, K-177) — present but answering "unsupported" unless the
-/// `.dll` was built with the `shared-texture` feature. Every addition is
-/// *additive*, so an older Dart client still reads every field it knew, but the
-/// ABI number rises so a client that needs the new calls can insist on them.
-pub(crate) const ABI_VERSION: u32 = 6;
+/// (`add_footage_layer`) and layer reorder (`reorder_layer`). v6 added the
+/// Windows zero-copy Viewer path (`shared_supported`, `render_to_shared`,
+/// K-177) — present but answering "unsupported" unless the `.dll` was built with
+/// the `shared-texture` feature. v7 (this build) burns down the parity ledger's
+/// bridge-ops section: the razor (`cut_clip_at_playhead`/`delete_clip_at_playhead`),
+/// beat detection (`detect_beats`/`clear_beat_markers`), the project-item ops
+/// (`delete_item`/`rename_item`/`move_to_root`/`relink`), the layer ops
+/// (`rename_layer`/`convert_to_sequenced`/`trim_to_source_end`), the Retime
+/// reverse/interpolation setters, the dedicated `autosave`, the text/solid/camera
+/// property ops, recovery (`list_autosaves`/`restore_journal`), the `boot_log`,
+/// the enum/bool/seed/point effect-param setters plus `reorder_effect`, the
+/// param **ranges** and effect **category** in the snapshot, and the single-undo
+/// `apply_keyframe_batch`. Every addition is *additive*, so an older Dart client
+/// still reads every field it knew, but the ABI number rises so a client that
+/// needs the new calls can insist on them.
+pub(crate) const ABI_VERSION: u32 = 7;
 
 /// `{"ok":false,"error":"…"}`. serde escapes any control character, so the
 /// resulting string never carries an interior NUL and always makes a `CString`.

@@ -231,23 +231,71 @@ class BridgeTransform {
 /// (`scalar`/`colour`/`enum`/`bool`/`seed`/`point`/`file`/`layer`); [value] is
 /// the decoded value (a double for scalar, a `List<double>` for colour, etc.),
 /// or null for a kind the bridge does not yet surface.
+/// A parameter's declared edit range (snapshot v5): the hard [min]/[max] (either
+/// nullable), the soft [sliderMin]/[sliderMax] a drag rides between (Float only),
+/// and the enum [options] (Choice only). Absent for kinds with no numeric range
+/// (bool/seed/point/file/layer). The drag controls clamp to [min]/[max] and pace
+/// their sensitivity by the slider span; before v5 these were unclamped.
+class BridgeParamRange {
+  final double? min;
+  final double? max;
+  final double? sliderMin;
+  final double? sliderMax;
+  final List<String> options;
+
+  const BridgeParamRange({
+    this.min,
+    this.max,
+    this.sliderMin,
+    this.sliderMax,
+    this.options = const [],
+  });
+
+  factory BridgeParamRange.fromJson(Map<String, dynamic> m) {
+    final rawOptions = m['options'];
+    return BridgeParamRange(
+      min: m['min'] is num ? (m['min'] as num).toDouble() : null,
+      max: m['max'] is num ? (m['max'] as num).toDouble() : null,
+      sliderMin: m['slider_min'] is num
+          ? (m['slider_min'] as num).toDouble()
+          : null,
+      sliderMax: m['slider_max'] is num
+          ? (m['slider_max'] as num).toDouble()
+          : null,
+      options: rawOptions is List
+          ? rawOptions.whereType<String>().toList()
+          : const [],
+    );
+  }
+}
+
 class BridgeEffectParam {
   final String name;
   final String kind;
   final Object? value;
 
+  /// The declared edit range (snapshot v5), or null for a param kind that has
+  /// none (or an older library that does not carry it).
+  final BridgeParamRange? range;
+
   const BridgeEffectParam({
     required this.name,
     required this.kind,
     required this.value,
+    this.range,
   });
 
-  factory BridgeEffectParam.fromJson(Map<String, dynamic> m) =>
-      BridgeEffectParam(
-        name: m['name'] is String ? m['name'] as String : '',
-        kind: m['kind'] is String ? m['kind'] as String : 'unknown',
-        value: m['value'],
-      );
+  factory BridgeEffectParam.fromJson(Map<String, dynamic> m) {
+    final rawRange = m['range'];
+    return BridgeEffectParam(
+      name: m['name'] is String ? m['name'] as String : '',
+      kind: m['kind'] is String ? m['kind'] as String : 'unknown',
+      value: m['value'],
+      range: rawRange is Map
+          ? BridgeParamRange.fromJson(rawRange.cast<String, dynamic>())
+          : null,
+    );
+  }
 }
 
 /// One effect instance in a layer's stack (snapshot v3).
@@ -284,16 +332,43 @@ class BridgeEffect {
 }
 
 /// One entry in the effect registry (`listEffects`): a stable [name] (the match
-/// name an op takes) and its sentence-case [label].
+/// name an op takes), its sentence-case [label], and its [category] (a stable
+/// machine key the Effects browser groups by, e.g. `blur_sharpen`) with its
+/// sentence-case [categoryLabel] heading (snapshot v5). An older library carries
+/// no category, so both default to empty (the browser then lists flat).
 class BridgeEffectInfo {
   final String name;
   final String label;
+  final String category;
+  final String categoryLabel;
 
-  const BridgeEffectInfo({required this.name, required this.label});
+  const BridgeEffectInfo({
+    required this.name,
+    required this.label,
+    this.category = '',
+    this.categoryLabel = '',
+  });
 
   factory BridgeEffectInfo.fromJson(Map<String, dynamic> m) => BridgeEffectInfo(
         name: m['name'] is String ? m['name'] as String : '',
         label: m['label'] is String ? m['label'] as String : '',
+        category: m['category'] is String ? m['category'] as String : '',
+        categoryLabel:
+            m['category_label'] is String ? m['category_label'] as String : '',
+      );
+}
+
+/// One rotating autosave beside a project (`listAutosaves`): its [slot] (1 =
+/// newest) and absolute [path].
+class BridgeAutosave {
+  final int slot;
+  final String path;
+
+  const BridgeAutosave({required this.slot, required this.path});
+
+  factory BridgeAutosave.fromJson(Map<String, dynamic> m) => BridgeAutosave(
+        slot: _asInt(m['slot']),
+        path: m['path'] is String ? m['path'] as String : '',
       );
 }
 
@@ -1063,6 +1138,33 @@ typedef _RenderSharedC = Bool Function(Pointer<Char>, Uint64, Pointer<Uint64>,
 typedef _RenderSharedDart = bool Function(
     Pointer<Char>, int, Pointer<Uint64>, Pointer<Uint32>, Pointer<Uint32>);
 
+// Bridge v0.5 signatures.
+typedef _TextContentC = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
+    Pointer<Char>, Double, Double, Double, Double, Double);
+typedef _TextContentDart = Pointer<Char> Function(
+    Pointer<Char>, Pointer<Char>, Pointer<Char>, double, double, double, double,
+    double);
+typedef _SetSolidC = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
+    Double, Double, Double, Double, Uint32, Uint32);
+typedef _SetSolidDart = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
+    double, double, double, double, int, int);
+typedef _EffectU32C = Pointer<Char> Function(
+    Pointer<Char>, Pointer<Char>, Pointer<Char>, Pointer<Char>, Uint32);
+typedef _EffectU32Dart = Pointer<Char> Function(
+    Pointer<Char>, Pointer<Char>, Pointer<Char>, Pointer<Char>, int);
+typedef _EffectBoolC = Pointer<Char> Function(
+    Pointer<Char>, Pointer<Char>, Pointer<Char>, Pointer<Char>, Bool);
+typedef _EffectBoolDart = Pointer<Char> Function(
+    Pointer<Char>, Pointer<Char>, Pointer<Char>, Pointer<Char>, bool);
+typedef _EffectPointC = Pointer<Char> Function(
+    Pointer<Char>, Pointer<Char>, Pointer<Char>, Pointer<Char>, Double, Double);
+typedef _EffectPointDart = Pointer<Char> Function(
+    Pointer<Char>, Pointer<Char>, Pointer<Char>, Pointer<Char>, double, double);
+typedef _Str3IntC = Pointer<Char> Function(
+    Pointer<Char>, Pointer<Char>, Pointer<Char>, Int64);
+typedef _Str3IntDart = Pointer<Char> Function(
+    Pointer<Char>, Pointer<Char>, Pointer<Char>, int);
+
 /// The set of document operations the frontend drives the engine through. The
 /// real implementation is [LumitBridge] (dart:ffi over the shared library); the
 /// interface exists so tests can supply a fake without loading the library or
@@ -1320,10 +1422,72 @@ abstract class SharedTextureBridge {
   SharedFrame? renderToShared(String compId, int frame);
 }
 
+/// The bridge v0.5 edit ops, kept as their own capability interface (like
+/// [CompRenderBridge]) so the many `implements DocumentBridge` fakes across the
+/// suite need no change: a bridge either offers this capability or it does not.
+/// The real [LumitBridge] implements it; [AppStateStub] probes with an
+/// `is EditOpsBridge` check and routes its pass-throughs here, surfacing a calm
+/// "engine build without edit ops" notice when the loaded library is too old.
+abstract class EditOpsBridge {
+  // Razor (sequence layers).
+  BridgeReply cutClipAtPlayhead(String compId, String layerId, int frame);
+  BridgeReply deleteClipAtPlayhead(String compId, String layerId, int frame);
+
+  // Beats.
+  BridgeReply detectBeats(String compId, int sensitivity);
+  BridgeReply clearBeatMarkers(String compId);
+
+  // Project-item ops.
+  BridgeReply deleteItem(String itemId);
+  BridgeReply renameItem(String itemId, String name);
+  BridgeReply moveToRoot(String itemId);
+  BridgeReply relink(String itemId, String path);
+
+  // Layer-identity ops.
+  BridgeReply renameLayer(String compId, String layerId, String name);
+  BridgeReply convertToSequenced(String compId, String layerId);
+  BridgeReply trimToSourceEnd(String compId, String layerId);
+
+  // Retime setters.
+  BridgeReply setRetimeReverse(String compId, String layerId, bool reverse);
+  BridgeReply setRetimeInterpolation(
+      String compId, String layerId, String interp);
+
+  // Asset-property ops.
+  BridgeReply setTextContent(String compId, String layerId, String text,
+      double size, double r, double g, double b, double a);
+  BridgeReply setSolid(String compId, String layerId, double r, double g,
+      double b, double a, int width, int height);
+  BridgeReply setCameraZoom(String compId, String layerId, double zoom);
+
+  // Extra effect-param setters + reorder + the linked-keyframe batch.
+  BridgeReply setEffectParamChoice(
+      String compId, String layerId, String effectId, String paramName, int index);
+  BridgeReply setEffectParamBool(String compId, String layerId, String effectId,
+      String paramName, bool value);
+  BridgeReply setEffectParamSeed(String compId, String layerId, String effectId,
+      String paramName, int seed);
+  BridgeReply setEffectParamPoint(String compId, String layerId, String effectId,
+      String paramName, double x, double y);
+  BridgeReply reorderEffect(
+      String compId, String layerId, String effectId, int newIndex);
+  BridgeReply applyKeyframeBatch(String compId, String layerId, String opsJson);
+
+  // Recovery + boot log.
+  BridgeReply autosave(String path, int keep);
+  List<BridgeAutosave> listAutosaves(String path);
+  BridgeReply restoreJournal(String path);
+  List<String> bootLog();
+}
+
 /// The loaded `lumit_bridge` library, bound to typed calls. Construct with
 /// [tryLoad]; a null result means the app runs on its placeholders.
 class LumitBridge
-    implements DocumentBridge, CompRenderBridge, SharedTextureBridge {
+    implements
+        DocumentBridge,
+        CompRenderBridge,
+        SharedTextureBridge,
+        EditOpsBridge {
   final _NoArgDart _version;
   final _NoArgDart _newProject;
   final _StrArgDart _openProject;
@@ -1376,6 +1540,33 @@ class LumitBridge
   final _NoArgDart _exportPoll;
   final _NoArgDart _exportCancel;
   final _DecodeDart _decodeFrame;
+  // Bridge v0.5.
+  final _Str2IntDart _cutClipAtPlayhead;
+  final _Str2IntDart _deleteClipAtPlayhead;
+  final _MarkerDart _detectBeats;
+  final _StrArgDart _clearBeatMarkers;
+  final _StrArgDart _deleteItem;
+  final _Str2Dart _renameItem;
+  final _StrArgDart _moveToRoot;
+  final _Str2Dart _relink;
+  final _Str3Dart _renameLayer;
+  final _Str2Dart _convertToSequenced;
+  final _Str2Dart _trimToSourceEnd;
+  final _Str2BoolDart _setRetimeReverse;
+  final _Str3Dart _setRetimeInterpolation;
+  final _MarkerDart _autosave;
+  final _StrArgDart _listAutosaves;
+  final _StrArgDart _restoreJournal;
+  final _NoArgDart _bootLog;
+  final _TextContentDart _setTextContent;
+  final _SetSolidDart _setSolid;
+  final _Str2DoubleDart _setCameraZoom;
+  final _EffectU32Dart _setEffectParamChoice;
+  final _EffectBoolDart _setEffectParamBool;
+  final _EffectU32Dart _setEffectParamSeed;
+  final _EffectPointDart _setEffectParamPoint;
+  final _Str3IntDart _reorderEffect;
+  final _Str3Dart _applyKeyframeBatch;
 
   /// Bound only when the loaded library exports it. An older `.dll` (predating
   /// the composited-comp path) lacks the symbol; rather than failing the whole
@@ -1551,6 +1742,88 @@ class LumitBridge
         ),
         _decodeFrame = lib.lookupFunction<_DecodeC, _DecodeDart>(
           'lumit_bridge_decode_frame',
+        ),
+        _cutClipAtPlayhead = lib.lookupFunction<_Str2IntC, _Str2IntDart>(
+          'lumit_bridge_cut_clip_at_playhead',
+        ),
+        _deleteClipAtPlayhead = lib.lookupFunction<_Str2IntC, _Str2IntDart>(
+          'lumit_bridge_delete_clip_at_playhead',
+        ),
+        _detectBeats = lib.lookupFunction<_MarkerC, _MarkerDart>(
+          'lumit_bridge_detect_beats',
+        ),
+        _clearBeatMarkers = lib.lookupFunction<_StrArgC, _StrArgDart>(
+          'lumit_bridge_clear_beat_markers',
+        ),
+        _deleteItem = lib.lookupFunction<_StrArgC, _StrArgDart>(
+          'lumit_bridge_delete_item',
+        ),
+        _renameItem = lib.lookupFunction<_Str2C, _Str2Dart>(
+          'lumit_bridge_rename_item',
+        ),
+        _moveToRoot = lib.lookupFunction<_StrArgC, _StrArgDart>(
+          'lumit_bridge_move_to_root',
+        ),
+        _relink = lib.lookupFunction<_Str2C, _Str2Dart>(
+          'lumit_bridge_relink',
+        ),
+        _renameLayer = lib.lookupFunction<_Str3C, _Str3Dart>(
+          'lumit_bridge_rename_layer',
+        ),
+        _convertToSequenced = lib.lookupFunction<_Str2C, _Str2Dart>(
+          'lumit_bridge_convert_to_sequenced',
+        ),
+        _trimToSourceEnd = lib.lookupFunction<_Str2C, _Str2Dart>(
+          'lumit_bridge_trim_to_source_end',
+        ),
+        _setRetimeReverse = lib.lookupFunction<_Str2BoolC, _Str2BoolDart>(
+          'lumit_bridge_set_retime_reverse',
+        ),
+        _setRetimeInterpolation = lib.lookupFunction<_Str3C, _Str3Dart>(
+          'lumit_bridge_set_retime_interpolation',
+        ),
+        _autosave = lib.lookupFunction<_MarkerC, _MarkerDart>(
+          'lumit_bridge_autosave',
+        ),
+        _listAutosaves = lib.lookupFunction<_StrArgC, _StrArgDart>(
+          'lumit_bridge_list_autosaves',
+        ),
+        _restoreJournal = lib.lookupFunction<_StrArgC, _StrArgDart>(
+          'lumit_bridge_restore_journal',
+        ),
+        _bootLog = lib.lookupFunction<_NoArgC, _NoArgDart>(
+          'lumit_bridge_boot_log',
+        ),
+        _setTextContent = lib.lookupFunction<_TextContentC, _TextContentDart>(
+          'lumit_bridge_set_text_content',
+        ),
+        _setSolid = lib.lookupFunction<_SetSolidC, _SetSolidDart>(
+          'lumit_bridge_set_solid',
+        ),
+        _setCameraZoom = lib.lookupFunction<_Str2DoubleC, _Str2DoubleDart>(
+          'lumit_bridge_set_camera_zoom',
+        ),
+        _setEffectParamChoice =
+            lib.lookupFunction<_EffectU32C, _EffectU32Dart>(
+          'lumit_bridge_set_effect_param_choice',
+        ),
+        _setEffectParamBool =
+            lib.lookupFunction<_EffectBoolC, _EffectBoolDart>(
+          'lumit_bridge_set_effect_param_bool',
+        ),
+        _setEffectParamSeed =
+            lib.lookupFunction<_EffectU32C, _EffectU32Dart>(
+          'lumit_bridge_set_effect_param_seed',
+        ),
+        _setEffectParamPoint =
+            lib.lookupFunction<_EffectPointC, _EffectPointDart>(
+          'lumit_bridge_set_effect_param_point',
+        ),
+        _reorderEffect = lib.lookupFunction<_Str3IntC, _Str3IntDart>(
+          'lumit_bridge_reorder_effect',
+        ),
+        _applyKeyframeBatch = lib.lookupFunction<_Str3C, _Str3Dart>(
+          'lumit_bridge_apply_keyframe_batch',
         ),
         _freeString = lib.lookupFunction<_FreeC, _FreeDart>(
           'lumit_bridge_free_string',
@@ -2314,6 +2587,248 @@ class LumitBridge
       malloc.free(outW);
       malloc.free(outH);
     }
+  }
+
+  // --- Bridge v0.5 ops ---------------------------------------------------
+
+  /// Call a one-string op, freeing the argument afterwards.
+  BridgeReply _oneStrOp(_StrArgDart fn, String a) =>
+      BridgeReply.parse(_callStrArg(fn, a));
+
+  /// Call a (comp, layer, int) op, freeing the two strings afterwards.
+  BridgeReply _twoStrIntOp(_Str2IntDart fn, String a, String b, int n) {
+    final pa = a.toNativeUtf8();
+    final pb = b.toNativeUtf8();
+    try {
+      return BridgeReply.parse(_readReply(fn(pa.cast(), pb.cast(), n)));
+    } finally {
+      malloc.free(pa);
+      malloc.free(pb);
+    }
+  }
+
+  @override
+  BridgeReply cutClipAtPlayhead(String compId, String layerId, int frame) =>
+      _twoStrIntOp(_cutClipAtPlayhead, compId, layerId, frame);
+
+  @override
+  BridgeReply deleteClipAtPlayhead(String compId, String layerId, int frame) =>
+      _twoStrIntOp(_deleteClipAtPlayhead, compId, layerId, frame);
+
+  @override
+  BridgeReply detectBeats(String compId, int sensitivity) {
+    final p = compId.toNativeUtf8();
+    try {
+      return BridgeReply.parse(_readReply(_detectBeats(p.cast(), sensitivity)));
+    } finally {
+      malloc.free(p);
+    }
+  }
+
+  @override
+  BridgeReply clearBeatMarkers(String compId) =>
+      _oneStrOp(_clearBeatMarkers, compId);
+
+  @override
+  BridgeReply deleteItem(String itemId) => _oneStrOp(_deleteItem, itemId);
+
+  @override
+  BridgeReply renameItem(String itemId, String name) =>
+      _twoStrOp(_renameItem, itemId, name);
+
+  @override
+  BridgeReply moveToRoot(String itemId) => _oneStrOp(_moveToRoot, itemId);
+
+  @override
+  BridgeReply relink(String itemId, String path) =>
+      _twoStrOp(_relink, itemId, path);
+
+  @override
+  BridgeReply renameLayer(String compId, String layerId, String name) =>
+      _threeStrOp(_renameLayer, compId, layerId, name);
+
+  @override
+  BridgeReply convertToSequenced(String compId, String layerId) =>
+      _twoStrOp(_convertToSequenced, compId, layerId);
+
+  @override
+  BridgeReply trimToSourceEnd(String compId, String layerId) =>
+      _twoStrOp(_trimToSourceEnd, compId, layerId);
+
+  @override
+  BridgeReply setRetimeReverse(String compId, String layerId, bool reverse) {
+    final pa = compId.toNativeUtf8();
+    final pb = layerId.toNativeUtf8();
+    try {
+      return BridgeReply.parse(
+          _readReply(_setRetimeReverse(pa.cast(), pb.cast(), reverse)));
+    } finally {
+      malloc.free(pa);
+      malloc.free(pb);
+    }
+  }
+
+  @override
+  BridgeReply setRetimeInterpolation(
+          String compId, String layerId, String interp) =>
+      _threeStrOp(_setRetimeInterpolation, compId, layerId, interp);
+
+  @override
+  BridgeReply setTextContent(String compId, String layerId, String text,
+      double size, double r, double g, double b, double a) {
+    final pc = compId.toNativeUtf8();
+    final pl = layerId.toNativeUtf8();
+    final pt = text.toNativeUtf8();
+    try {
+      return BridgeReply.parse(_readReply(_setTextContent(
+          pc.cast(), pl.cast(), pt.cast(), size, r, g, b, a)));
+    } finally {
+      malloc.free(pc);
+      malloc.free(pl);
+      malloc.free(pt);
+    }
+  }
+
+  @override
+  BridgeReply setSolid(String compId, String layerId, double r, double g,
+      double b, double a, int width, int height) {
+    final pc = compId.toNativeUtf8();
+    final pl = layerId.toNativeUtf8();
+    try {
+      return BridgeReply.parse(_readReply(
+          _setSolid(pc.cast(), pl.cast(), r, g, b, a, width, height)));
+    } finally {
+      malloc.free(pc);
+      malloc.free(pl);
+    }
+  }
+
+  @override
+  BridgeReply setCameraZoom(String compId, String layerId, double zoom) {
+    final pc = compId.toNativeUtf8();
+    final pl = layerId.toNativeUtf8();
+    try {
+      return BridgeReply.parse(
+          _readReply(_setCameraZoom(pc.cast(), pl.cast(), zoom)));
+    } finally {
+      malloc.free(pc);
+      malloc.free(pl);
+    }
+  }
+
+  /// Call a (comp, layer, effect, param, extra) effect-param op, freeing the
+  /// four strings afterwards. [invoke] receives the four native pointers.
+  BridgeReply _effectParamOp(
+      String compId,
+      String layerId,
+      String effectId,
+      String paramName,
+      Pointer<Char> Function(
+              Pointer<Char>, Pointer<Char>, Pointer<Char>, Pointer<Char>)
+          invoke) {
+    final pc = compId.toNativeUtf8();
+    final pl = layerId.toNativeUtf8();
+    final pe = effectId.toNativeUtf8();
+    final pp = paramName.toNativeUtf8();
+    try {
+      return BridgeReply.parse(
+          _readReply(invoke(pc.cast(), pl.cast(), pe.cast(), pp.cast())));
+    } finally {
+      malloc.free(pc);
+      malloc.free(pl);
+      malloc.free(pe);
+      malloc.free(pp);
+    }
+  }
+
+  @override
+  BridgeReply setEffectParamChoice(String compId, String layerId,
+          String effectId, String paramName, int index) =>
+      _effectParamOp(compId, layerId, effectId, paramName,
+          (c, l, e, p) => _setEffectParamChoice(c, l, e, p, index));
+
+  @override
+  BridgeReply setEffectParamBool(String compId, String layerId, String effectId,
+          String paramName, bool value) =>
+      _effectParamOp(compId, layerId, effectId, paramName,
+          (c, l, e, p) => _setEffectParamBool(c, l, e, p, value));
+
+  @override
+  BridgeReply setEffectParamSeed(String compId, String layerId, String effectId,
+          String paramName, int seed) =>
+      _effectParamOp(compId, layerId, effectId, paramName,
+          (c, l, e, p) => _setEffectParamSeed(c, l, e, p, seed));
+
+  @override
+  BridgeReply setEffectParamPoint(String compId, String layerId,
+          String effectId, String paramName, double x, double y) =>
+      _effectParamOp(compId, layerId, effectId, paramName,
+          (c, l, e, p) => _setEffectParamPoint(c, l, e, p, x, y));
+
+  @override
+  BridgeReply reorderEffect(
+      String compId, String layerId, String effectId, int newIndex) {
+    final pc = compId.toNativeUtf8();
+    final pl = layerId.toNativeUtf8();
+    final pe = effectId.toNativeUtf8();
+    try {
+      return BridgeReply.parse(
+          _readReply(_reorderEffect(pc.cast(), pl.cast(), pe.cast(), newIndex)));
+    } finally {
+      malloc.free(pc);
+      malloc.free(pl);
+      malloc.free(pe);
+    }
+  }
+
+  @override
+  BridgeReply applyKeyframeBatch(
+          String compId, String layerId, String opsJson) =>
+      _threeStrOp(_applyKeyframeBatch, compId, layerId, opsJson);
+
+  @override
+  BridgeReply autosave(String path, int keep) {
+    final p = path.toNativeUtf8();
+    try {
+      return BridgeReply.parse(_readReply(_autosave(p.cast(), keep)));
+    } finally {
+      malloc.free(p);
+    }
+  }
+
+  @override
+  List<BridgeAutosave> listAutosaves(String path) {
+    final raw = _callStrArg(_listAutosaves, path);
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map && decoded['ok'] == true) {
+        final list = decoded['autosaves'];
+        if (list is List) {
+          return list
+              .whereType<Map>()
+              .map((m) => BridgeAutosave.fromJson(m.cast<String, dynamic>()))
+              .toList();
+        }
+      }
+    } catch (_) {}
+    return const [];
+  }
+
+  @override
+  BridgeReply restoreJournal(String path) =>
+      BridgeReply.parse(_callStrArg(_restoreJournal, path));
+
+  @override
+  List<String> bootLog() {
+    final raw = _callNoArg(_bootLog);
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map && decoded['ok'] == true) {
+        final lines = decoded['lines'];
+        if (lines is List) return lines.whereType<String>().toList();
+      }
+    } catch (_) {}
+    return const [];
   }
 
   // Copy a reply string out of the engine-owned pointer, then free it back to

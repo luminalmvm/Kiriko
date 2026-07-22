@@ -247,6 +247,71 @@ pub(crate) fn drag_boundary(
     commit_retime(bridge, comp, l.id, Some(new_rt))
 }
 
+/// A retime store, seeded to identity over the layer's domain when the layer
+/// has none yet (so a policy toggle has something to attach to) — the same seed
+/// the egui Flow toggle uses.
+fn retime_or_identity(l: &Layer, retime: Option<Retime>) -> Retime {
+    retime.unwrap_or_else(|| Retime::identity(layer_duration(l), Rational::ZERO))
+}
+
+/// A store that is a pure identity with the default (Nearest) policy is "no
+/// retime" — return None so the layer plays at source rate, exactly as the egui
+/// Flow toggle collapses.
+fn collapse_identity(l: &Layer, rt: Retime) -> Option<Retime> {
+    if rt == Retime::identity(layer_duration(l), Rational::ZERO) {
+        None
+    } else {
+        Some(rt)
+    }
+}
+
+/// Set a footage layer's Retime reverse policy (`allow_reverse`) — the inspector
+/// reverse toggle. Seeds an identity store when the layer has none; a store that
+/// reverts to a pure identity clears the Retime.
+pub(crate) fn set_retime_reverse(
+    bridge: &mut Bridge,
+    comp_id: &str,
+    layer_id: &str,
+    reverse: bool,
+) -> String {
+    let ctx = "set retime reverse";
+    let (comp, _c, l, retime) = match resolve_retime(bridge, comp_id, layer_id, ctx) {
+        Ok(t) => t,
+        Err(e) => return err_json(e),
+    };
+    let mut rt = retime_or_identity(&l, retime);
+    rt.allow_reverse = reverse;
+    commit_retime(bridge, comp, l.id, collapse_identity(&l, rt))
+}
+
+/// Set a footage layer's frame interpolation — the inspector's Nearest / Blend /
+/// Flow switch (`Retime::interpolation`). Seeds an identity store when the layer
+/// has none; setting Nearest on an otherwise-identity store clears the Retime
+/// (the default policy is no retime), exactly as the egui Flow toggle behaves.
+/// `interp` is `nearest`, `blend` or `flow`.
+pub(crate) fn set_retime_interpolation(
+    bridge: &mut Bridge,
+    comp_id: &str,
+    layer_id: &str,
+    interp: &str,
+) -> String {
+    use lumit_core::retime::{FlowParams, Interpolation};
+    let ctx = "set retime interpolation";
+    let (comp, _c, l, retime) = match resolve_retime(bridge, comp_id, layer_id, ctx) {
+        Ok(t) => t,
+        Err(e) => return err_json(e),
+    };
+    let interpolation = match interp {
+        "nearest" => Interpolation::Nearest,
+        "blend" => Interpolation::Blend,
+        "flow" => Interpolation::Flow(FlowParams::default()),
+        other => return err_json(format!("{ctx}: unknown interpolation '{other}'")),
+    };
+    let mut rt = retime_or_identity(&l, retime);
+    rt.interpolation = interpolation;
+    commit_retime(bridge, comp, l.id, collapse_identity(&l, rt))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -451,6 +516,42 @@ mod tests {
         let after = parse(&undo(&mut b));
         assert_eq!(layer_retime(&after)["boundaries"][1]["t_frame"], json!(120));
         let _ = snapshot(&b);
+    }
+
+    #[test]
+    fn set_reverse_seeds_a_store_and_reads_back() {
+        let (mut b, comp, layer) = bridge_with_footage();
+        let snap = parse(&set_retime_reverse(&mut b, &comp, &layer, true));
+        assert_eq!(snap["ok"], json!(true));
+        let rt = layer_retime(&snap);
+        assert!(rt.is_object(), "reverse seeds a retime store");
+        assert_eq!(rt["reverse"], json!(true));
+        // Clearing reverse on an otherwise-identity store removes the Retime.
+        let snap = parse(&set_retime_reverse(&mut b, &comp, &layer, false));
+        assert_eq!(layer_retime(&snap), Value::Null);
+    }
+
+    #[test]
+    fn set_interpolation_switches_and_clears() {
+        let (mut b, comp, layer) = bridge_with_footage();
+        let snap = parse(&set_retime_interpolation(&mut b, &comp, &layer, "blend"));
+        assert_eq!(layer_retime(&snap)["interpolation"], json!("blend"));
+        let snap = parse(&set_retime_interpolation(&mut b, &comp, &layer, "flow"));
+        assert_eq!(layer_retime(&snap)["interpolation"], json!("flow"));
+        // Nearest on an otherwise-identity store clears the Retime.
+        let snap = parse(&set_retime_interpolation(&mut b, &comp, &layer, "nearest"));
+        assert_eq!(layer_retime(&snap), Value::Null);
+    }
+
+    #[test]
+    fn set_interpolation_rejects_an_unknown_mode() {
+        let (mut b, comp, layer) = bridge_with_footage();
+        let reply = parse(&set_retime_interpolation(&mut b, &comp, &layer, "warp"));
+        assert_eq!(reply["ok"], json!(false));
+        assert!(reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown interpolation"));
     }
 
     #[test]

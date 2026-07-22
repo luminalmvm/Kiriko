@@ -2695,6 +2695,7 @@ dependencies = [
 name = "lumit-bridge"
 version = "0.1.0"
 dependencies = [
+ "lumit-audio",
  "lumit-core",
  "lumit-media",
  "lumit-project",

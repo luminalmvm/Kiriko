@@ -25,7 +25,10 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["media", "render"]
 media = ["dep:lumit-media"]
-render = ["media", "dep:lumit-ui"]
+# `render` also pulls lumit-audio: beat detection (docs/09 §5) mixes the comp's
+# audio through the headless input builder and runs onset/tempo analysis, so it
+# needs both the compositor (for the audio jobs) and the analysis crate.
+render = ["media", "dep:lumit-ui", "dep:lumit-audio"]
 # The Windows zero-copy Viewer path (K-177). OFF by default so the standard
 # build and every gate stay identical to today; the owner builds the shipped
 # `.dll` with `--features shared-texture` to turn it on. It implies `render`
@@ -39,6 +42,9 @@ shared-texture = ["render", "lumit-ui/shared-texture"]
 lumit-core = { path = "../lumit-core" }
 lumit-project = { path = "../lumit-project" }
 lumit-media = { path = "../lumit-media", optional = true }
+# Beat detection maths (docs/09 §5), pulled by the `render` feature alongside
+# lumit-ui (the audio mixdown rides the same headless input path).
+lumit-audio = { path = "../lumit-audio", optional = true }
 # Borrowed for its headless compositor only (K-175); its media feature carries
 # the GPU/decoder wiring the renderer needs.
 lumit-ui = { path = "../lumit-ui", optional = true, default-features = false, features = ["media"] }

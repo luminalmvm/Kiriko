@@ -817,19 +817,44 @@ pub(crate) fn set_work_area_edge(
 // Item 7: effects.
 // ---------------------------------------------------------------------------
 
-/// The built-in effect registry as `[{name, label}]` — the Add-effect menu's
-/// source of truth ([`lumit_core::fx::BUILTINS`]). Stateless.
+/// The built-in effect registry as `[{name, label, category, category_label}]` —
+/// the Add-effect menu's source of truth ([`lumit_core::fx::BUILTINS`]).
+/// `category` is a stable machine key (the [`FxCategory`] variant, snake_case)
+/// the Dart side groups by; `category_label` is its sentence-case menu heading
+/// (K-090). Stateless.
 pub(crate) fn list_effects() -> String {
     let effects: Vec<Value> = lumit_core::fx::BUILTINS
         .iter()
-        .map(|s| json!({ "name": s.match_name, "label": s.label }))
+        .map(|s| {
+            json!({
+                "name": s.match_name,
+                "label": s.label,
+                "category": fx_category_key(s.category),
+                "category_label": s.category.label(),
+            })
+        })
         .collect();
     json!({ "ok": true, "effects": effects }).to_string()
 }
 
+/// A stable machine key for a [`FxCategory`] (the variant in snake_case) — the
+/// grouping key the Dart Effects browser sorts and headers by.
+fn fx_category_key(cat: lumit_core::fx::FxCategory) -> &'static str {
+    use lumit_core::fx::FxCategory;
+    match cat {
+        FxCategory::BlurSharpen => "blur_sharpen",
+        FxCategory::Colour => "colour",
+        FxCategory::Distortion => "distortion",
+        FxCategory::Stylise => "stylise",
+        FxCategory::Temporal => "temporal",
+        FxCategory::Utility => "utility",
+    }
+}
+
 /// Read `layer`'s effect stack, let `f` edit a clone, and commit it as one
-/// [`Op::SetLayerEffects`]. The shared tail of every effect op.
-fn with_effects(
+/// [`Op::SetLayerEffects`]. The shared tail of every effect op (shared with
+/// [`crate::fxparams`], which adds the enum/bool/seed/point setters and reorder).
+pub(crate) fn with_effects(
     bridge: &mut Bridge,
     comp_id: &str,
     layer_id: &str,

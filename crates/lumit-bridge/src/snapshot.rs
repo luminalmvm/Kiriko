@@ -385,12 +385,22 @@ fn effects_value(l: &Layer) -> Value {
 }
 
 fn effect_value(e: &EffectInstance) -> Value {
+    // The declaring schema, for the parameter ranges the drag controls clamp to
+    // (v0.5). A schema a newer/older build does not know simply omits the range.
+    let schema = lumit_core::fx::schema(&e.effect.match_name);
     let params: Vec<Value> = e
         .params
         .iter()
         .map(|p| {
             let (kind, value) = effect_param_kind_value(&p.value);
-            json!({ "name": p.id, "kind": kind, "value": value })
+            let mut obj = json!({ "name": p.id, "kind": kind, "value": value });
+            if let Some(range) = schema
+                .and_then(|s| s.params.iter().find(|ps| ps.id == p.id))
+                .and_then(|ps| param_range(&ps.kind))
+            {
+                obj["range"] = range;
+            }
+            obj
         })
         .collect();
     json!({
@@ -399,6 +409,29 @@ fn effect_value(e: &EffectInstance) -> Value {
         "enabled": e.enabled,
         "params": params,
     })
+}
+
+/// A parameter's declared edit range for the read-back (v0.5): a `Float`'s hard
+/// bounds (`min`/`max`, either nullable) and its `slider` soft range; a
+/// `Colour`'s per-channel `min`/`max`; a `Choice`'s `options`. Other kinds carry
+/// no range (the drag control is unbounded or has no numeric range). The schema
+/// declares no step, so none is reported — the control chooses its own.
+fn param_range(kind: &lumit_core::fx::ParamKind) -> Option<Value> {
+    use lumit_core::fx::ParamKind;
+    match kind {
+        ParamKind::Float { slider, hard, .. } => Some(json!({
+            "min": hard.0,
+            "max": hard.1,
+            "slider_min": slider.0,
+            "slider_max": slider.1,
+        })),
+        ParamKind::Colour { range, .. } => Some(json!({
+            "min": range.0,
+            "max": range.1,
+        })),
+        ParamKind::Choice { options, .. } => Some(json!({ "options": options })),
+        _ => None,
+    }
 }
 
 /// A parameter's `(kind, value)` pair for the read-back. Scalars and colours

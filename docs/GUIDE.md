@@ -2548,3 +2548,34 @@ playhead line rather than rebuilding every layer row and panel at the frame
 rate; and remembering the session (which project, playhead, selection) now waits
 for a half-second lull instead of writing to disk on every single frame of a
 scrub.
+
+**Filling in the edit commands (bridge v0.7).** By this point the bridge could
+show the whole document and do the common edits, but a scatter of menu items and
+editors still had nowhere to send their instruction — the engine simply had no
+"command" for them yet. This round adds the missing ones, each a thin, tested
+Rust function that routes through the engine's own undo-able operation (so the
+Flutter app and the old egui app can never disagree, and one press is one undo):
+the *razor* that cuts or deletes a clip under the playhead on a sequence layer;
+*beat detection* (listen to the composition's audio, drop a marker on every
+beat) and clearing those markers; the project-panel actions (delete, rename, drag
+back to the top level, and *relink* a moved-away video file to its new place on
+disk, siblings in the same folder coming along); the layer commands (rename,
+convert a footage layer into an editable sequence, trim a slowed-down clip to
+where its source runs out); the two remaining speed switches (play a clip in
+reverse; choose how in-between frames are made — nearest, blend or optical flow);
+editing what a text layer *says* and a solid's colour and size and a camera's
+zoom; the four remaining effect-knob kinds (dropdowns, checkboxes, random seeds
+and point pickers) plus reordering effects and moving a linked x/y keyframe pair
+as one undo step; and three housekeeping calls — a proper *autosave* that writes
+a spare copy beside your project **without** quietly making that copy the file
+you are editing (the old shortcut had that bug), a list of those spare copies and
+a "replay the crash journal" recovery, and an honest *boot log* the splash screen
+can show (the library's version and which features it was built with — no made-up
+lines). On the Dart side these all live on a new optional capability the real
+library offers (`EditOpsBridge`), kept separate so the test stand-ins need no
+changes; the interface calls them through plain pass-throughs that show any calm
+error in the status line. Two honest caveats are written down rather than
+hidden: beat detection runs in one go here (the old app did it on a background
+thread — fine for short clips, a later change if long songs feel slow), and the
+crash-journal recovery can replay a journal a previous session left but the
+Flutter side does not yet *write* one on every edit (a named follow-up).

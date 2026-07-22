@@ -10,28 +10,29 @@ design until the API stabilises), the macOS pass, the post-parity design changes
 in 05 §post-parity, and the two recorded behavioural deviations (export
 queue-snapshot timing; share-export VBR cap).
 
-## A — bridge ops (Rust + Dart plumbing)
+## A — bridge ops (Rust + Dart plumbing) — LANDED (bridge v0.7, ABI 6→7)
 
-- Razor: `cut_clip_at_playhead` / `delete_clip_at_playhead` + sequence-layer
-  sub-clip editing (menu stubs today)
-- Beat detection: `detect_beats(comp, sensitivity)` / `clear_beat_markers`
-  (menu + empty-lane-menu stubs today; lumit-audio, media feature)
-- Project item ops: `delete_item`, `rename_item`, `move_to_root`,
-  `relink(item, path)` (project context-menu stubs today)
-- Layer ops: `rename_layer`, `convert_to_sequenced`, `trim_to_source_end`
-  (layer context-menu stubs today)
-- Retime setters: `set_retime_reverse`, `set_retime_interpolation`
-  (Nearest/Flow/Blend) — read-back exists, no setters
-- Dedicated `lumit_bridge_autosave` (write a copy WITHOUT re-pointing the
-  loaded path — the known autosave drift gap)
-- Text/solid/camera property ops: set text content, solid colour/size,
-  camera zoom (no editors exist because no ops exist)
-- Recovery ops: list autosaves, restore-from-journal (for the recovery modal)
-- Boot log: expose the engine's real boot lines for the splash
-- Effect params: enum/bool/seed/point setters; param **ranges** in the
-  snapshot (unclamped drags today); registry **categories** (flat list today);
-  effect **reorder**
-- Keyframe batch op (linked x/y pairs currently cost one undo step per axis)
+All section-A bridge ops shipped. Rust ops (in-crate tested, three feature
+configs green) + FFI exports + typed Dart plumbing on the additive
+`EditOpsBridge` capability interface (kept off `DocumentBridge` so the existing
+fakes need no change) + `AppStateStub` pass-throughs (errors → `errorNotice`) +
+`edit_ops_test.dart`. One caveat recorded, not a stub:
+
+- **Beat detection** runs **synchronously** in the bridge (`detect_beats` mixes
+  the comp audio through the headless input builder and analyses in one blocking
+  call the Dart side awaits off its UI isolate), where egui runs it off-thread
+  (`detect_beats`/`poll_beats`). If long-audio latency bites, a start/poll pair
+  like the export ops is the follow-up — the maths is identical, only the
+  threading differs. `clear_beat_markers` is always available (a plain marker
+  edit). Detection needs the `media` + `render` features; a feature-less build
+  reports that calmly.
+- **Recovery `restore_journal`** replays whatever on-disk crash journal exists
+  for the opened project's document id (the engine's `JournalFile` read+replay,
+  the egui recovery path). The bridge does **not yet write** the journal on every
+  commit, so today it recovers a journal a prior session (e.g. the egui app) left
+  rather than one this bridge wrote — a named follow-up (wire journal-append into
+  the bridge commit path, matching egui's `AppState::commit`). `list_autosaves`
+  is a pure folder scan and is complete.
 
 ## B — performance follow-ups (K-176/K-177 remainders)
 
@@ -97,6 +98,7 @@ queue-snapshot timing; share-export VBR cap).
 
 ## Stale rows to reconcile in 05 while burning down
 
-- The graph-lens "→Rate drift figure dropped by BridgeReply" remainder is
-  stale — `driftSeconds` is threaded and the notice reads "fitted, N ms
-  drift" since 2026-07-22; update 05 when section C lands.
+- RECONCILED (2026-07-22, with the section-A burn-down): the graph-lens "→Rate
+  drift figure dropped by BridgeReply" remainder was stale — `driftSeconds` is
+  threaded and the notice reads "fitted, N ms drift"; 05's F3 graph-lens
+  named-remainder has been updated to drop the drift-figure caveat.

@@ -87,14 +87,15 @@ where the row is logic).
 - ☑ Autosave: a periodic rotating copy beside the project mirroring
   `lumit_project::autosave` — `autosaves/<stem>.autosave-N.lum`, N = 1 newest,
   keep-N rotation (`AutosaveScheme`, pure + tested). `AppStateStub.autosaveTick`
-  writes through `bridge.saveProject(slot1)` only when the document is dirty and
-  has a path (silent, like egui), never touching the main file; `startAutosave`
-  drives it on a Timer (opt-in so tests own no pending timers). KNOWN BRIDGE GAP:
-  `saveProject` re-points the engine's loaded path to the written file, so
-  autosaving via it drifts the path; a dedicated `lumit_bridge_autosave` op
-  (writing without re-pointing, like the Rust `autosave`) is needed for full
-  correctness. INTEGRATOR: call `app.startAutosave()` once a bridge is live and
-  point `autosaveInterval`/`autosaveKeep` at Settings → General.
+  writes only when the document is dirty and has a path (silent, like egui),
+  never touching the main file; `startAutosave` drives it on a Timer (opt-in so
+  tests own no pending timers). BRIDGE GAP CLOSED (v0.7): `_writeAutosave` now
+  routes through the dedicated `lumit_bridge_autosave` op (rotating copy beside
+  the project, WITHOUT re-pointing the engine's loaded path) when the loaded
+  library carries the `EditOpsBridge` capability; an older library falls back to
+  the previous rotate-then-`saveProject` path. INTEGRATOR: call
+  `app.startAutosave()` once a bridge is live and point
+  `autosaveInterval`/`autosaveKeep` at Settings → General.
 
 ## Phase F2 — Viewer (in progress)
 
@@ -301,9 +302,9 @@ where the row is logic).
   — taking the option the port allows — they live in the context menu instead
   (`panels/timeline/columns.dart`, the pure `parentingWouldCycle` unit-tested).
   Rename, Add effect and Convert still route to `app.engine(...)` honestly —
-  widget-tested. **Not carried over** (2026-07-22 audit): egui's **Trim to source
-  end** entry (offered on a retimed footage layer, `menu.rs:174-184`) has no
-  Flutter counterpart
+  widget-tested. egui's **Trim to source end** entry (offered on a retimed footage
+  layer, `menu.rs:174-184`) now has a bridge op + `AppStateStub.trimToSourceEnd`
+  (v0.7); the layer-menu entry itself is the section-C repoint
 - ☑ Layer search (wave 2): a search box in the outline header filters rows by
   case-insensitive name substring — unit-tested + widget-tested
 - ☑ Horizontal pan (wave 2): shift-wheel + a scrollbar when zoomed past fit,
@@ -329,10 +330,7 @@ where the row is logic).
   own gaps or bridge-plumbing limits): the Retime **Time**/value (source-
   position) lens and the transform value/speed graph (egui offers both, but the
   bridge's graph ops are speed-lens only, so a non-footage or un-retimed
-  selection shows a calm hint rather than a value graph); the numeric **N ms
-  drift** figure on →Rate (the engine returns `drift` in the reply, but the typed
-  `BridgeReply`/`BridgeSnapshot` drop it — bridge.dart is out of scope — so the
-  notice reads "Converted to rate" without the millisecond figure); the RATE/MAP
+  selection shows a calm hint rather than a value graph); the RATE/MAP
   **type chips** and ease-name label (§9.4), **kink badges** (§6.1) and overrun
   **hatching** (§7.2), per-boundary/per-segment **numeric % / t·s entry** fields
   (§9.3), the boundary-drag **beat/frame snapping**, the Vegas default-lens
@@ -387,11 +385,17 @@ First slice (2026-07-21):
     into one channel-picker row (K-143). enum/bool/seed/point/file/layer show
     their value read-only with an "edits arrive with the matching bridge op"
     tooltip — no faked edits.
-  - Named remainder: enum/bool/seed/point/file/layer parameter *edits* (the
-    bridge exposes only scalar + colour setters), per-parameter keyframe
-    stopwatch/navigator on effect params, parameter *ranges* (unclamped drag
-    until the snapshot carries them), the eyedropper, effect reorder, and the
-    per-linked-pair single-undo batch.
+  - Named remainder: the bridge now exposes (v0.7) the enum/bool/seed/point
+    parameter setters (`set_effect_param_choice`/`_bool`/`_seed`/`_point`), the
+    param **ranges** in the snapshot (`range: {min, max, slider_min, slider_max}`
+    or `{options}`; `BridgeParamRange` parses them), effect **reorder**
+    (`reorder_effect`), and the single-undo **keyframe batch**
+    (`apply_keyframe_batch`, one `Op::Batch` for a linked x/y pair) — with matching
+    `AppStateStub` pass-throughs. Still to wire in the panel (section D): the
+    enum/bool/seed/point controls, the range-clamped drags, drag-to-reorder, and
+    the linked-pair batch on Anchor/Position/Scale. Still no bridge surface:
+    file/layer parameter edits, per-parameter keyframe stopwatch/navigator, and
+    the eyedropper.
 - ☑ Comp settings: the composition-settings / new-composition dialogue in the
   Settings-window visual style (name, size, frame-rate preset dropdown,
   duration), shown through the app Overlay. `dialogs.dart`, wired from the
@@ -410,11 +414,12 @@ First slice (2026-07-21):
   a hovered row; no selected layer shows a quiet hint. `effects_presets_panel.
   dart`, widget-tested (`f4_effects_test.dart`). The egui `effects_panel` groups
   the built-ins by `FxCategory` and lists user presets above them; the Dart
-  registry (`BridgeEffectInfo {name, label}`) carries no category, so the list
-  here is **flat** — the honest mirror of what the bridge exposes. Named
-  remainder: the `.lumfx` **preset save/load** (needs the file + preset bridge
-  ops — a placeholder row at the bottom says exactly that), category grouping,
-  and drag-onto-a-layer application.
+  registry now carries the category (v0.7: `BridgeEffectInfo {name, label,
+  category, categoryLabel}` from `list_effects`), so the panel **can** group —
+  the grouping UI itself is the section-D wave. Named remainder: the `.lumfx`
+  **preset save/load** (needs the file + preset bridge ops — a placeholder row at
+  the bottom says exactly that), the category-grouping UI, and drag-onto-a-layer
+  application.
 - ☑ Add mask ▸ Rectangle/Ellipse/Star: wired from the **layer context menu**
   (`addMask`, wave 3) and from the **Composition ▸ Add mask** menu bar
   (`shell/menu_bar.dart:90-94` → `addMaskToSelected`, corrected 2026-07-22 audit —
@@ -625,13 +630,19 @@ is a genuine miss (fires even with a live bridge) unless marked otherwise.
   computed from the other rows' centres exactly as egui's `layer_row_centers`
   (`panel.rs:1770`). The lane's horizontal grip/trim drags stay distinct.
   Widget-tested for both up and down moves.
-- ☐ **Razor / clip editing missing.** "Cut clip at playhead" and "Delete clip at
-  playhead" are menu stubs (`shell/menu_bar.dart:76-77`); no bridge op. Sequence-
-  layer sub-clip editing likewise absent.
-- ☐ **Beat detection missing.** "Detect beats" (with the 0–100 sensitivity) and
-  "Clear beat markers" are menu stubs (`shell/menu_bar.dart:87-89`); the bridge
-  has no beat op. egui hosts these in the empty-lane context menu and the
-  Composition menu.
+- ◐ **Razor / clip editing — bridge ops landed (v0.7).** `cut_clip_at_playhead` /
+  `delete_clip_at_playhead` (sequence layers, `SetSequenceClips`, undoable) +
+  `AppStateStub.cutClipAtPlayhead`/`deleteClipAtPlayhead` (resolve the front comp,
+  selected layer and playhead; a non-sequence layer is refused calmly). Still
+  open: the menu-bar wiring (`shell/menu_bar.dart:76-77`) to these pass-throughs
+  (section C).
+- ◐ **Beat detection — bridge ops landed (v0.7).** `detect_beats(comp,
+  sensitivity)` (synchronous — mixes the comp audio through the headless input
+  builder and analyses, `media`+`render` features) / `clear_beat_markers` (always
+  available) + `AppStateStub.detectBeats`/`clearBeatMarkers` on the front comp.
+  Still open: the empty-lane / Composition-menu wiring
+  (`shell/menu_bar.dart:87-89`, sections B/C) and, if long-audio latency bites, an
+  off-thread start/poll pair (the egui `detect_beats`/`poll_beats` split).
 
 ### Project panel (interactive)
 
@@ -665,25 +676,31 @@ is a genuine miss (fires even with a live bridge) unless marked otherwise.
 
 ### Editors & viewer
 
-- ☐ **Property editors beyond Transform missing.** Effect controls shows only the
-  Transform rows and the effect stack (`panels/effect_controls_panel.dart`). No
-  **text content editing** (a text layer's string cannot be changed), no camera-
-  specific properties, no solid colour/size editor. egui's `shell/inspector/`
-  gives each layer kind its own rows. (Text editing is the sharp one — there is no
-  way to change what a text layer says.)
-- ☐ **Retime reverse toggle and interpolation switch missing.** The graph lens
-  exposes the Retime enable toggle, the ramp presets and →Rate, but no **reverse**
-  toggle and no **Nearest / Flow / Blend** interpolation switch
-  (`panels/timeline/graph_editor.dart`); the bridge carries `reverse` /
-  `interpolation` in the read-back but exposes **no setter** for either (Bridge
-  v0.4 ops are enable/speed/preset/→Rate/drag-boundary only).
-- ☐ **Recovery modal missing.** 02-UI-INVENTORY §4 and the F4 header both list a
-  crash-recovery dialogue (restore journal / last save / open an autosave); no
-  such surface exists in `flutter_ui/lib` (`shell/dialogs.dart` has only comp
-  settings + add-mask shape pickers).
-- ☐ **Splash boot lines are placeholder, not the engine's real boot log.** The F0
-  row promised "the engine's real boot log streams in at F1"; the splash still
-  shows canned lines — no bridge boot-log stream is wired.
+- ◐ **Property editors beyond Transform — bridge ops landed (v0.7).** The setters
+  now exist: `set_text_content(text, size, fill)`, `set_solid(colour, size)` (via
+  the shared `SolidDef`, every layer using it updates), `set_camera_zoom`, with
+  `AppStateStub.setTextContent`/`setSolid`/`setCameraZoom` pass-throughs. Still
+  open: the editors themselves in `panels/effect_controls_panel.dart` (section D —
+  text content is the sharp one).
+- ◐ **Retime reverse toggle and interpolation switch — bridge setters landed
+  (v0.7).** `set_retime_reverse` and `set_retime_interpolation`
+  (`nearest`/`blend`/`flow`) edit the store fields (seed identity when the layer
+  has none; a store that reverts to a pure identity clears the Retime, mirroring
+  the egui Flow toggle) + `AppStateStub.setRetimeReverse`/`setRetimeInterpolation`.
+  Still open: the graph-header toggle/switch UI (`panels/timeline/graph_editor.dart`,
+  section C).
+- ◐ **Recovery modal — bridge ops landed (v0.7), modal still to build.**
+  `list_autosaves` (pure folder scan, `[{slot, path}]`) and `restore_journal`
+  (open + replay the crash journal, reply carries `replayed`/`journal_total`) +
+  `AppStateStub.listAutosaves`/`restoreJournal`. The modal surface itself
+  (`shell/dialogs.dart`) is section E. NB the bridge does not yet *write* the
+  journal on commit, so restore currently finds a journal a prior session left
+  (named follow-up in 06 §A).
+- ◐ **Splash boot log — bridge op landed (v0.7), splash still to wire.**
+  `lumit_bridge_boot_log()` returns the engine's honest lines (library version,
+  ABI, compiled feature set — no fabricated module lines) + `AppStateStub.bootLog`.
+  Still open: streaming them into the splash (section E; the splash still shows
+  canned lines).
 
 ### Unwired `app.engine(…)` action strings (full inventory)
 
@@ -697,10 +714,11 @@ not a true gap); "**stub**" = fires even with a live bridge.
 | ~~Add solid / text / camera / adjustment / sequence layer~~ | menu bar + palette | **WIRED** — routed to `app.addSolidLayer` … `addSequenceLayer` on the front comp (no comp → notice) |
 | ~~Add marker at playhead~~ (palette) | palette | **WIRED** — the palette copy now calls `app.addMarker` on the front comp (no comp → notice) |
 | Export comp | palette default / `shell/shell.dart:120` | fallback when no export opener is wired in that context |
-| Cut clip at playhead / Delete clip at playhead | menu bar (`menu_bar.dart:76-77`) | **stub** — awaits a razor bridge op |
-| Detect beats (sensitivity N) / Clear beat markers | menu bar (`menu_bar.dart:87-89`) | **stub** — awaits a beat-detection bridge op |
-| Clear cache / Choose cache root folder | settings (`settings_window.dart:334,367`) | **stub** — awaits a cache bridge op |
-| Rename layer / Add effect / Convert to sequenced layer | layer context menu (`layer_menu.dart:152-156`) | **stub** — Add effect needs the layer-menu categorised picker; Rename needs an in-place editor; Convert awaits a bridge op |
+| Cut clip at playhead / Delete clip at playhead | menu bar (`menu_bar.dart:76-77`) | bridge op **landed** (v0.7, `AppStateStub.cutClipAtPlayhead`/`deleteClipAtPlayhead`); menu-bar repoint pending (section C) |
+| Detect beats (sensitivity N) / Clear beat markers | menu bar (`menu_bar.dart:87-89`) | bridge op **landed** (v0.7, `AppStateStub.detectBeats`/`clearBeatMarkers`); menu repoint pending (sections B/C) |
+| Clear cache / Choose cache root folder | settings (`settings_window.dart:334,367`) | **stub** — awaits a cache bridge op (section B) |
+| Rename layer / Convert to sequenced layer | layer context menu (`layer_menu.dart:152-156`) | bridge op **landed** (v0.7, `AppStateStub.renameLayer`/`convertToSequenced`; `trimToSourceEnd` too); the in-place rename editor + Convert/Trim menu repoint pending (section C) |
+| Add effect (categorised) | layer context menu | bridge exposes the category now (v0.7 `list_effects` carries it); the categorised layer-menu picker is section C |
 
 ## Post-parity fixes (owner's known rough edges — do NOT fix during the port)
 
