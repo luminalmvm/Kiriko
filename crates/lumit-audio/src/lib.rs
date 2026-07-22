@@ -153,6 +153,45 @@ impl AudioEngine {
     pub fn clock_seconds(&self) -> f64 {
         self.shared.playhead.load(Ordering::Relaxed) as f64 / f64::from(self.device_rate)
     }
+
+    /// A cheap, cloneable, thread-safe read-only view of the playback clock.
+    ///
+    /// The engine itself cannot leave the thread that built it (the cpal
+    /// stream is not `Send`), but its clock is just a pair of atomics — this
+    /// handle carries them across threads so a UI can poll "what time is it?"
+    /// without owning the engine. Reads are allocation-free and lock-free.
+    #[must_use]
+    pub fn clock(&self) -> ClockHandle {
+        ClockHandle {
+            shared: Arc::clone(&self.shared),
+            device_rate: self.device_rate,
+        }
+    }
+}
+
+/// A read-only, `Send + Sync` view of an [`AudioEngine`]'s playback clock —
+/// see [`AudioEngine::clock`]. Holding one does not keep audio playing; it
+/// only observes the frames the realtime callback has consumed.
+#[derive(Clone)]
+pub struct ClockHandle {
+    shared: Arc<Shared>,
+    device_rate: u32,
+}
+
+impl ClockHandle {
+    /// Seconds of audio consumed since load/seek — identical to
+    /// [`AudioEngine::clock_seconds`].
+    #[must_use]
+    pub fn seconds(&self) -> f64 {
+        self.shared.playhead.load(Ordering::Relaxed) as f64 / f64::from(self.device_rate)
+    }
+
+    /// Whether the engine is currently playing — identical to
+    /// [`AudioEngine::is_playing`].
+    #[must_use]
+    pub fn is_playing(&self) -> bool {
+        self.shared.playing.load(Ordering::Relaxed)
+    }
 }
 
 /// The realtime callback: lock-free reads, no allocation, silence on any miss.
@@ -249,6 +288,31 @@ mod tests {
         let mut out = vec![0.0f32; 64];
         fill(&shared, &mut out, 1);
         assert_eq!(shared.playhead.load(Ordering::Relaxed), 64);
+    }
+
+    /// The clock handle reads the same atomics the callback writes, works
+    /// from another thread (it is `Send`), and never blocks the callback.
+    #[test]
+    fn clock_handle_tracks_the_callback_from_another_thread() {
+        let shared = Arc::new(Shared {
+            plan: RwLock::new(Some(plan_of(tone(48_000)))),
+            playhead: AtomicUsize::new(0),
+            playing: AtomicBool::new(true),
+        });
+        let handle = ClockHandle {
+            shared: shared.clone(),
+            device_rate: 48_000,
+        };
+        assert_eq!(handle.seconds(), 0.0);
+        assert!(handle.is_playing());
+        let mut out = vec![0.0f32; 4800 * 2];
+        fill(&shared, &mut out, 2);
+        // Read from a worker thread: 4800 frames at 48 kHz = 0.1 s.
+        let read = std::thread::spawn(move || (handle.seconds(), handle.is_playing()))
+            .join()
+            .expect("clock thread");
+        assert!((read.0 - 0.1).abs() < 1e-9);
+        assert!(read.1);
     }
 
     /// The instant-edit path: swapping the plan mid-play keeps the clock and

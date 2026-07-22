@@ -204,13 +204,34 @@ where the row is logic).
   footage item by name (documented limitation — the comp path has neither, the
   engine resolves everything). Unit- and widget-tested. `preview_source.dart`,
   `viewer_panel.dart`
-- ◐ Transport: play/pause on a Ticker at the comp's rational fps, looping the
+- ☑ Transport: play/pause on a Ticker at the comp's rational fps, looping the
   **work area** `[in, out)` when one is set (else the whole comp) — a playhead
   scrubbed outside snaps back to the start and a large step wraps modularly,
   mirroring the egui transport (`playback.rs comp_cached_tick`); unit-tested via
   the pure `workAreaLoopFrame` (`viewer_panel.dart`, 2026-07-22). Frame + SMPTE
-  timecode readout; `Full` resolution label as-is. Remaining: the resolution
-  ladder is engine-side (a later phase), so the label is static
+  timecode readout. (The resolution picker + Auto tier landed with the final UI
+  wave — see the Performance section.)
+- ☑ **Audio playback (bridge v0.10, docs/09; TF round 5 — "no audio at all").**
+  The engine owns one session `lumit_audio::AudioEngine` on a dedicated thread
+  (the cpal stream is not `Send`); `audio_prepare`/`audio_play`/`audio_pause`/
+  `audio_seek`/`audio_stop` + the allocation-free per-tick `audio_clock` poll.
+  The mix is built in a background worker through the GPU-free
+  `lumit_ui::headless::AudioJobsBuilder` seam (never queued behind a comp
+  render), decoded once per item at the device rate, and installed as a live
+  `MixPlan`; the same jobs signature the egui side keeps makes an unchanged mix
+  a no-op and an edit a mid-playback `swap_plan` (clock kept — the docs/09 §6
+  instant-edit contract). Dart: the `AudioPlaybackBridge` capability
+  (symbol-gated like the others), transport wiring in `app_state.dart` (play/
+  pause/scrub-seek, re-prepare on edit while loaded/playing, comp-front switch),
+  and the Viewer ticker chasing the audio clock via the pure `audioChaseFrame`
+  (frame = clock × fps, work-area loop wraps with an audio re-seek); the wall
+  clock stays the fallback for a silent comp, no output device, or an old
+  library. Rust + Dart tested (`audio.rs`, `audio_playback_test.dart`).
+  Honest remainders: no output-latency compensation (within the ±half-frame
+  tolerance, docs/13; egui omits it too), the Cached-mode render-gated audio
+  pause (K-171 — Flutter's picture free-runs, so sound can lead an uncached
+  stretch), footage-item preview audio (comp playback only), and the per-layer
+  Waveform lanes
 
 ## Bridge v0.2 data + ops (done, feeds F2/F3/F4)
 

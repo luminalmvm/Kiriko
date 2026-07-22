@@ -326,6 +326,18 @@ annotated honestly rather than faked.
 
 ## Deferred, not blocked
 
+- **Audio playback follow-ups (recorded with the round-5 build, 2026-07-22).**
+  Comp audio playback itself LANDED (bridge v0.10 — the tester's "no audio at
+  all" is closed; see 05's F2 audio row). Four named remainders, none blocking:
+  *output-latency compensation* (docs/impl/playback-scheduler.md §4 allows the
+  omission at the ±half-frame tolerance; egui omits it identically today), the
+  *Cached-mode render-gated audio pause* (K-171 — the Flutter picture free-runs
+  rather than render-gating, so sound can lead an uncached stretch where egui
+  parks it; needs the Dart side to know frame readiness, i.e. a cache-bar-fed
+  gate), *footage-item preview audio* (the Flutter Viewer previews comps; the
+  egui footage-item transport plays the item's own sound), and the *per-layer
+  Waveform lanes* (K-172 — needs the item peaks surfaced over the bridge).
+
 - **Tooltip breadth pass — the remaining `on_hover_text` surfaces.** The shell +
   widgets tooltips landed; the remaining egui hover surfaces (layer switches,
   transport step/loop, the ruler, the scopes header) are optional cosmetic

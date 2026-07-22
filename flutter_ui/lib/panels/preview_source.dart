@@ -150,6 +150,19 @@ class PreviewSource extends ChangeNotifier {
   bool _disposed = false;
   bool _compActive = false;
 
+  /// The document epoch this source last resolved against (mirrors
+  /// [AppStateStub.documentEpoch], bumped whenever an edit/undo/redo/open adopts
+  /// a fresh snapshot). Every decoded frame in the LRU belongs to one epoch, and
+  /// a bump makes them all stale: the engine's own rendered-frame cache
+  /// invalidated in the same edit, so a Dart LRU keyed without the epoch would
+  /// keep serving a pre-edit picture until it happened to fall out on its own —
+  /// exactly the "preview does not live-update on edits" defect. The epoch is
+  /// both dropped from the cache on a bump and folded into every cache key (belt
+  /// and braces), so a reply banked under the old epoch can never satisfy a
+  /// post-edit lookup. Pure playhead motion rides `playheadFrame` and never bumps
+  /// the epoch, so scrubbing still hits the cache.
+  int _lastEpoch = 0;
+
   // ---- Zero-copy shared-texture path (K-177) ----
 
   /// Owns the `lumit/viewer_texture` platform-channel registration. Created only
@@ -176,6 +189,7 @@ class PreviewSource extends ChangeNotifier {
       : _renderer = renderer ?? SynchronousFrameRenderer(app) {
     _textureController = textureController ??
         (_renderer.supportsSharedTexture ? ViewerTextureController() : null);
+    _lastEpoch = app.documentEpoch;
     app.addListener(_onAppChanged);
     app.playheadFrame.addListener(_onAppChanged);
     // Let Settings → Clear cache empty this decoded-frame LRU too (the engine
@@ -266,12 +280,33 @@ class PreviewSource extends ChangeNotifier {
   }
 
   void _resolveAndDecode() {
+    _syncEpoch();
     // Prefer the zero-copy shared-texture path (K-177); then the read-back
     // composited-comp path; only when both decline do we fall to the
     // single-layer decode. Each returns true when it owns this frame.
     if (_resolveAndDecodeShared()) return;
     if (_resolveAndDecodeComp()) return;
     _resolveAndDecodeSingleLayer();
+  }
+
+  /// Reconcile with the app's document epoch before resolving. On a bump (an
+  /// edit/undo/redo/open adopted a new snapshot) every decoded frame is stale:
+  /// drop the LRU so no pre-edit picture is served, and — when a render is
+  /// already in flight — mark the wanted frame dirty so a fresh render is issued
+  /// once that reply lands (its stale pixels are dropped, not shown). The image
+  /// currently on screen is kept alive so the Viewer holds the last picture while
+  /// the fresh render is issued (never blank). A no-op on pure playhead motion,
+  /// which never bumps the epoch, so scrubbing still hits the cache.
+  void _syncEpoch() {
+    final epoch = app.documentEpoch;
+    if (epoch == _lastEpoch) return;
+    _lastEpoch = epoch;
+    for (final entry in _cache.values) {
+      // Keep the on-screen image alive (it is held, not blanked); free the rest.
+      if (!identical(entry.image, _image)) entry.image.dispose();
+    }
+    _cache.clear();
+    if (_pendingKey != null) _wantedDirty = true;
   }
 
   /// The zero-copy path: ask the engine to render the whole comp into a shared
@@ -302,14 +337,21 @@ class PreviewSource extends ChangeNotifier {
       _wantedDirty = true;
       return true;
     }
-    _pendingKey = 'shared:$compId@$frame';
+    _pendingKey = 'shared:$compId@$frame#$_lastEpoch';
     var settled = false;
     final gen = ++_seq;
+    final epoch = _lastEpoch;
     _publishGeneration(gen);
     _renderer.requestShared(compId, frame, gen, (shared) async {
       settled = true;
       if (_disposed) return;
       _pendingKey = null;
+      if (epoch != app.documentEpoch) {
+        // An edit adopted a new snapshot while this rendered: the texture is
+        // pre-edit. Hold the last picture and re-resolve for the new epoch.
+        _drainWanted();
+        return;
+      }
       if (shared == null) {
         // The engine could not use the shared path this frame (no D3D12 adapter,
         // a transient error): fall back to the read-back path, holding the last
@@ -345,6 +387,12 @@ class PreviewSource extends ChangeNotifier {
       }
       await controller.frameReady();
       if (_disposed) return;
+      if (epoch != app.documentEpoch) {
+        // An edit landed during registration/readiness: don't present a pre-edit
+        // texture; re-resolve for the new epoch.
+        _drainWanted();
+        return;
+      }
       _enterShared(id, shared.width, shared.height);
       _generation++;
       notifyListeners();
@@ -418,7 +466,7 @@ class PreviewSource extends ChangeNotifier {
     // actually render fewer pixels and warm their own per-scale cache entries.
     // Under Auto it is the realtime controller's live tier scale (K-171).
     final scale = app.effectivePreviewScale;
-    final key = 'comp:$compId@$frame@$scale';
+    final key = 'comp:$compId@$frame@$scale#$_lastEpoch';
 
     final cached = _cache[key];
     if (cached != null) {
@@ -450,11 +498,19 @@ class PreviewSource extends ChangeNotifier {
     _pendingKey = key;
     var settled = false;
     final gen = ++_seq;
+    final epoch = _lastEpoch;
     _publishGeneration(gen);
     _renderer.requestComp(compId, frame, scale, gen, (rendered) {
       settled = true;
       if (_disposed) return;
       _pendingKey = null;
+      if (epoch != app.documentEpoch) {
+        // A superseding edit adopted a new snapshot while this frame rendered:
+        // its pixels are pre-edit and must never be shown, banked, or marked
+        // warm. Hold the last picture; the drain re-resolves for the new epoch.
+        _drainWanted();
+        return;
+      }
       if (rendered == null || rendered.width == 0 || rendered.height == 0) {
         // The engine could not composite this frame: fall back to single-layer,
         // holding the last picture. Remember the failure so the Viewer's
@@ -472,7 +528,7 @@ class PreviewSource extends ChangeNotifier {
       _compRenderFailed = false;
       app.noteFrameWarmed(compId, frame);
       _enterComp();
-      _startImageDecode(key, rendered);
+      _startImageDecode(key, rendered, epoch);
       _drainWanted();
     });
     if (!settled) {
@@ -507,7 +563,7 @@ class PreviewSource extends ChangeNotifier {
       return;
     }
 
-    final key = '${target.item.id}@${target.sourceFrame}';
+    final key = '${target.item.id}@${target.sourceFrame}#$_lastEpoch';
     final cached = _cache[key];
     if (cached != null) {
       _touch(key, cached);
@@ -530,17 +586,24 @@ class PreviewSource extends ChangeNotifier {
 
     // Decode the one footage frame off the UI isolate.
     _pendingKey = key;
+    final epoch = _lastEpoch;
     _renderer.requestDecode(target.item.id, target.sourceFrame, ++_seq,
         (decoded) {
       if (_disposed) return;
       _pendingKey = null;
+      if (epoch != app.documentEpoch) {
+        // A relink (or any edit) bumped the epoch while this decoded: the pixels
+        // are pre-edit. Hold the last picture; the drain re-resolves fresh.
+        _drainWanted();
+        return;
+      }
       if (decoded == null || decoded.width == 0 || decoded.height == 0) {
         // Decode failed / not ready: hold the last picture/trace rather than
         // blanking (the file is fine — this frame just isn't ready).
         _drainWanted();
         return;
       }
-      _startImageDecode(key, decoded);
+      _startImageDecode(key, decoded, epoch);
       _drainWanted();
     });
   }
@@ -563,8 +626,12 @@ class PreviewSource extends ChangeNotifier {
 
   /// Turn a decoded RGBA buffer into a blit-ready image asynchronously, cache it
   /// under [key], and show it when it lands. Shared by both paths, so their
-  /// caching, LRU and in-flight guard behave identically.
-  void _startImageDecode(String key, DecodedFrame decoded) {
+  /// caching, LRU and in-flight guard behave identically. [epoch] is the document
+  /// epoch the source frame was rendered under: if the document has moved on by
+  /// the time the image lands, the frame is pre-edit and is dropped (never banked
+  /// under a stale key, never shown) — the last picture is held while the drain
+  /// re-resolves.
+  void _startImageDecode(String key, DecodedFrame decoded, int epoch) {
     _pendingKey = key;
     ui.decodeImageFromPixels(
       decoded.rgba,
@@ -577,6 +644,11 @@ class PreviewSource extends ChangeNotifier {
           return;
         }
         _pendingKey = null;
+        if (epoch != app.documentEpoch) {
+          img.dispose();
+          _drainWanted();
+          return;
+        }
         _put(key, _CacheEntry(img, decoded));
         _image = img;
         _displayedFrame = decoded;
@@ -591,6 +663,51 @@ class PreviewSource extends ChangeNotifier {
   void _touch(String key, _CacheEntry entry) {
     _cache.remove(key);
     _cache[key] = entry;
+  }
+
+  // --- Forwarders onto the renderer seam (the perf pass, TF round 5) ------
+  //
+  // The Scopes panel, the Project-panel thumbnails and the eyedropper reach
+  // the OFF-THREAD renderer through these, so their engine calls never block
+  // the UI isolate behind the render lock. Each rides its own caller-side
+  // guard and its own generation; none of them touches [_pendingKey], so a
+  // scope trace or a thumbnail can never delay the Viewer's own picture.
+
+  /// Forward a scope-trace request to the renderer (the K-096 GPU pass, served
+  /// off the UI isolate by the worker). The panel holds its own latest-wins
+  /// guard; the generation here is only the worker's reply key and is never
+  /// published as a wanted primary render (same as the throttled scope render).
+  void requestScopeTrace(int kind, String compId, int frame, double scale,
+      int bg, int trace, int red, int green, int blue,
+      void Function(Uint8List?) onTrace) {
+    _renderer.requestScopeTrace(
+        kind, compId, frame, scale, bg, trace, red, green, blue, ++_seq,
+        onTrace);
+  }
+
+  /// Forward a thumbnail decode to the renderer (off the UI isolate on the
+  /// worker; the engine caches it, so repeats are cheap). The Project panel's
+  /// rows hold their own epoch guard.
+  void requestThumbnail(
+      String itemId, int maxEdge, void Function(DecodedFrame?) onFrame) {
+    _renderer.requestThumbnail(itemId, maxEdge, ++_seq, onFrame);
+  }
+
+  /// A one-off full-scale comp readback for the eyedropper, off the UI isolate.
+  /// The eyedropper prefers [displayedFrame] (pixels already read back); this is
+  /// only the fallback when no CPU frame exists yet (the shared-texture path
+  /// before its first throttled readback). Its own request — never
+  /// [_pendingKey] — so it cannot delay the Viewer.
+  void requestSampleFrame(void Function(DecodedFrame?) onFrame) {
+    final compId = app.frontCompIdResolved;
+    if (compId == null || !_renderer.supportsCompRender) {
+      onFrame(null);
+      return;
+    }
+    _renderer.requestComp(compId, app.previewFrame, 1.0, ++_seq, (frame) {
+      if (_disposed) return;
+      onFrame(frame);
+    });
   }
 
   void _put(String key, _CacheEntry entry) {
@@ -658,6 +775,24 @@ abstract class FrameRenderer {
   void requestDecode(String itemId, int frame, int generation,
       void Function(DecodedFrame?) onFrame);
 
+  /// Compute the engine scope trace for comp [compId] at [frame]/[scale] (the
+  /// K-096 GPU pass — [kind] and the packed colours mirror
+  /// [ScopeTraceBridge.renderScope]). [onTrace] receives the 256×256 RGBA trace
+  /// bytes, or null when the engine declines. Off the UI isolate on the worker
+  /// implementation: even a cache-served trace waits on the engine's render
+  /// lock, which the worker may hold for a whole uncached comp render — the
+  /// "Scopes panel freezes the interface" defect.
+  void requestScopeTrace(int kind, String compId, int frame, double scale,
+      int bg, int trace, int red, int green, int blue, int generation,
+      void Function(Uint8List?) onTrace);
+
+  /// Decode the cached thumbnail of footage [itemId] (longer edge at most
+  /// [maxEdge]) — [ThumbnailBridge.thumbnail] through the same seam, so a cold
+  /// video thumbnail decode never runs on the UI isolate. [onFrame] receives
+  /// the frame, or null without the capability / on failure.
+  void requestThumbnail(String itemId, int maxEdge, int generation,
+      void Function(DecodedFrame?) onFrame);
+
   /// Release any worker/isolate the renderer owns.
   void dispose();
 }
@@ -705,6 +840,23 @@ class SynchronousFrameRenderer implements FrameRenderer {
   void requestDecode(String itemId, int frame, int generation,
       void Function(DecodedFrame?) onFrame) {
     onFrame(app.decodeFrame(itemId, frame));
+  }
+
+  @override
+  void requestScopeTrace(int kind, String compId, int frame, double scale,
+      int bg, int trace, int red, int green, int blue, int generation,
+      void Function(Uint8List?) onTrace) {
+    final b = app.bridge;
+    onTrace(b is ScopeTraceBridge && (b as ScopeTraceBridge).supportsScopeTrace
+        ? (b as ScopeTraceBridge)
+            .renderScope(kind, compId, frame, scale, bg, trace, red, green, blue)
+        : null);
+  }
+
+  @override
+  void requestThumbnail(String itemId, int maxEdge, int generation,
+      void Function(DecodedFrame?) onFrame) {
+    onFrame(app.thumbnail(itemId, maxEdge));
   }
 
   @override

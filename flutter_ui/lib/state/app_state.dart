@@ -9,9 +9,11 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
 
+import '../bridge/beats_worker.dart';
 import '../bridge/bridge.dart';
 import '../panels/preview_source.dart';
 import 'file_dialogs.dart';
@@ -454,8 +456,71 @@ class AppStateStub extends ChangeNotifier {
     notifyListeners();
   }
 
+  // --- Audio playback (bridge v0.10, docs/09) ------------------------------
+  //
+  // The engine owns one audio engine for the session; the sound card's clock
+  // is the playback master and the Viewer's ticker chases it (the picture asks
+  // "what time is it?" — docs/impl/playback-scheduler.md §4). Everything here
+  // degrades to the wall-clock transport when the capability is absent (an old
+  // library, the placeholder build, every existing fake), so no behaviour
+  // changes without it.
+
+  /// The audio playback capability, when the loaded library offers it.
+  AudioPlaybackBridge? get audioBridge {
+    final b = bridge;
+    // No promotion from DocumentBridge? to the unrelated capability type, so
+    // the cast is explicit (the same shape as [cacheControl]).
+    return b is AudioPlaybackBridge &&
+            (b as AudioPlaybackBridge).supportsAudioPlayback
+        ? b as AudioPlaybackBridge
+        : null;
+  }
+
+  /// Whether the engine reported a loaded comp mix on the last clock poll (or
+  /// play call). Gates the re-prepare on edit, so a comp merely on screen
+  /// never starts decoding audio — mirroring egui's `sync_comp_audio` "only
+  /// manage audio we are already responsible for".
+  bool _audioLoaded = false;
+
+  /// Poll the engine's audio clock (one cheap FFI call), or null when the
+  /// capability is absent. Updates the loaded flag the edit hook reads.
+  AudioClock? pollAudioClock() {
+    final a = audioBridge;
+    if (a == null) return null;
+    final clock = a.audioClock();
+    _audioLoaded = clock.loaded;
+    return clock;
+  }
+
+  /// Start (or restart) the front comp's audio from [frame] — the play press
+  /// and the work-area loop wrap both land here. A silent comp, a missing
+  /// capability or a degenerate rate are quiet no-ops.
+  void audioPlayFrom(int frame) {
+    final a = audioBridge;
+    final id = frontCompIdResolved;
+    final fps = frontComp?.fps.fps ?? 0;
+    if (a == null || id == null || fps <= 0) return;
+    a.audioPlay(id, frame / fps);
+    _audioLoaded = true; // optimistic; the next clock poll corrects it
+  }
+
+  /// Pause the engine audio and park its clock on [previewFrame] — the scrub/
+  /// stop path, so a later play resumes from where the picture stands.
+  void _audioPauseAtPlayhead() {
+    final a = audioBridge;
+    if (a == null) return;
+    a.audioPause();
+    final fps = frontComp?.fps.fps ?? 0;
+    if (fps > 0) a.audioSeek(previewFrame / fps);
+  }
+
   void togglePlay() {
     playing = !playing;
+    if (playing) {
+      audioPlayFrom(previewFrame);
+    } else {
+      audioBridge?.audioPause();
+    }
     notifyListeners();
   }
 
@@ -463,6 +528,7 @@ class AppStateStub extends ChangeNotifier {
     final wasPlaying = playing;
     playing = false;
     _setPlayhead((previewFrame + delta).clamp(0, previewFrameCount));
+    _audioPauseAtPlayhead();
     _scheduleSessionPersist();
     // Only the transport-state change needs the big notifier; the frame move
     // itself rides [playheadFrame], so layer rows do not rebuild.
@@ -473,6 +539,7 @@ class AppStateStub extends ChangeNotifier {
     final wasPlaying = playing;
     playing = false;
     _setPlayhead(frame.clamp(0, previewFrameCount));
+    _audioPauseAtPlayhead();
     _scheduleSessionPersist();
     if (wasPlaying) notifyListeners();
   }
@@ -710,6 +777,10 @@ class AppStateStub extends ChangeNotifier {
     frontCompId = id;
     previewFrameCount = frontComp?.frameCount ?? previewFrameCount;
     _setPlayhead(previewFrame.clamp(0, previewFrameCount));
+    // Fronting another comp mid-playback moves the sound with the picture:
+    // the engine silences the old mix and chases the new comp's (the picture
+    // stays on the wall clock until its mix lands).
+    if (playing) audioPlayFrom(previewFrame);
     _scheduleSessionPersist();
     notifyListeners();
   }
@@ -1052,14 +1123,56 @@ class AppStateStub extends ChangeNotifier {
 
   // Beats — on the front comp.
 
+  /// True while beat detection runs in its worker isolate (one at a time).
+  bool _beatsDetecting = false;
+
   /// Detect beat markers for the front comp ([sensitivity] 0..100).
-  void detectBeats(int sensitivity) {
+  ///
+  /// The engine mixes down the comp's whole audio and analyses it — seconds of
+  /// blocking work on long audio, behind the same render lock the Viewer's
+  /// worker holds mid-render. With the real FFI [LumitBridge] loaded the call
+  /// therefore runs in its own short-lived isolate (which opens its own handle
+  /// to the same library — the process-wide engine state is shared, so the
+  /// detected markers commit exactly as if called here), and only the reply
+  /// JSON crosses back to be adopted on the UI isolate. A fake/test bridge
+  /// keeps the synchronous path so widget tests stay deterministic.
+  Future<void> detectBeats(int sensitivity) async {
     final compId = frontCompIdResolved;
     if (compId == null) {
       setNotice('Open a composition to detect beats');
       return;
     }
-    _editOp((e) => e.detectBeats(compId, sensitivity));
+    final b = bridge;
+    if (b is! LumitBridge) {
+      _editOp((e) => e.detectBeats(compId, sensitivity));
+      return;
+    }
+    if (_beatsDetecting) return; // one detection at a time
+    _beatsDetecting = true;
+    setNotice('Detecting beats…');
+    final paths = <String>[
+      if (b.loadedPath != null) b.loadedPath!,
+      ...LumitBridge.candidateLibraryPaths(),
+    ];
+    String raw;
+    try {
+      raw = await Isolate.run(
+          () => detectBeatsWithLibrary(paths, compId, sensitivity));
+    } catch (_) {
+      raw = '{"ok":false,"error":"beat detection could not start its worker"}';
+    }
+    _beatsDetecting = false;
+    if (_disposed) return;
+    adoptDetectBeatsReply(raw);
+  }
+
+  /// Adopt a beat-detection reply JSON on the UI isolate: drop the busy notice,
+  /// then apply it through the [_applyOp] path, so the snapshot, undo flags and
+  /// any error surface exactly as the synchronous op would. Public so the
+  /// reply-adoption behaviour is unit-testable without spawning an isolate.
+  void adoptDetectBeatsReply(String raw) {
+    notice = null; // the markers themselves (or the error tint) say the rest
+    _applyOp(BridgeReply.parse(raw));
   }
 
   /// Remove the detected Beat markers from the front comp.
@@ -1590,17 +1703,6 @@ class AppStateStub extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Render the front comp's current frame to CPU pixels for a one-off sample
-  /// (the eyedropper's readback), or null when the composited-comp render is not
-  /// available (no bridge, an older library, no GPU adapter). Full scale so the
-  /// sampled pixel is the true colour, not a downsample.
-  DecodedFrame? sampleCompFrame() {
-    final b = bridge;
-    final compId = frontCompIdResolved;
-    if (b is! CompRenderBridge || compId == null) return null;
-    return (b as CompRenderBridge).renderCompFrame(compId, previewFrame, 1.0);
-  }
-
   // --- Bridge v0.8: rendered-frame cache + thumbnails ---------------------
 
   /// A hook the [PreviewSource] registers so "Clear cache" also empties the
@@ -1629,9 +1731,25 @@ class AppStateStub extends ChangeNotifier {
 
   /// A cached thumbnail of footage [itemId] whose longer edge is at most
   /// [maxEdge], or null without the capability. Decoded and cached engine-side,
-  /// so repeated calls are cheap.
+  /// so repeated calls are cheap. Synchronous — the Project panel goes through
+  /// [requestThumbnail] instead so a COLD decode never runs on the UI isolate;
+  /// this remains as the inline fallback the [SynchronousFrameRenderer] uses.
   DecodedFrame? thumbnail(String itemId, int maxEdge) =>
       thumbnails?.thumbnail(itemId, maxEdge);
+
+  /// Request a footage thumbnail through the shared [previewSource]'s renderer
+  /// seam — on the render worker isolate when one is running, so a cold video
+  /// thumbnail decode (a synchronous FFI call under the bridge lock) never
+  /// janks the UI (TF round 5). [onFrame] receives the decoded frame, or null
+  /// without the capability / on failure.
+  void requestThumbnail(
+      String itemId, int maxEdge, void Function(DecodedFrame?) onFrame) {
+    if (thumbnails == null) {
+      onFrame(null);
+      return;
+    }
+    previewSource.requestThumbnail(itemId, maxEdge, onFrame);
+  }
 
   /// The rendered-frame cache's live stats, or the empty default without the
   /// capability. The Timeline cache bar polls this on the app cadence (never
@@ -2070,6 +2188,15 @@ class AppStateStub extends ChangeNotifier {
       previewFrameCount = fc.frameCount;
       _setPlayhead(previewFrame.clamp(0, previewFrameCount));
     }
+    // An edit while audio is loaded or playing re-prepares the mix, so a
+    // mute/solo/move/trim/Volume change is heard (egui's `sync_comp_audio`).
+    // The engine's jobs signature makes an unchanged mix a no-op, and a
+    // changed one swaps in mid-playback with the clock kept. Gated on
+    // loaded/playing so a comp merely on screen never starts decoding audio.
+    if (playing || _audioLoaded) {
+      final id = frontCompIdResolved;
+      if (id != null) audioBridge?.audioPrepare(id);
+    }
   }
 
   /// Apply a bridge reply: on success refresh the snapshot and post a quiet
@@ -2237,8 +2364,13 @@ class AppStateStub extends ChangeNotifier {
     return false;
   }
 
+  /// Set on [dispose]; guards the late resumption of an awaited worker (beat
+  /// detection) against notifying a disposed ChangeNotifier.
+  bool _disposed = false;
+
   @override
   void dispose() {
+    _disposed = true;
     // Flush any pending session write, then tear down the timers/notifiers.
     flushPendingSession();
     _autosaveTimer?.cancel();

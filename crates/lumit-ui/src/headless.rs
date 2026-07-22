@@ -77,9 +77,9 @@ pub struct HeadlessRenderer {
     items: HashMap<Uuid, ItemInfo>,
     /// Probe results by footage id, so each file is probed at most once.
     probe_cache: HashMap<Uuid, Probe>,
-    /// Whether each footage item carries an audio stream, cached so building the
+    /// The audio-jobs walk with its has-audio probe cache, so building the
     /// export audio jobs probes each file at most once (export path only).
-    audio_cache: HashMap<Uuid, bool>,
+    audio_jobs: AudioJobsBuilder,
     /// The Windows zero-copy Viewer target (K-177), held for the session and
     /// re-created only when the comp's dimensions change. `None` until the first
     /// `render_to_shared` call. Present only in the opt-in shared-texture build.
@@ -161,7 +161,7 @@ impl HeadlessRenderer {
             scope,
             items: HashMap::new(),
             probe_cache: HashMap::new(),
-            audio_cache: HashMap::new(),
+            audio_jobs: AudioJobsBuilder::new(),
             #[cfg(all(windows, feature = "shared-texture"))]
             shared: None,
             #[cfg(all(target_os = "linux", feature = "shared-texture-linux"))]
@@ -189,104 +189,10 @@ impl HeadlessRenderer {
         Some(ExportInputs { items, audio, gpu })
     }
 
-    /// Collect `comp`'s audio jobs for export — the headless twin of
-    /// `AppState::comp_audio_jobs` (docs/09 §6): every audible footage layer with
-    /// an audio stream, its span mapped to the comp timeline, plus nested Precomp
-    /// layers' contents scaled by their carrier Volumes. Solo silences non-soloed
-    /// audio per comp, exactly as the video gate does.
+    /// Collect `comp`'s audio jobs for export — see [`AudioJobsBuilder`], which
+    /// this renderer holds so the has-audio probe cache warms across a session.
     fn collect_audio(&mut self, doc: &Document, comp: &Composition) -> Vec<AudioJob> {
-        let mut jobs = Vec::new();
-        let mut visited = vec![comp.id];
-        self.collect_audio_jobs(
-            doc,
-            comp,
-            0.0,
-            (f64::NEG_INFINITY, f64::INFINITY),
-            &[],
-            &mut visited,
-            &mut jobs,
-        );
-        jobs
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn collect_audio_jobs(
-        &mut self,
-        doc: &Document,
-        comp: &Composition,
-        base_s: f64,
-        window: (f64, f64),
-        carriers: &[(lumit_core::anim::Property, f64)],
-        visited: &mut Vec<Uuid>,
-        jobs: &mut Vec<AudioJob>,
-    ) {
-        let any_solo = lumit_core::model::any_solo(comp);
-        for layer in &comp.layers {
-            if !layer.switches.audible || (any_solo && !layer.switches.solo) {
-                continue;
-            }
-            let in_s = (layer.in_point.0.to_f64() + base_s).max(window.0);
-            let out_s = (layer.out_point.0.to_f64() + base_s).min(window.1);
-            if out_s <= in_s {
-                continue;
-            }
-            let offset_s = layer.start_offset.0.to_f64() + base_s;
-            match &layer.kind {
-                LayerKind::Footage { item, .. } => {
-                    let Some(ProjectItem::Footage(f)) = doc.item(*item) else {
-                        continue;
-                    };
-                    if !self.has_audio(*item, &footage_path(f)) {
-                        continue;
-                    }
-                    jobs.push(AudioJob {
-                        item: *item,
-                        path: footage_path(f),
-                        in_s,
-                        out_s,
-                        offset_s,
-                        volume: layer.volume_db.clone(),
-                        carriers: carriers.to_vec(),
-                    });
-                }
-                LayerKind::Precomp { comp: nested_id } => {
-                    if visited.contains(nested_id) {
-                        continue;
-                    }
-                    let Some(nested) = doc.comp(*nested_id) else {
-                        continue;
-                    };
-                    let mut inner = carriers.to_vec();
-                    inner.push((layer.volume_db.clone(), offset_s));
-                    visited.push(*nested_id);
-                    self.collect_audio_jobs(
-                        doc,
-                        nested,
-                        offset_s,
-                        (in_s, out_s),
-                        &inner,
-                        visited,
-                        jobs,
-                    );
-                    visited.pop();
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Whether footage `item` at `path` carries an audio stream, cached so each
-    /// file is probed for audio at most once across an export session.
-    fn has_audio(&mut self, item: Uuid, path: &Path) -> bool {
-        if let Some(&has) = self.audio_cache.get(&item) {
-            return has;
-        }
-        let has = path.is_file()
-            && lumit_media::probe::probe(path)
-                .map(|p| p.audio.is_some())
-                .unwrap_or(false);
-        self.audio_cache.insert(item, has);
-        has
+        self.audio_jobs.audio_jobs(doc, comp)
     }
 
     /// Render composition `comp_id` at integer `frame` to tightly-packed RGBA8,
@@ -575,6 +481,129 @@ impl HeadlessRenderer {
                 }
             }
         }
+    }
+}
+
+/// The comp audio-jobs walk WITHOUT the GPU renderer — the seam audio playback
+/// prepares through, so building a mix never queues behind a slow comp render.
+///
+/// # In plain terms
+///
+/// "Which layers make sound, and where do they land on the timeline?" needs no
+/// graphics card to answer — only the document and a quick look at each media
+/// file (does it carry an audio stream?). [`HeadlessRenderer`] used to own this
+/// walk, which meant asking for audio jobs meant owning a whole GPU renderer;
+/// now the walk stands alone and the renderer simply holds one of these. The
+/// bridge's audio-playback path holds its own, so preparing sound never waits
+/// for a picture.
+///
+/// It is the headless twin of `AppState::comp_audio_jobs` (docs/09 §6): every
+/// audible footage layer with an audio stream, its span mapped to the comp
+/// timeline, plus nested Precomp layers' contents scaled by their carrier
+/// Volumes. Solo silences non-soloed audio per comp, exactly as the video gate
+/// does. The has-audio probe result is cached per item, so each file is probed
+/// at most once per session.
+#[derive(Default)]
+pub struct AudioJobsBuilder {
+    /// Whether each footage item carries an audio stream, cached so each file
+    /// is probed at most once.
+    has_audio: HashMap<Uuid, bool>,
+}
+
+impl AudioJobsBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The comp's audio jobs (empty for a silent comp) — the same list export,
+    /// beat detection and playback all mix from, so they cannot disagree about
+    /// what the comp sounds like.
+    pub fn audio_jobs(&mut self, doc: &Document, comp: &Composition) -> Vec<AudioJob> {
+        let mut jobs = Vec::new();
+        let mut visited = vec![comp.id];
+        self.walk(
+            doc,
+            comp,
+            0.0,
+            (f64::NEG_INFINITY, f64::INFINITY),
+            &[],
+            &mut visited,
+            &mut jobs,
+        );
+        jobs
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        &mut self,
+        doc: &Document,
+        comp: &Composition,
+        base_s: f64,
+        window: (f64, f64),
+        carriers: &[(lumit_core::anim::Property, f64)],
+        visited: &mut Vec<Uuid>,
+        jobs: &mut Vec<AudioJob>,
+    ) {
+        let any_solo = lumit_core::model::any_solo(comp);
+        for layer in &comp.layers {
+            if !layer.switches.audible || (any_solo && !layer.switches.solo) {
+                continue;
+            }
+            let in_s = (layer.in_point.0.to_f64() + base_s).max(window.0);
+            let out_s = (layer.out_point.0.to_f64() + base_s).min(window.1);
+            if out_s <= in_s {
+                continue;
+            }
+            let offset_s = layer.start_offset.0.to_f64() + base_s;
+            match &layer.kind {
+                LayerKind::Footage { item, .. } => {
+                    let Some(ProjectItem::Footage(f)) = doc.item(*item) else {
+                        continue;
+                    };
+                    if !self.item_has_audio(*item, &footage_path(f)) {
+                        continue;
+                    }
+                    jobs.push(AudioJob {
+                        item: *item,
+                        path: footage_path(f),
+                        in_s,
+                        out_s,
+                        offset_s,
+                        volume: layer.volume_db.clone(),
+                        carriers: carriers.to_vec(),
+                    });
+                }
+                LayerKind::Precomp { comp: nested_id } => {
+                    if visited.contains(nested_id) {
+                        continue;
+                    }
+                    let Some(nested) = doc.comp(*nested_id) else {
+                        continue;
+                    };
+                    let mut inner = carriers.to_vec();
+                    inner.push((layer.volume_db.clone(), offset_s));
+                    visited.push(*nested_id);
+                    self.walk(doc, nested, offset_s, (in_s, out_s), &inner, visited, jobs);
+                    visited.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Whether footage `item` at `path` carries an audio stream, cached so each
+    /// file is probed for audio at most once across a session.
+    fn item_has_audio(&mut self, item: Uuid, path: &Path) -> bool {
+        if let Some(&has) = self.has_audio.get(&item) {
+            return has;
+        }
+        let has = path.is_file()
+            && lumit_media::probe::probe(path)
+                .map(|p| p.audio.is_some())
+                .unwrap_or(false);
+        self.has_audio.insert(item, has);
+        has
     }
 }
 
@@ -927,6 +956,65 @@ mod tests {
         let (store, _comp_id) = doc_with_solid(LinearColour([1.0, 1.0, 1.0, 1.0]), 4, 4);
         let doc = store.snapshot();
         assert!(r.render_to_shared(&doc, Uuid::now_v7(), 0).is_err());
+    }
+
+    /// The audio-jobs builder needs no GPU: a comp holding a solid (no sound)
+    /// and a footage layer whose file is not on disk yields no jobs, calmly,
+    /// and the has-audio probe result is cached so the file is checked once.
+    #[test]
+    fn audio_jobs_builder_needs_no_gpu_and_caches_the_probe() {
+        let (store, comp_id) = doc_with_solid(LinearColour([1.0, 0.0, 0.0, 1.0]), 8, 8);
+        let mut doc = (*store.snapshot()).clone();
+        // Add a footage item + an audible layer pointing at a missing file.
+        let item_id = Uuid::now_v7();
+        doc.items
+            .push(ProjectItem::Footage(lumit_core::model::FootageItem {
+                id: item_id,
+                name: "gone.mp4".into(),
+                media: lumit_core::model::MediaRef {
+                    relative_path: "gone.mp4".into(),
+                    absolute_path: "Z:/definitely/not/here/gone.mp4".into(),
+                    fingerprint: None,
+                    extra: serde_json::Map::new(),
+                },
+                extra: serde_json::Map::new(),
+            }));
+        if let Some(ProjectItem::Composition(c)) = doc
+            .items
+            .iter_mut()
+            .find(|i| matches!(i, ProjectItem::Composition(_)))
+        {
+            c.layers.push(lumit_core::model::Layer {
+                id: Uuid::now_v7(),
+                name: "gone.mp4".into(),
+                kind: LayerKind::Footage {
+                    item: item_id,
+                    retime: None,
+                },
+                in_point: CompTime(Rational::new(0, 1).unwrap()),
+                out_point: CompTime(Rational::new(5, 1).unwrap()),
+                start_offset: CompTime(Rational::new(0, 1).unwrap()),
+                transform: TransformGroup::default(),
+                matte: None,
+                parent: None,
+                label: 0,
+                volume_db: Property::zero(),
+                blend: Default::default(),
+                masks: Vec::new(),
+                effects: Vec::new(),
+                switches: Switches::default(),
+                extra: serde_json::Map::new(),
+            });
+        }
+        let comp = doc.comp(comp_id).unwrap().clone();
+        let mut builder = AudioJobsBuilder::new();
+        assert!(builder.audio_jobs(&doc, &comp).is_empty());
+        assert_eq!(builder.has_audio.len(), 1, "the probe result is cached");
+        assert_eq!(builder.has_audio.get(&item_id), Some(&false));
+        // A second build reads the cache (no way to observe the skipped disk
+        // probe directly, but the cached map must not grow).
+        assert!(builder.audio_jobs(&doc, &comp).is_empty());
+        assert_eq!(builder.has_audio.len(), 1);
     }
 
     /// An unknown comp id is a calm error, never a panic.

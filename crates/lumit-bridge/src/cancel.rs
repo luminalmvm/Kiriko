@@ -63,9 +63,12 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn a_superseded_generation_is_skipped() {
-        // Use a high base so this test is independent of others touching the
-        // shared high-water mark (fetch_max only ever raises it).
-        let base = 1_000_000;
+        // Use the HIGHEST base of any test touching the shared high-water mark
+        // (fetch_max only ever raises it): this test asserts that `base + 10`
+        // still proceeds, which a parallel test with a higher base would break
+        // — the flake the old 1_000_000 base allowed when the sibling test's
+        // 2_000_000 publish interleaved.
+        let base = 3_000_000;
         cancel_stale(base + 10);
         assert!(
             should_render(base + 10),

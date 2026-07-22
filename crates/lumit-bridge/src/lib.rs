@@ -65,6 +65,8 @@
 //!   guards, and the string/buffer ownership contracts.
 
 mod assets;
+#[cfg(all(feature = "media", feature = "render"))]
+mod audio;
 mod beats;
 mod cancel;
 mod columns;
@@ -129,7 +131,14 @@ use serde_json::json;
 /// `restore_journal` recovers this frontend's own unsaved work. Every addition
 /// is *additive*, so an older Dart client still reads every field it knew, but
 /// the ABI number rises so a client that needs the new calls can insist on them.
-pub(crate) const ABI_VERSION: u32 = 9;
+/// v10 (this build) adds comp audio playback (docs/09; tester round 5 — the
+/// Flutter frontend had no sound): `audio_prepare`/`audio_play`/`audio_pause`/
+/// `audio_seek`/`audio_stop` and the per-tick `audio_clock` poll. The sound
+/// card's clock is the playback master and the Dart Viewer chases it; a machine
+/// with no output device answers calmly (`loaded` false) and playback simply
+/// has no sound. Present but answering "no audio" unless the library was built
+/// with the `media` + `render` features (the default set).
+pub(crate) const ABI_VERSION: u32 = 10;
 
 /// `{"ok":false,"error":"…"}`. serde escapes any control character, so the
 /// resulting string never carries an interior NUL and always makes a `CString`.

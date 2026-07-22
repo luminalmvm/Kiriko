@@ -621,3 +621,96 @@ hotkeys, and their absence makes testing feel clunky).
   `a_frame_rendered_before_a_probe_landed_is_refused_when_it_finishes` and
   `a_comp_frame_comes_back_stamped_with_the_epoch_it_was_asked_for`, the latter driving the
   real preview engine and verified to fail when the stamp is dropped in transit.
+
+# Flutter desk-test round 5 — 2026-07-22 (flutter-frontend-alternative branch)
+
+- [x] **The Viewer preview did not live-update on an edit.** Changing an effect parameter (or
+  any document edit) left the picture unchanged until the frame happened to fall out of the
+  cache. The engine-side rendered-frame cache invalidated correctly, but the Dart-side
+  decoded-frame LRU in `preview_source.dart` keyed frames without the document epoch, so the
+  stale `ui.Image` was served after the edit. Fixed by teaching the LRU the epoch: it is
+  dropped from the cache on a bump and folded into every cache key, and a render/decode reply
+  that lands after a bump is dropped rather than banked or shown (the last picture is held
+  while a fresh render is issued — never blank). Pure playhead motion rides the fine-grained
+  notifier and never bumps the epoch, so scrubbing still hits the cache. Also fixed a scopes
+  staleness nit: `scopes_panel.dart`'s `_maybeRebuild` returned early while a trace was
+  decoding and never retried, so a generation arriving mid-build showed only on the next
+  notification; it now rechecks when the build completes. Regressions in
+  `viewer_scopes_test.dart` (edit re-renders the same frame, playhead motion re-uses the
+  cache, a post-edit reply is dropped not banked), verified to fail without the fix.
+
+- [x] **The UI froze for the length of every uncached render.** The comp render itself was
+  already on the worker isolate (K-176), but four synchronous FFI calls still ran ON the UI
+  isolate and queued behind the engine's session renderer lock (`render.rs`'s `RENDERER`
+  mutex, held for the whole GPU render + readback) while the worker rendered an uncached
+  frame — so the interface stopped exactly as long as the render. (1) The Scopes panel's
+  engine trace (`renderScope`) fired on every landed frame; with the panel open, every
+  uncached frame froze the window — the systematic one. (2) A Project-panel thumbnail decode
+  ran inside a `Future(...)`, which is a microtask and never leaves the UI isolate — per-row
+  jank on cold video thumbnails. (3) `detectBeats` mixed down and analysed the comp's whole
+  audio synchronously (its own Rust comment claimed the Dart side awaits off the UI isolate —
+  it did not, until now). (4) The eyedropper rendered a full-scale comp frame per pointer
+  move when no CPU frame was held. Fixed by widening the render-worker protocol with `scope`
+  and `thumb` request kinds (latest-wins, own guards, never the Viewer's in-flight key),
+  running beat detection via `Isolate.run` in a short-lived worker that opens its own library
+  handle (busy notice "Detecting beats…", reply adopted on the UI isolate through the normal
+  op path), and sampling the eyedropper from the already-read-back `displayedFrame` with an
+  async worker readback as the only fallback. Regressions in `viewer_scopes_test.dart`
+  (trace rides the seam, superseded trace dropped, K-130 hold, sample render on its own
+  guard), `final_sweep_test.dart` (thumbnail seam + epoch re-decode), `edit_ops_test.dart`
+  (sync fake path, reply adoption, worker error shape) and `viewer_gizmo_test.dart`
+  (eyedropper commits through the existing op).
+
+- [x] **No audio playback at all.** Play moved the picture but never made a sound: the
+  Flutter transport was a Dart `Ticker` advancing the playhead on the wall clock, and
+  nothing ever opened `lumit-audio`'s proven `AudioEngine`. Closed by growing the bridge an
+  audio surface (bridge v0.10): `audio_prepare`/`audio_play`/`audio_pause`/`audio_seek`/
+  `audio_stop` plus an allocation-free per-tick `audio_clock` poll, and the Viewer's ticker
+  now treats the sound card's clock as the playback master — the picture chases it
+  (docs/impl/playback-scheduler.md §4), falling back to the wall clock for a silent comp,
+  no output device, or an old library, so every existing test and fake is untouched.
+  Engine side: the cpal stream is not `Send`, so one session `AudioEngine` lives on a
+  dedicated audio thread taking commands over a channel (a new `ClockHandle` in
+  `lumit-audio` carries the clock's atomics across threads); a background prepare worker
+  (one at a time, latest-wins mailbox) builds the mix through a new GPU-free
+  `lumit_ui::headless::AudioJobsBuilder` seam — extracted from the renderer so preparing
+  sound never queues behind the session RENDERER lock — decodes each item once at the
+  device rate, and installs a live `MixPlan`. An edit while loaded/playing re-prepares:
+  the egui jobs-signature idea makes an unchanged mix a no-op and a changed one a
+  mid-playback `swap_plan` (clock and play state kept — the docs/09 §6 instant-edit
+  contract, so mute/solo/move/trim/Volume are heard in ~10 ms). No lock is ever held
+  across a probe, decode, mix or the FFI boundary; a device-less machine resolves to a
+  calm terminal no-audio state. Tests: `audio.rs` (signature tracks every sound-changing
+  edit; plan building places/skips/rejects wrong-rate buffers; calm errors), `ffi.rs`
+  (clock out-pointer null-safety), `lumit-audio` (the clock handle reads the callback's
+  atomics from another thread), `headless.rs` (the jobs builder needs no GPU and caches
+  its probes), and `audio_playback_test.dart` (transport→audio calls with the right start
+  seconds, scrub parks the clock, edit re-prepares, the tick chases a fake clock with the
+  work-area wrap re-seeking, and the wall-clock fallback stays intact).
+
+- [x] **A panel's state reset whenever it flipped active or inactive.** Clicking a different
+  panel snapped a scrolled list (Effects & presets) back to the top, and the first click on a
+  drag target in an inactive panel (a timeline item, a `DragValueField` slider) did nothing —
+  only the second attempt dragged. Root cause was a `Container`-composition trap in
+  `dock_widget.dart`'s `_PaneChrome`: the pane body was wrapped in a `Container` whose
+  `foregroundDecoration` was `active ? BoxDecoration(...) : null`. `Container` composes its
+  internal widget chain conditionally, so a null-vs-non-null `foregroundDecoration` adds or
+  removes a `DecoratedBox` layer — the active flip changed the tree shape between the Container
+  and the pane body. Flutter could then no longer match the old subtree by position and type,
+  discarded the pane's Element subtree and rebuilt it with fresh State: scroll offsets gone,
+  and the gesture recogniser that the activating pointer-down had just armed gone with it (the
+  `Listener.onPointerDown` that sets the active panel is the very click that should have begun
+  the drag). Fixed by always supplying a `foregroundDecoration` and keeping the composed tree
+  shape constant: an inactive pane wears a fully transparent border of the same width
+  (`t.accent.withValues(alpha: 0)`, no hex), so nothing paints but the widget chain is
+  identical. A sibling parity gap rode along: `_TabGroup` built only the active tab's body, so
+  switching tabs discarded the hidden tab's state — where egui's memory persists it. It now
+  keeps every tab's body alive in a `Stack`, the inactive ones under `Offstage` +
+  `TickerMode(enabled: false)` (state preserved, no painting, no per-frame ticking), each body
+  keyed `ValueKey(panel)` so reordering tabs never cross-matches state; the drag hit-test
+  (`_DragController._resolve`) now skips panes under an offstage ancestor, so a hidden tab is
+  never a drop target. Regressions in `dock_panel_state_test.dart`, all verified to fail
+  without the fix: a bare pane flipped inactive keeps its State object and scroll offset; a
+  drag begun on an inactive pane takes effect on the first gesture; a tab group preserves a
+  hidden tab's scroll offset across a switch away and back. `shell_smoke_test.dart`'s
+  accent-edge probe now detects the painted (opaque) border rather than a non-null decoration.

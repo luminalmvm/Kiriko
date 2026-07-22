@@ -677,7 +677,7 @@ mod tests {
         let v = parse(&version());
         assert_eq!(v["ok"], json!(true));
         assert_eq!(v["abi"], json!(crate::ABI_VERSION));
-        assert_eq!(v["abi"], json!(9));
+        assert_eq!(v["abi"], json!(10));
     }
 
     #[test]

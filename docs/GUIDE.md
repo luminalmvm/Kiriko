@@ -2314,6 +2314,29 @@ now genuinely renders a smaller picture rather than a full-size one relabelled:
 choosing Half asks the engine for half-resolution pixels, which are faster to
 draw and get their own place on the shelf.
 
+**Panels that keep their place.** A panel now remembers where it was scrolled to,
+which twirl-downs were open, and a drag you had half-begun — even as you click
+around between panels. This sounds obvious, but it took care to get right, and the
+reason is a quirk of how Flutter decides whether to keep a piece of the screen or
+throw it away and build it afresh. The clicked panel wears a thin accent outline so
+you can see which one the keyboard is talking to; the trouble was that Flutter was
+adding that outline by *changing the shape* of the panel's on-screen scaffolding —
+and whenever the scaffolding's shape changes, Flutter can no longer line the old
+version up against the new one, so it discards the whole panel and rebuilds it from
+scratch, losing everything it remembered. The very click that lit the outline was
+the click that wiped the panel's memory — which is why a scrolled list jumped back
+to the top when you clicked elsewhere, and why the *first* attempt to drag a slider
+in an unfocused panel did nothing (the click that focused it tore out the drag
+before it could take hold; only the second try worked). The fix is to give every
+panel that outline *all the time* and simply make it invisible (fully transparent)
+when the panel isn't the focused one — the shape never changes, so Flutter keeps
+the panel and its memory intact, and only the colour of the outline flickers
+between accent and clear. The same care now covers **tabs**: stack a few panels
+together and switch between their tabs, and the ones you flip away from stay exactly
+as you left them, rather than resetting each time — the hidden tabs are kept alive
+off to one side, doing no drawing and no per-frame work but holding their place,
+the way the old egui interface remembered them.
+
 **Where things are.** `docs/flutter-port/` holds the plan: `01` the strategy
 and phases, `02` an inventory of every surface the egui interface ships (the
 port's shopping list), `03` the bridge design, `04` a table mapping each egui
@@ -2709,6 +2732,24 @@ rate; and remembering the session (which project, playhead, selection) now waits
 for a half-second lull instead of writing to disk on every single frame of a
 scrub.
 
+A later testing round found the same freeze sneaking back in through side
+doors: a few smaller engine calls were still made on the interface thread, and
+each of them has to wait its turn behind the engine's render lock — so if the
+worker was mid-render on an uncached frame, the whole window stopped until that
+render finished. The worker now serves those too: the Scopes panel's trace
+(which reads the engine every time a new frame lands, so with the panel open
+every uncached frame used to freeze the window for the length of its render)
+and the Project panel's little footage thumbnails both ride the same background
+worker, ask-and-carry-on style with the same "only the newest request matters"
+manner. Beat detection — which listens through the whole composition's audio
+and can take seconds — now runs in its own short-lived background worker: a
+quiet "Detecting beats…" note shows while it listens, and the markers appear
+when it is done, with the window live the whole time. And the colour
+eyedropper, which used to render a whole full-size frame on the interface
+thread the moment you moved the pointer over the picture, now simply reads the
+pixels the Viewer has already copied back — sampling is free — only asking the
+worker for a frame in the rare case where none has arrived yet.
+
 **Filling in the edit commands (bridge v0.7).** By this point the bridge could
 show the whole document and do the common edits, but a scatter of menu items and
 editors still had nowhere to send their instruction — the engine simply had no
@@ -2867,3 +2908,40 @@ the *speed* curve for retimed clips today; the value curve is a large, separate
 build, and drawing it at low fidelity (straight lines where real curves belong)
 would look wrong, so it is left as an honest, named remainder rather than
 half-built (see `docs/flutter-port/06-REMAINING-WORK.md` §C).
+
+**Audio playback in the Flutter frontend.** Until this change, pressing play in
+the Flutter window moved the picture but made no sound at all — the playhead
+was advanced by an ordinary interface timer. Now the same audio machinery the
+egui application uses is wired through the bridge, and it works the way all
+good playback works: **there is exactly one clock, and the sound card owns
+it.** The sound card asks for its next slice of samples on a strict schedule it
+controls; counting how many samples it has consumed *is* the playback time.
+Every screen refresh, the Viewer asks the engine "what time is it?" and shows
+the frame for that answer — the picture chases the sound, which is why the two
+can never drift apart.
+
+When you press play, the engine walks the composition for every audible layer
+that carries sound, decodes those files once (they are kept for the session),
+lays each one on a long strip at its own start time and volume — the *mix
+plan* — and hands the plan to the sound card's thread. All of that happens in
+the background: the play press returns instantly, and until the sound is ready
+the picture simply runs on the old interface timer, then hands over to the
+audio clock the moment it is loaded.
+
+Editing while playing is the nice part. Mute a layer, drag a clip, trim it,
+nudge a volume — the interface tells the engine "the comp changed", the engine
+compares a fingerprint of what the mix *should* be against what is loaded, and
+if they differ it builds a fresh plan and **swaps** it in without touching the
+clock or stopping the sound. You hear the edit on the next slice the sound card
+asks for, about a hundredth of a second later. If nothing that affects sound
+changed, the fingerprint matches and nothing happens at all.
+
+A machine with no speakers or sound device is handled calmly: the engine notes
+"no audio" once and playback simply runs silent on the interface timer, exactly
+as before — no errors, no retries. The same is true for a composition with no
+audio layers, and for the loop: when playback wraps around the work area, the
+audio is asked to jump back to the loop start and keep going. Two known
+remainders are named rather than built: output-latency compensation (the few
+milliseconds between the clock and the speaker cone — within the ±half-frame
+tolerance the performance rules allow) and the per-layer waveform lanes the
+egui timeline draws.

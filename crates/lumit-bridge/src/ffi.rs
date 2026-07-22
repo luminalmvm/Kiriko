@@ -2620,6 +2620,165 @@ pub extern "C" fn lumit_bridge_reset_realtime() -> *mut c_char {
     guard(crate::realtime::reset_reply)
 }
 
+// ---------------------------------------------------------------------------
+// Bridge v0.10: comp audio playback (crate::audio, docs/09). The sound card's
+// clock is the playback master; Dart's Viewer polls `audio_clock` each tick
+// and the picture chases it. Without the `media` + `render` features there is
+// no audio pipeline: the ops answer that calmly and the clock reads unloaded.
+// ---------------------------------------------------------------------------
+
+/// Build (or refresh) a composition's audio mix in the background — called
+/// after an edit while audio is loaded or playing, so mute/solo/move/trim/
+/// Volume edits are heard. Returns immediately; an unchanged mix is a no-op
+/// and a changed one is swapped in mid-playback (clock and play state kept).
+///
+/// # Safety
+/// `comp_id` must be null or a valid NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_audio_prepare(comp_id: *const c_char) -> *mut c_char {
+    let Some(comp) = c_str_to_string(comp_id) else {
+        return to_c_string(err_json(
+            "audio prepare: the comp id was null or not valid UTF-8",
+        ));
+    };
+    guard(move || audio_prepare_impl(&comp))
+}
+
+/// Start playing a composition's audio from `start_secs`. An already-loaded
+/// mix seeks and plays at once; otherwise the mix is prepared in the
+/// background and starts from `start_secs` when it lands.
+///
+/// # Safety
+/// `comp_id` must be null or a valid NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_audio_play(
+    comp_id: *const c_char,
+    start_secs: f64,
+) -> *mut c_char {
+    let Some(comp) = c_str_to_string(comp_id) else {
+        return to_c_string(err_json(
+            "audio play: the comp id was null or not valid UTF-8",
+        ));
+    };
+    guard(move || audio_play_impl(&comp, start_secs))
+}
+
+/// Pause audio playback (the clock holds its position).
+#[no_mangle]
+pub extern "C" fn lumit_bridge_audio_pause() -> *mut c_char {
+    guard(audio_pause_impl)
+}
+
+/// Move the audio clock to `secs` (a scrub; play state untouched).
+#[no_mangle]
+pub extern "C" fn lumit_bridge_audio_seek(secs: f64) -> *mut c_char {
+    guard(move || audio_seek_impl(secs))
+}
+
+/// Stop audio playback: pause and rewind to the start.
+#[no_mangle]
+pub extern "C" fn lumit_bridge_audio_stop() -> *mut c_char {
+    guard(audio_stop_impl)
+}
+
+/// The audio playback clock, polled every tick: writes `(seconds, is_playing,
+/// loaded)` through the out-pointers and returns `true`. Allocation-free on
+/// the engine side. Returns `false` (outs zeroed) only when this build has no
+/// audio pipeline or a panic was caught — a device-less machine still answers
+/// `true` with `loaded` false, which keeps Dart on its wall clock.
+///
+/// # Safety
+/// `out_secs`, `out_playing` and `out_loaded` must each be null or a valid,
+/// writable pointer to an `f64`/`bool`/`bool` respectively.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_audio_clock(
+    out_secs: *mut f64,
+    out_playing: *mut bool,
+    out_loaded: *mut bool,
+) -> bool {
+    let write = |secs: f64, playing: bool, loaded: bool| {
+        if !out_secs.is_null() {
+            *out_secs = secs;
+        }
+        if !out_playing.is_null() {
+            *out_playing = playing;
+        }
+        if !out_loaded.is_null() {
+            *out_loaded = loaded;
+        }
+    };
+    match std::panic::catch_unwind(audio_clock_impl) {
+        Ok(Ok((secs, playing, loaded))) => {
+            write(secs, playing, loaded);
+            true
+        }
+        _ => {
+            write(0.0, false, false);
+            false
+        }
+    }
+}
+
+#[cfg(all(feature = "media", feature = "render"))]
+fn audio_prepare_impl(comp_id: &str) -> String {
+    crate::audio::audio_prepare(comp_id)
+}
+
+#[cfg(all(feature = "media", feature = "render"))]
+fn audio_play_impl(comp_id: &str, start_secs: f64) -> String {
+    crate::audio::audio_play(comp_id, start_secs)
+}
+
+#[cfg(all(feature = "media", feature = "render"))]
+fn audio_pause_impl() -> String {
+    crate::audio::audio_pause()
+}
+
+#[cfg(all(feature = "media", feature = "render"))]
+fn audio_seek_impl(secs: f64) -> String {
+    crate::audio::audio_seek(secs)
+}
+
+#[cfg(all(feature = "media", feature = "render"))]
+fn audio_stop_impl() -> String {
+    crate::audio::audio_stop()
+}
+
+#[cfg(all(feature = "media", feature = "render"))]
+fn audio_clock_impl() -> Result<(f64, bool, bool), ()> {
+    Ok(crate::audio::audio_clock())
+}
+
+#[cfg(not(all(feature = "media", feature = "render")))]
+fn audio_prepare_impl(_comp_id: &str) -> String {
+    err_json("audio prepare: this build has no audio pipeline (needs the media + render features)")
+}
+
+#[cfg(not(all(feature = "media", feature = "render")))]
+fn audio_play_impl(_comp_id: &str, _start_secs: f64) -> String {
+    err_json("audio play: this build has no audio pipeline (needs the media + render features)")
+}
+
+#[cfg(not(all(feature = "media", feature = "render")))]
+fn audio_pause_impl() -> String {
+    err_json("audio pause: this build has no audio pipeline (needs the media + render features)")
+}
+
+#[cfg(not(all(feature = "media", feature = "render")))]
+fn audio_seek_impl(_secs: f64) -> String {
+    err_json("audio seek: this build has no audio pipeline (needs the media + render features)")
+}
+
+#[cfg(not(all(feature = "media", feature = "render")))]
+fn audio_stop_impl() -> String {
+    err_json("audio stop: this build has no audio pipeline (needs the media + render features)")
+}
+
+#[cfg(not(all(feature = "media", feature = "render")))]
+fn audio_clock_impl() -> Result<(f64, bool, bool), ()> {
+    Err(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -2639,7 +2798,7 @@ mod tests {
         assert!(!ptr.is_null());
         let copied = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
         assert_eq!(parse(&copied)["ok"], json!(true));
-        assert_eq!(parse(&copied)["abi"], json!(9));
+        assert_eq!(parse(&copied)["abi"], json!(10));
         unsafe { lumit_bridge_free_string(ptr) };
 
         let snap_ptr = lumit_bridge_snapshot();
@@ -2845,6 +3004,62 @@ mod tests {
         };
         assert!(ptr.is_null());
         assert_eq!((w, h, len), (0, 0, 0));
+    }
+
+    /// The audio clock export honours the out-pointer contract: null pointers
+    /// are simply not written, valid ones receive the calm zero state on a
+    /// machine where nothing was ever loaded — never a crash. (This test never
+    /// touches an audio device: the engine is lazy and no mix is prepared.)
+    #[test]
+    fn audio_clock_round_trips_and_tolerates_null_outs() {
+        // All-null outs: still a clean return, no write, no panic.
+        let _ =
+            unsafe { lumit_bridge_audio_clock(ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) };
+        // Valid outs: written with a coherent reading.
+        let mut secs: f64 = -1.0;
+        let mut playing: bool = true;
+        let mut loaded: bool = true;
+        let answered = unsafe { lumit_bridge_audio_clock(&mut secs, &mut playing, &mut loaded) };
+        if answered {
+            // The media+render build: a real (possibly zero) clock reading.
+            assert!(secs >= 0.0);
+        } else {
+            // A featureless build: the zeroed no-audio state.
+            assert_eq!((secs, playing, loaded), (0.0, false, false));
+        }
+    }
+
+    /// The audio ops are calm on null/bad input in every build: an error reply
+    /// for a null id, never a crash; pause/seek/stop always answer.
+    #[test]
+    fn audio_ops_with_null_or_bad_ids_are_calm_errors() {
+        let ptr = unsafe { lumit_bridge_audio_prepare(ptr::null()) };
+        let reply = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
+        unsafe { lumit_bridge_free_string(ptr) };
+        assert_eq!(parse(&reply)["ok"], json!(false));
+
+        let ptr = unsafe { lumit_bridge_audio_play(ptr::null(), 0.0) };
+        let reply = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
+        unsafe { lumit_bridge_free_string(ptr) };
+        assert_eq!(parse(&reply)["ok"], json!(false));
+
+        let bad = std::ffi::CString::new("not-a-uuid").unwrap();
+        let ptr = unsafe { lumit_bridge_audio_play(bad.as_ptr(), 1.0) };
+        let reply = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
+        unsafe { lumit_bridge_free_string(ptr) };
+        assert_eq!(parse(&reply)["ok"], json!(false));
+
+        for ptr in [
+            lumit_bridge_audio_pause(),
+            lumit_bridge_audio_seek(2.0),
+            lumit_bridge_audio_stop(),
+        ] {
+            let reply = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
+            unsafe { lumit_bridge_free_string(ptr) };
+            // ok:true with the pipeline, a calm feature note without it —
+            // either way a well-formed reply, never a crash.
+            assert!(parse(&reply)["ok"].is_boolean());
+        }
     }
 
     #[test]

@@ -1477,6 +1477,18 @@ typedef _ThumbC = Pointer<Uint8> Function(
 typedef _ThumbDart = Pointer<Uint8> Function(
     Pointer<Char>, int, Pointer<Uint32>, Pointer<Uint32>, Pointer<Size>);
 
+// Bridge v0.10 (audio playback): play takes the comp id + start seconds, seek
+// a bare double; the per-tick clock poll writes through out-pointers and
+// returns whether this build has an audio pipeline at all.
+typedef _AudioPlayC = Pointer<Char> Function(Pointer<Char>, Double);
+typedef _AudioPlayDart = Pointer<Char> Function(Pointer<Char>, double);
+typedef _DoubleArgC = Pointer<Char> Function(Double);
+typedef _DoubleArgDart = Pointer<Char> Function(double);
+typedef _AudioClockC = Bool Function(
+    Pointer<Double>, Pointer<Bool>, Pointer<Bool>);
+typedef _AudioClockDart = bool Function(
+    Pointer<Double>, Pointer<Bool>, Pointer<Bool>);
+
 // Bridge v0.5 signatures.
 typedef _TextContentC = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
     Pointer<Char>, Double, Double, Double, Double, Double);
@@ -1836,6 +1848,65 @@ abstract class ScopeTraceBridge {
       int bg, int trace, int red, int green, int blue);
 }
 
+/// One reading of the engine's audio playback clock (ABI 10): where the sound
+/// card's clock sits, whether it is running, and whether a comp's mix is
+/// loaded at all. [none] is the no-audio state (an old library, no output
+/// device, a silent comp) — the Viewer then keeps its wall clock.
+class AudioClock {
+  /// Seconds of audio consumed since load/seek — the playback master clock.
+  final double seconds;
+
+  /// Whether the engine is currently consuming samples.
+  final bool playing;
+
+  /// Whether a comp's mix is loaded in the engine. False keeps the Viewer on
+  /// its wall-clock fallback.
+  final bool loaded;
+
+  const AudioClock(
+      {required this.seconds, required this.playing, required this.loaded});
+
+  static const none = AudioClock(seconds: 0, playing: false, loaded: false);
+}
+
+/// Comp audio playback (ABI 10, docs/09), kept as its own capability interface
+/// for the same reason as [CompRenderBridge]: a bridge either offers it or it
+/// does not, and the many `implements DocumentBridge` fakes need no change.
+/// The real [LumitBridge] implements it; [AppStateStub] probes with an
+/// `is AudioPlaybackBridge` check. The engine owns one audio engine for the
+/// session: the sound card's clock is the playback master and the Viewer's
+/// ticker chases [audioClock]. On a machine with no output device every call
+/// stays calm and [audioClock] reads unloaded — playback simply has no sound.
+abstract class AudioPlaybackBridge {
+  /// True when the loaded library exports the audio playback symbols (ABI
+  /// 10+). False for an older library — playback then stays on the wall clock.
+  bool get supportsAudioPlayback;
+
+  /// Build (or refresh) [compId]'s audio mix in the background — called after
+  /// an edit while audio is loaded or playing, so mute/solo/move/trim/Volume
+  /// edits are heard. Cheap when nothing changed (a signature no-op); a
+  /// changed mix is swapped in mid-playback with the clock kept.
+  void audioPrepare(String compId);
+
+  /// Start playing [compId]'s audio from [startSeconds]. An already-loaded mix
+  /// seeks and plays at once; otherwise it is prepared in the background and
+  /// starts from [startSeconds] when it lands.
+  void audioPlay(String compId, double startSeconds);
+
+  /// Pause playback (the clock holds its position).
+  void audioPause();
+
+  /// Move the audio clock to [seconds] (a scrub; play state untouched).
+  void audioSeek(double seconds);
+
+  /// Stop: pause and rewind to the start.
+  void audioStop();
+
+  /// The playback clock — polled once per Viewer tick; allocation-free on the
+  /// engine side. [AudioClock.none] when this build has no audio pipeline.
+  AudioClock audioClock();
+}
+
 /// The rendered-frame cache's live stats (ABI 8, `cacheStats`): the bytes
 /// [usedBytes] of the [budgetBytes] cap, the number of cached frames [entries],
 /// and the lifetime [hits]/[misses]. The default (no library / a parse failure)
@@ -2022,7 +2093,8 @@ class LumitBridge
         ThumbnailBridge,
         ScopeTraceBridge,
         EditOpsBridge,
-        PresetJsonBridge {
+        PresetJsonBridge,
+        AudioPlaybackBridge {
   final _NoArgDart _version;
   final _NoArgDart _newProject;
   final _StrArgDart _openProject;
@@ -2145,6 +2217,23 @@ class LumitBridge
   _NoArgDart? _cacheStats;
   _U64ArgDart? _renderCancelStale;
   _ThumbDart? _thumbnail;
+
+  /// The ABI-10 audio playback symbols, bound as a group (all or none): an
+  /// older `.dll` lacks them, so [supportsAudioPlayback] reports false and
+  /// playback stays on the wall clock.
+  _StrArgDart? _audioPrepare;
+  _AudioPlayDart? _audioPlay;
+  _NoArgDart? _audioPause;
+  _DoubleArgDart? _audioSeek;
+  _NoArgDart? _audioStop;
+  _AudioClockDart? _audioClock;
+
+  /// Out-pointers for the per-tick clock poll, allocated once so polling the
+  /// clock every Viewer tick allocates nothing. Session-lifetime (the library
+  /// itself is never unloaded), so they are deliberately never freed.
+  Pointer<Double>? _audioClockSecs;
+  Pointer<Bool>? _audioClockPlaying;
+  Pointer<Bool>? _audioClockLoaded;
 
   final _FreeDart _freeString;
   final _FreeBufferDart _freeBuffer;
@@ -2532,6 +2621,40 @@ class LumitBridge
     } catch (_) {
       _playbackTier = null;
       _resetRealtime = null;
+    }
+    // The ABI-10 audio playback symbols (docs/09): bound as a group so a
+    // partially-matching library reports the capability off rather than half
+    // working. The clock's out-pointers are allocated once here, so the
+    // per-tick poll allocates nothing.
+    try {
+      _audioPrepare = lib.lookupFunction<_StrArgC, _StrArgDart>(
+        'lumit_bridge_audio_prepare',
+      );
+      _audioPlay = lib.lookupFunction<_AudioPlayC, _AudioPlayDart>(
+        'lumit_bridge_audio_play',
+      );
+      _audioPause = lib.lookupFunction<_NoArgC, _NoArgDart>(
+        'lumit_bridge_audio_pause',
+      );
+      _audioSeek = lib.lookupFunction<_DoubleArgC, _DoubleArgDart>(
+        'lumit_bridge_audio_seek',
+      );
+      _audioStop = lib.lookupFunction<_NoArgC, _NoArgDart>(
+        'lumit_bridge_audio_stop',
+      );
+      _audioClock = lib.lookupFunction<_AudioClockC, _AudioClockDart>(
+        'lumit_bridge_audio_clock',
+      );
+      _audioClockSecs = malloc<Double>();
+      _audioClockPlaying = malloc<Bool>();
+      _audioClockLoaded = malloc<Bool>();
+    } catch (_) {
+      _audioPrepare = null;
+      _audioPlay = null;
+      _audioPause = null;
+      _audioSeek = null;
+      _audioStop = null;
+      _audioClock = null;
     }
   }
 
@@ -3442,6 +3565,77 @@ class LumitBridge
       malloc.free(outH);
       malloc.free(outLen);
     }
+  }
+
+  // --- Bridge v0.10: comp audio playback (docs/09) ------------------------
+
+  @override
+  bool get supportsAudioPlayback =>
+      _audioPrepare != null &&
+      _audioPlay != null &&
+      _audioPause != null &&
+      _audioSeek != null &&
+      _audioStop != null &&
+      _audioClock != null;
+
+  @override
+  void audioPrepare(String compId) {
+    final fn = _audioPrepare;
+    if (fn == null) return;
+    // The reply is a bare {"ok":true} (or a calm error already surfaced by
+    // the op that caused the edit); free it and move on.
+    _callStrArg(fn, compId);
+  }
+
+  @override
+  void audioPlay(String compId, double startSeconds) {
+    final fn = _audioPlay;
+    if (fn == null) return;
+    final id = compId.toNativeUtf8();
+    try {
+      _readReply(fn(id.cast(), startSeconds));
+    } finally {
+      malloc.free(id);
+    }
+  }
+
+  @override
+  void audioPause() {
+    final fn = _audioPause;
+    if (fn == null) return;
+    _callNoArg(fn);
+  }
+
+  @override
+  void audioSeek(double seconds) {
+    final fn = _audioSeek;
+    if (fn == null) return;
+    _readReply(fn(seconds));
+  }
+
+  @override
+  void audioStop() {
+    final fn = _audioStop;
+    if (fn == null) return;
+    _callNoArg(fn);
+  }
+
+  @override
+  AudioClock audioClock() {
+    final fn = _audioClock;
+    final secs = _audioClockSecs;
+    final playing = _audioClockPlaying;
+    final loaded = _audioClockLoaded;
+    if (fn == null || secs == null || playing == null || loaded == null) {
+      return AudioClock.none;
+    }
+    // The one per-tick call: no allocation on either side of the boundary.
+    if (!fn(secs, playing, loaded)) return AudioClock.none;
+    return AudioClock(
+      seconds: secs.value,
+      playing: playing.value,
+      loaded: loaded.value,
+    );
   }
 
   // --- Bridge v0.5 ops ---------------------------------------------------

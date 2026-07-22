@@ -54,6 +54,49 @@ int workAreaLoopFrame({
   return next;
 }
 
+/// The playhead frame the audio clock dictates, plus the frame to re-seek the
+/// audio to when the work-area loop wraps (docs/impl/playback-scheduler.md §4:
+/// the sound card's clock is the master; the picture chases it).
+///
+/// The frame is `clockSeconds × fps`, clamped into the loop span `[waStart,
+/// waEnd)` exactly as [workAreaLoopFrame] clamps the wall-clock path. When the
+/// clock runs past the loop's end (or the mix's own end pauses the engine
+/// there), [seekFrame] carries the loop start — the caller seeks the audio
+/// there and plays on, which is the audio-driven twin of the wall clock's
+/// modular wrap. Pure, so it unit-tests without a ticker or an engine.
+class AudioChase {
+  /// The frame the Viewer should show.
+  final int frame;
+
+  /// When set, seek the audio clock to this frame (and keep playing) — the
+  /// loop wrap.
+  final int? seekFrame;
+
+  const AudioChase(this.frame, [this.seekFrame]);
+}
+
+AudioChase audioChaseFrame({
+  required double clockSeconds,
+  required double fps,
+  required int frameCount,
+  List<int>? workArea,
+}) {
+  if (frameCount <= 0 || fps <= 0) return const AudioChase(0);
+  final waStart = (workArea != null ? workArea[0] : 0).clamp(0, frameCount - 1);
+  final waEnd =
+      (workArea != null ? workArea[1] : frameCount).clamp(waStart + 1, frameCount);
+  final frame = (clockSeconds * fps).floor();
+  if (frame >= waEnd) {
+    return AudioChase(waStart, waStart); // loop: rewind the clock, play on
+  }
+  if (frame < waStart) {
+    // The clock sits before the loop (a scrub outside the work area): snap
+    // both the picture and the sound to the loop start.
+    return AudioChase(waStart, waStart);
+  }
+  return AudioChase(frame);
+}
+
 class ViewerPanel extends StatefulWidget {
   final AppStateStub app;
   const ViewerPanel({super.key, required this.app});
@@ -99,16 +142,40 @@ class _ViewerPanelState extends State<ViewerPanel>
     }
   }
 
-  /// Advance the playhead at the comp's rational fps, accumulating elapsed time
-  /// into whole frames and looping at the composition's end (the egui transport
-  /// loops the work area; without a work area in the snapshot, it loops the
-  /// whole comp).
+  /// Advance the playhead at the comp's rational fps. With the front comp's
+  /// audio loaded, the sound card's clock is the master and the picture chases
+  /// it (one clock poll per tick, docs/impl/playback-scheduler.md §4); without
+  /// audio (a silent comp, no output device, an old library, the fakes) the
+  /// wall clock accumulates elapsed time into whole frames exactly as before.
+  /// Both paths loop the work area (the egui transport loops the work area;
+  /// without one in the snapshot, the whole comp).
   void _onTick(Duration elapsed) {
     final comp = app.frontComp;
     if (comp == null) return;
     final fps = comp.fps.fps;
     final frameCount = comp.frameCount;
     if (fps <= 0 || frameCount <= 0) return;
+
+    // Audio-master path: while a comp mix is loaded, the playhead is wherever
+    // the audio clock says (loop-wrapped), and the wall-clock accumulator is
+    // kept reset so a hand-over back (the mix unloading mid-play) resumes
+    // cleanly from the current frame.
+    final clock = app.pollAudioClock();
+    if (clock != null && clock.loaded && app.playing) {
+      final chase = audioChaseFrame(
+        clockSeconds: clock.seconds,
+        fps: fps,
+        frameCount: frameCount,
+        workArea: comp.workArea,
+      );
+      final seek = chase.seekFrame;
+      if (seek != null) app.audioPlayFrom(seek);
+      app.advancePlayback(chase.frame);
+      _lastTick = elapsed;
+      _frameAccum = 0;
+      app.pollPlaybackTier();
+      return;
+    }
 
     final dt = _lastTick == Duration.zero
         ? Duration.zero
