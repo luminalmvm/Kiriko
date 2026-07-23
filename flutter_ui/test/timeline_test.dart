@@ -77,12 +77,71 @@ const _twoCompJson = '''
   "can_undo": true, "can_redo": false, "path": null
 }''';
 
-/// A fake bridge that always answers with the two-comp document and records the
-/// ops it is asked to run.
+/// One comp with two footage layers, each pointing (`source_item_id`) at a
+/// probed footage item: "hero" is audio-only (no video stream — width/height
+/// 0, the bridge probe's own "no video" sentinel), "silent" is video-only (no
+/// audio stream). Exercises the outline's media-aware switch gating (an
+/// audio-only source hides the eye; a video-only source hides the speaker).
+const _mediaGatedJson = '''
+{
+  "ok": true,
+  "items": [
+    {
+      "id": "c0", "name": "Scene", "kind": "composition", "children": [],
+      "comp": {
+        "width": 1920, "height": 1080,
+        "fps": {"num": 60, "den": 1}, "frame_count": 300,
+        "layers": [
+          {
+            "id": "l0", "index": 0, "name": "hero", "kind": "footage",
+            "source_item_id": "f-audio",
+            "in_frame": 0, "out_frame": 240, "label": 0,
+            "switches": {"visible": true, "audible": true, "locked": false,
+              "three_d": false, "collapse": false, "fx": true,
+              "solo": false, "motion_blur": false}
+          },
+          {
+            "id": "l1", "index": 1, "name": "silent", "kind": "footage",
+            "source_item_id": "f-video",
+            "in_frame": 0, "out_frame": 240, "label": 0,
+            "switches": {"visible": true, "audible": true, "locked": false,
+              "three_d": false, "collapse": false, "fx": true,
+              "solo": false, "motion_blur": false}
+          }
+        ],
+        "markers": []
+      }
+    },
+    {
+      "id": "f-audio", "name": "audio.wav", "kind": "footage", "children": [],
+      "status": "ok",
+      "media": {
+        "duration_frames": 0, "fps": {"num": 0, "den": 1},
+        "width": 0, "height": 0, "audio": true
+      }
+    },
+    {
+      "id": "f-video", "name": "silent.mp4", "kind": "footage", "children": [],
+      "status": "ok",
+      "media": {
+        "duration_frames": 150, "fps": {"num": 30, "den": 1},
+        "width": 640, "height": 360, "audio": false
+      }
+    }
+  ],
+  "can_undo": true, "can_redo": false, "path": null
+}''';
+
+/// A fake bridge that always answers with the two-comp document (or [json],
+/// when a test needs a different fixture) and records the ops it is asked to
+/// run.
 class _TimelineFake implements DocumentBridge {
+  _TimelineFake({String? json}) : json = json ?? _twoCompJson;
+
+  final String json;
   final List<String> ops = [];
 
-  BridgeReply _snap() => BridgeReply.parse(_twoCompJson);
+  BridgeReply _snap() => BridgeReply.parse(json);
 
   BridgeReply _op(String record) {
     ops.add(record);
@@ -471,6 +530,19 @@ void main() {
       final c = chooseColumns(260, canAudio: false, isPrecomp: false);
       expect(c.speaker, isFalse);
     });
+
+    test('an audio-only source (canVideo false) never reserves an eye', () {
+      final c =
+          chooseColumns(260, canAudio: true, isPrecomp: false, canVideo: false);
+      expect(c.eye, isFalse);
+      expect(c.speaker, isTrue, reason: 'the speaker is unaffected');
+    });
+
+    test('canVideo defaults true, so unprobed/non-footage layers keep the eye',
+        () {
+      final c = chooseColumns(260, canAudio: true, isPrecomp: false);
+      expect(c.eye, isTrue);
+    });
   });
 
   group('snapFrame', () {
@@ -535,6 +607,26 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('sw:l0:visible')));
       await tester.pump();
       expect(fake.ops, contains('switch:c0/l0/visible=false'));
+    });
+
+    testWidgets(
+        'an audio-only footage layer hides the eye but keeps the speaker',
+        (tester) async {
+      final app =
+          AppStateStub(bridge: _TimelineFake(json: _mediaGatedJson));
+      await tester.pumpWidget(_host(app));
+      expect(find.byKey(const ValueKey('sw:l0:visible')), findsNothing);
+      expect(find.byKey(const ValueKey('sw:l0:audible')), findsOneWidget);
+    });
+
+    testWidgets(
+        'a video-only footage layer hides the speaker but keeps the eye',
+        (tester) async {
+      final app =
+          AppStateStub(bridge: _TimelineFake(json: _mediaGatedJson));
+      await tester.pumpWidget(_host(app));
+      expect(find.byKey(const ValueKey('sw:l1:visible')), findsOneWidget);
+      expect(find.byKey(const ValueKey('sw:l1:audible')), findsNothing);
     });
 
     testWidgets('tapping a bar selects the layer', (tester) async {

@@ -274,8 +274,11 @@ pub(crate) fn convert_to_sequenced(bridge: &mut Bridge, comp_id: &str, layer_id:
     let span_s = (layer.out_point.0.to_f64() - layer.in_point.0.to_f64()).max(0.04);
     #[cfg(feature = "media")]
     let dur_s = match bridge.media.get(item) {
-        Some(crate::media::MediaStatus::Ok(info)) if info.fps_num > 0 => {
-            info.duration_frames as f64 * f64::from(info.fps_den) / f64::from(info.fps_num)
+        // `duration_seconds` is the container's real duration, valid for both
+        // video and audio-only media (unlike `duration_frames`, a video-only
+        // frame count that is 0 for audi only files).
+        Some(crate::media::MediaStatus::Ok(info)) if info.duration_seconds > 0.0 => {
+            info.duration_seconds
         }
         _ => span_s,
     };

@@ -43,6 +43,10 @@ pub(crate) enum MediaStatus {
 pub(crate) struct MediaInfo {
     /// Decodable frame count (from the frame index; 0 for audio-only).
     pub duration_frames: u64,
+    /// Container-declared duration in seconds — valid for both video and
+    /// audio-only media, unlike `duration_frames` (always 0 without a video
+    /// track).
+    pub duration_seconds: f64,
     /// Container-declared rate, exact rational (0/1 when there is no video).
     pub fps_num: i32,
     pub fps_den: i32,
@@ -138,6 +142,7 @@ pub(crate) fn probe_path(path: &std::path::Path) -> MediaStatus {
     };
     MediaStatus::Ok(MediaInfo {
         duration_frames: video_frame_count(path, &probe),
+        duration_seconds: probe.duration_seconds,
         fps_num,
         fps_den,
         width,
@@ -289,6 +294,7 @@ mod tests {
             b,
             MediaStatus::Ok(MediaInfo {
                 duration_frames: 120,
+                duration_seconds: 2.0,
                 fps_num: 60,
                 fps_den: 1,
                 width: 320,

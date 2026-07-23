@@ -2124,6 +2124,18 @@ class AppStateStub extends ChangeNotifier {
     return media.durationFrames / fps;
   }
 
+  /// A footage [layer]'s probed source media, or null when the source is
+  /// unprobed or the layer is not footage. The outline row reads this to hide
+  /// the eye for an audio-only source and the speaker for a video-only one
+  /// (a video-only file has no audio stream to mute/solo; an audio-only file
+  /// has no picture to show/hide).
+  BridgeMedia? sourceMediaFor(BridgeLayer layer) {
+    final id = layer.sourceItemId;
+    final snap = snapshot;
+    if (id == null || snap == null) return null;
+    return _findItem(snap, id)?.media;
+  }
+
   /// Find a layer by its id across every composition in [snap], or null.
   BridgeLayer? _findLayer(BridgeSnapshot snap, String layerId) {
     BridgeLayer? search(List<BridgeItem> items) {

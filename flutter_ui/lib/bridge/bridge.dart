@@ -1118,6 +1118,11 @@ class BridgeMedia {
         height: _asInt(m['height']),
         audio: m['audio'] == true,
       );
+
+  /// Whether the container has a video stream — mirrors the bridge probe's own
+  /// `(0, 1, 0, 0)` sentinel for "no video" (`media.rs::probe_path`), so an
+  /// audio-only file reads false here.
+  bool get hasVideo => width > 0 && height > 0;
 }
 
 /// A decoded footage frame: tightly-packed straight (non-premultiplied) RGBA8,

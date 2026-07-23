@@ -320,15 +320,12 @@ pub(crate) fn add_footage_layer(bridge: &mut Bridge, comp_id: &str, item_id: &st
     let (out, nat_w, nat_h) = match bridge.media.get(&item) {
         Some(MediaStatus::Ok(info)) => {
             // Media duration in seconds → comp frames, exactly as the egui path
-            // converts `probe.duration_seconds * comp fps`. The bridge stores the
-            // decodable frame count at the media's own rate, so seconds is
-            // `frames * fps_den / fps_num` (0 when there is no video track).
-            let media_secs = if info.fps_num > 0 {
-                info.duration_frames as f64 * f64::from(info.fps_den) / f64::from(info.fps_num)
-            } else {
-                0.0
-            };
-            let frames = (media_secs * c.frame_rate.fps()).round() as i64;
+            // converts `probe.duration_seconds * comp fps`. `duration_seconds` is
+            // the container's real duration (video or audio-only alike) — do not
+            // reconstruct it from `duration_frames * fps_den / fps_num`, which is
+            // always zero for audio-only media (no video frame count/rate) and
+            // silently clamped the imported clip to one frame.
+            let frames = (info.duration_seconds * c.frame_rate.fps()).round() as i64;
             let out = c
                 .frame_rate
                 .time_of_frame(frames.max(1))

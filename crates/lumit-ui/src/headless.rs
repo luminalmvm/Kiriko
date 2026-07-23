@@ -50,6 +50,11 @@ struct Parts {
 enum Probe {
     /// Decodable video: its exact rate and frame count (the `frame_pick` inputs).
     Ok { fps: f64, frames: usize },
+    /// A readable file with no video stream (audio-only). Not an error, so it
+    /// must never draw the missing-footage slate — the layer simply
+    /// contributes no picture, exactly as `item_infos` (export) and
+    /// `collect_comp_jobs` (the live preview) already treat it.
+    NoVideo,
     /// Not on disk, or present-but-unreadable: render the colour-bars slate,
     /// exactly as export's `item_infos` carries a `Missing` item (docs/07 §3.3).
     Slate,
@@ -479,6 +484,11 @@ impl HeadlessRenderer {
                         },
                     );
                 }
+                // Audio-only media has no picture to composite: leave it out of
+                // the map entirely, exactly as export's `item_infos` does, so
+                // `footage_rgba` answers `Ok(None)` for it and the layer draws
+                // nothing rather than the missing-footage slate.
+                Probe::NoVideo => {}
             }
         }
     }
@@ -737,9 +747,12 @@ fn footage_path(f: &FootageItem) -> PathBuf {
 }
 
 /// Probe one footage path into a [`Probe`]. A path that is not a file, an
-/// unreadable file, a file with no video stream, or one whose frame index will
-/// not build all fall to [`Probe::Slate`] — none of them is an error, they are
-/// the states the slate exists for. A clean video caches its exact rate and
+/// unreadable file, or one whose frame index will not build falls to
+/// [`Probe::Slate`] — none of them is an error, they are the states the slate
+/// exists for. A readable file with no video stream (audio-only) is
+/// [`Probe::NoVideo`] instead: also not an error, but the opposite treatment —
+/// no slate, no picture at all, since flagging a valid audio-only source as
+/// "missing" would be actively wrong. A clean video caches its exact rate and
 /// frame count, warming the on-disk frame index so the decoder open reuses it.
 fn probe_item(path: &Path) -> Probe {
     if !path.is_file() {
@@ -749,7 +762,7 @@ fn probe_item(path: &Path) -> Probe {
         return Probe::Slate;
     };
     let Some(video) = probe.video.as_ref() else {
-        return Probe::Slate;
+        return Probe::NoVideo;
     };
     let Some(index) = load_or_build_index(path) else {
         return Probe::Slate;
@@ -900,6 +913,71 @@ mod tests {
         assert_eq!(rgba.len(), (w * h * 4) as usize);
         let idx = (((h / 2) * w + w / 2) * 4) as usize;
         assert!(rgba[idx + 1] > 200, "green solid stays green after resize");
+    }
+
+    /// Audio-only media (a readable file with no video stream) must not draw
+    /// the missing-footage slate: it is a valid source, not a broken one. Bugs
+    /// here previously conflated the two (`Probe::Slate`), which painted the
+    /// colour bars over a perfectly good audio-only layer in the Flutter
+    /// Viewer. Bypasses real FFmpeg probing by seeding `probe_cache` directly
+    /// with the outcome `probe_item` would give each file, so the test needs
+    /// no media fixture. A genuinely missing file is asserted to still slate,
+    /// so a regression collapsing `NoVideo` back onto `Slate` fails this test.
+    #[test]
+    fn audio_only_media_is_omitted_not_slated() {
+        let mut r = match HeadlessRenderer::new() {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!("skipping: no GPU adapter");
+                return;
+            }
+        };
+        let (store, _comp_id) = doc_with_solid(LinearColour([1.0, 1.0, 1.0, 1.0]), 4, 4);
+        let mut doc = (*store.snapshot()).clone();
+
+        let audio_id = Uuid::now_v7();
+        doc.items
+            .push(ProjectItem::Footage(lumit_core::model::FootageItem {
+                id: audio_id,
+                name: "audio.wav".into(),
+                media: lumit_core::model::MediaRef {
+                    relative_path: "audio.wav".into(),
+                    absolute_path: "audio.wav".into(),
+                    fingerprint: None,
+                    extra: serde_json::Map::new(),
+                },
+                extra: serde_json::Map::new(),
+            }));
+        r.probe_cache.insert(audio_id, Probe::NoVideo);
+        r.sync_items(&doc, (64, 64));
+        assert!(
+            !r.items.contains_key(&audio_id),
+            "audio-only media must contribute no picture, not a missing slate"
+        );
+
+        // Contrast: a genuinely missing/unreadable file DOES slate.
+        let missing_id = Uuid::now_v7();
+        doc.items
+            .push(ProjectItem::Footage(lumit_core::model::FootageItem {
+                id: missing_id,
+                name: "gone.mp4".into(),
+                media: lumit_core::model::MediaRef {
+                    relative_path: "gone.mp4".into(),
+                    absolute_path: "gone.mp4".into(),
+                    fingerprint: None,
+                    extra: serde_json::Map::new(),
+                },
+                extra: serde_json::Map::new(),
+            }));
+        r.probe_cache.insert(missing_id, Probe::Slate);
+        r.sync_items(&doc, (64, 64));
+        assert_eq!(
+            r.items.get(&missing_id).map(|i| i.missing),
+            Some(Some((64, 64))),
+            "a missing/unreadable file still slates at the comp's size"
+        );
+        // The audio-only item stays omitted across the second sync_items call.
+        assert!(!r.items.contains_key(&audio_id));
     }
 
     /// The zero-copy path (K-177) renders a real comp into a shared GPU texture

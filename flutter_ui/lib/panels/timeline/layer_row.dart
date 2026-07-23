@@ -374,9 +374,17 @@ class _OutlineCell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = ThemeScope.of(context).theme;
-    final canAudio = layerCanCarryAudio(layer.kind);
     final isPrecomp = layer.kind == BridgeLayerKind.precomp;
-    final cols = chooseColumns(width, canAudio: canAudio, isPrecomp: isPrecomp);
+    // A probed footage source gates the switches to what it can actually do:
+    // no audio stream → no speaker (video-only file, nothing to mute/solo);
+    // no video stream → no eye (audio-only file, nothing to show/hide).
+    // Unprobed sources and non-footage kinds (sequence/precomp have no single
+    // source to probe here) are unaffected — both stay available as before.
+    final media = app.sourceMediaFor(layer);
+    final canAudio = layerCanCarryAudio(layer.kind) && (media == null || media.audio);
+    final canVideo = media == null || media.hasVideo;
+    final cols = chooseColumns(width,
+        canAudio: canAudio, isPrecomp: isPrecomp, canVideo: canVideo);
     final sw = layer.switches;
     final dimmed = !sw.visible;
     final nameColour = dimmed ? t.textMuted : t.textSecondary;
