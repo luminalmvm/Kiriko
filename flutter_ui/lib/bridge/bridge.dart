@@ -2692,13 +2692,15 @@ class LumitBridge
   /// bare name so the OS loader's own search path gets a turn.
   static List<String> _candidatePaths() {
     // The shared library's platform base name: `lumit_bridge.dll` on Windows
-    // (cdylib), `liblumit_bridge.so` on Linux (the `lib` prefix Cargo gives a
-    // cdylib on Unix). macOS would be `liblumit_bridge.dylib` — added when that
-    // pass happens. The search ORDER below is identical on every platform, so
-    // Windows behaviour is byte-for-byte what it was.
+    // (cdylib), `liblumit_bridge.so` on Linux, `liblumit_bridge.dylib` on macOS
+    // (the `lib` prefix Cargo gives a cdylib on both Unix targets). The search
+    // ORDER below is identical on every platform, so Windows behaviour is
+    // byte-for-byte what it was.
     final name = Platform.isWindows
         ? 'lumit_bridge.dll'
-        : 'liblumit_bridge.so';
+        : Platform.isMacOS
+            ? 'liblumit_bridge.dylib'
+            : 'liblumit_bridge.so';
     final paths = <String>[];
     try {
       final exeDir = File(Platform.resolvedExecutable).parent.path;

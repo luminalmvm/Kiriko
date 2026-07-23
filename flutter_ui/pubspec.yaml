@@ -24,6 +24,11 @@ dev_dependencies:
   flutter_lints: ^6.0.0
 
 flutter:
+  # desktop_multi_window ships a Podspec, not a Package.swift, so macOS plugin
+  # resolution must go through CocoaPods rather than Swift Package Manager
+  # (Flutter's macOS default since 3.24) — SPM would refuse the plugin.
+  config:
+    enable-swift-package-manager: false
   uses-material-design: false
   fonts:
     - family: Inter

@@ -2455,6 +2455,31 @@ Windows path was proven):
    the Mesa/driver version, and whether the indicator read GPU or CPU — that is
    enough to tell a format mismatch from an extension-support gap.
 
+**Running it on macOS.** The Flutter frontend now has a `macos/` platform
+folder too, scaffolded with `flutter create --platforms=macos .` (K-033 names
+Metal/macOS a supported future target; this is the first concrete step
+towards it, not the full pass — see below for what is still deferred). You
+need Xcode installed (the full app, not just the Command Line Tools — `flutter
+doctor` will say so plainly if only the tools are present) and CocoaPods
+(`brew install cocoapods`). Build the bridge library the same way as the other
+two platforms: `cargo build -p lumit-bridge`, which drops
+`liblumit_bridge.dylib` in `target/debug/` (Cargo's Unix cdylib naming, same as
+Linux's `.so` but with the macOS suffix). Then, from `flutter_ui/`: `flutter
+run -d macos` to launch, `flutter test` for the tests, `flutter analyze` for
+the lint pass. The generated Xcode project's App Sandbox is switched off and
+library validation disabled in both entitlements files — a sandboxed,
+hardened-runtime process cannot `dlopen` an unsigned, locally-built dylib from
+an arbitrary Cargo target path, which is exactly what the bridge loader does
+(matching the unsigned, unsandboxed posture Windows and Linux dev builds
+already have; a signed macOS release is a later decision). Two things are
+deliberately out of scope for this pass, both degrading cleanly: the Viewer's
+zero-copy shared-texture path is Windows/Linux only (`shared-texture` /
+`shared-texture-linux`) — macOS always uses the portable CPU frame path, so the
+picture still draws, just via the read-back route every platform can fall back
+to; and the native macOS menu bar (`native_menu.rs`, muda) stays deferred with
+the rest of the "macOS pass" named in `docs/flutter-port/01-STRATEGY.md` — the
+in-window menu bar renders instead, same as it does today.
+
 **What the bridge carries now (v0.2).** The first bridge only described the
 project as a tree of item names. It now also carries the *inside* of things, so
 the Viewer, Timeline and property editors have something to draw. Ask for the

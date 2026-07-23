@@ -1261,10 +1261,14 @@ void main() {
 
   group('Loader candidate library paths (platform portability)', () {
     // The base name the loader searches for is the OS's cdylib name:
-    // `lumit_bridge.dll` on Windows, `liblumit_bridge.so` elsewhere. This runs
-    // green on the Windows host gate AND the Linux CI gate, asserting each side.
-    final expectedName =
-        Platform.isWindows ? 'lumit_bridge.dll' : 'liblumit_bridge.so';
+    // `lumit_bridge.dll` on Windows, `liblumit_bridge.dylib` on macOS,
+    // `liblumit_bridge.so` elsewhere. This runs green on the Windows host gate
+    // AND the Linux CI gate, asserting each side.
+    final expectedName = Platform.isWindows
+        ? 'lumit_bridge.dll'
+        : Platform.isMacOS
+            ? 'liblumit_bridge.dylib'
+            : 'liblumit_bridge.so';
 
     test('every candidate ends in the platform library name', () {
       final paths = LumitBridge.candidateLibraryPaths();
