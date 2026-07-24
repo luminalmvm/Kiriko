@@ -23,13 +23,14 @@ Names are display strings only; renaming MUST never break a reference.
 Authoritative time is never floating point (see [14-ENGINEERING-RULES.md](14-ENGINEERING-RULES.md)).
 
 ```rust
-struct RationalTime { num: i64, den: u32 }   // seconds = num / den
+struct RationalTime { num: i64, den: i64 }   // seconds = num / den 
 struct FrameRate    { num: u32, den: u32 }   // e.g. 60000/1001
 ```
 
-The four timebases (source, clip, layer, comp — [01-GLOSSARY.md](01-GLOSSARY.md) §4) are
-distinct newtypes over `RationalTime`. Conversions between them are explicit functions, and
-the Retime map ([04-RETIMING.md](04-RETIMING.md)) is the only nontrivial conversion.
+The four timebases - `SourceTime`, `ClipTime`, `LayerTime`, `CompTime`
+([01-GLOSSARY.md](01-GLOSSARY.md) §4) - are distinct newtypes over `Rational`. Conversions
+between them are explicit functions, and the Retime map ([04-RETIMING.md](04-RETIMING.md)) is
+the only nontrivial conversion.
 
 ### 1.3 Non-destructive rule
 

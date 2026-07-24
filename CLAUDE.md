@@ -1,34 +1,46 @@
-# Lumit — instructions for AI-assisted work in this repo
-
-Lumit is a native, Windows-first motion-graphics and compositing editor (Rust + wgpu +
-egui, GPLv3), specified docs-first. **The documents in `docs/` are canonical**: when code
-and docs disagree, the docs win; when a doc must change, change it in the same commit and —
-if it reverses a numbered decision — append to `docs/02-DECISIONS.md` (never edit history).
+Lumit is a native, Windows-first motion-graphics and compositing editor: a Rust + wgpu
+engine with a Flutter frontend (decision K-174), GPLv3, specified docs-first. **The
+documents in `docs/` are canonical**: when code and docs disagree, the docs win; when a doc
+must change, change it in the same commit and - if it reverses a numbered decision - append
+to `docs/02-DECISIONS.md` (never edit history). Start at `docs/README.md` for the index.
 
 ## Before doing anything
 
-1. Read `docs/01-GLOSSARY.md`. Its terms are binding in code identifiers, UI strings,
-   comments, commits, and conversation. The banned-terms table (§9) is enforced — in
-   particular: *layer* not *track*, *speed* not *velocity*, *Retime* not *time remap*,
-   *export* not *render* (for user-facing output), *clip* only inside Sequence layers.
-2. Read `docs/02-DECISIONS.md`. DECIDED entries are locked; PROPOSED entries are strong
-   defaults — do not silently contradict either.
-3. For any code: `docs/14-ENGINEERING-RULES.md` is the binding rulebook (typed rational
-   time, no panics in engine crates, no locks across await/GPU/FFI, budgeted allocations,
-   cancellation everywhere, determinism). `docs/13-PERFORMANCE-RULES.md` budgets gate merges.
+1. Read `docs/01-GLOSSARY.md` (short). Its terms are binding in code identifiers, UI strings,
+comments, commits, and conversation. The banned-terms table (§9) is enforced - in
+particular: *layer* not *track*, *speed* not *velocity*, *Retime* not *time remap*,
+*export* not *render* (for user-facing output), *clip* only inside Sequence layers.
+2. **Consult** `docs/02-DECISIONS.md` - do **not** read it end to end. It is a long,
+append-only log; reading all of it wastes context and invites hallucination. Instead,
+search it for the entries that touch your task (by topic keyword, or by the `K-###
+numbers the relevant spec cites). DECIDED entries are locked; PROPOSED entries are strong
+defaults; where two entries conflict, the later one that says it supersedes the earlier
+wins. Don't silently contradict a decision, and when a change reverses one, append a new
+superseding entry (never edit history).
+3. For any code: `docs/14-ENGINEERING-RULES.md is the binding rulebook (typed rational
+time, no panics in engine crates, no locks across await/GPU/FFI, budgeted allocations,
+cancellation everywhere, determinism). docs/13-PERFORMANCE-RULES.md budgets gate merges.
 
 ## Repo shape
 
-- `docs/` — the specification set (00–16, see README index) plus `docs/research/` (the web
-  research that informed them; background, not canonical).
-- `docs/impl/` — **read the matching note before implementing anything it covers** (rational
-  time, keyframe/Retime cubic solving, wgpu foundation, media I/O and hardware decode,
-  playback scheduler, optical flow, OFX hosting, beat detection, expressions). They pin the
-  algorithms, formulas, traps, and test plans so those choices are not re-derived; specs
-  say *what*, these notes are the authoritative *how* for their topics. Implement each
-  note's test plan alongside the feature.
-- Application code will be a Cargo workspace per `docs/05-ARCHITECTURE.md` (engine crates
-  never depend on the UI crate).
+- `docs/README.md` - the documentation index; read it first. It explains the three kinds
+of doc (durable spec / living state / frozen history) and which file covers what.
+`docs/ - the specification set (00-17). docs/17-BRIDGE-CONTRACT.md` is the single
+source of truth for the Flutter/Rust front/back boundary; read it before touching that
+seam. `docs/research/` is the background research (not canonical).
+`docs/TODO.md` - the living work backlog (Now / Next / Later). Delete an item when it
+lands; its regression test is the record.
+`docs/impl/` - **read the matching note before implementing anything it covers** (rational
+time, keyframe/Retime cubic solving, wgpu foundation, media I/O and hardware decode,
+playback scheduler, optical flow, OFX hosting, beat detection, expressions). They pin the
+algorithms, formulas, traps, and test plans so those choices are not re-derived; specs
+say *what*, these notes are the authoritative *how* for their topics. Implement each
+note's test plan alongside the feature.
+`docs/archive/` - frozen, dated material (audits, superseded ledgers, the egui-to-Flutter
+port notes). Read-only history; never update it.
+The engine is a Cargo workspace under `crates/` per `docs/05-ARCHITECTURE.md` (engine
+crates never depend on the UI or the bridge). The Flutter frontend is under `flutter_ui/`
+and talks to the engine through `crates/lumit-bridge` (`docs/17-BRIDGE-CONTRACT.md`).
 
 ## Design
 

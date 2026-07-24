@@ -1,8 +1,12 @@
 # After Effects import
 
-**Status: canonical.** This document specifies how After Effects projects come into Lumit.
-It implements K-060 (import strategy), and leans on K-025 (AE-compatible keyframe maths) and
-K-021 (Retime) in [02-DECISIONS.md](02-DECISIONS.md). Terminology follows
+**Status: specification only - not yet implemented (roadmap Phase 4).** None of the AE import
+described here exists in code today: there is no Bridge panel, no `.aep` parser, no Lottie
+importer, and no fidelity report. Only the *foundations* an importer would target exist -
+AE-compatible keyframe maths, Time-Remap->Retime conversion, and Placeholder-effect
+round-tripping. This document is the design to build against when Phase 4 begins; the concrete
+build is tracked in [TODO.md](TODO.md). It implements K-060 (import strategy), and leans on
+K-025 (AE-compatible keyframe maths) and K-021 (Retime) in [02-DECISIONS.md](02-DECISIONS.md). Terminology follows
 [01-GLOSSARY.md](01-GLOSSARY.md) exactly; After Effects' own feature names appear in quotes
 when describing AE itself. RFC-2119 keywords (MUST, SHOULD, MAY) are binding.
 

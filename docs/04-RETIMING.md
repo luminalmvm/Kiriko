@@ -11,6 +11,16 @@ redefined, here.
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted as described
 in RFC 2119.
 
+**Implementation status (2026-07-24).** The Retime **engine** (`lumit-core :: retime`) is fully
+built and tested - the segment model, both graph lenses' maths, the beat-sync covenant,
+razor/split, overrun detection, reverse gating, and Rate<->Map conversion. The Flutter graph
+editor exposes all three lenses. What is **not yet wired** is a set of UI affordances and
+keyboard commands: freeze-at-playhead, the Hold preset button, RATE/MAP type chips, kink
+badges, the graph overrun band, compensating Alt-drag, copy/paste of a retime, outward-trim
+extending the map, and the retime keyboard shortcuts in §12. Precomp layers do not carry a
+Retime (only Footage does). These gaps are tracked in [TODO.md](TODO.md); §12's command list
+is the intended surface, not the current one.
+
 ---
 
 ## 1. Purpose and design principles

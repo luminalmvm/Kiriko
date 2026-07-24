@@ -12,10 +12,8 @@ RFC-2119 keywords (MUST, SHOULD, MAY) are used with their usual force.
 
 ## 1. Relationship to the household system
 
-Lumit is a household app. It inherits the Aizome design language wholesale, with two recorded
-deviations (§1.2). Anyone who has used Michi, Mishka Hub, or Sukumo should recognise Lumit as
-a sibling within seconds — the same accent, the same type, the same restraint — even though it
-is a dense professional tool rather than a web app.
+Lumit inherits the Aizome design language wholesale, with two recorded deviations (§1.2) - even
+though it is a dense professional tool rather than a web app.
 
 ### 1.1 Inherited unchanged
 
@@ -27,7 +25,9 @@ is a dense professional tool rather than a web app.
   Source Serif 4 for rare accent lines (about box, empty states); Inter for body and panel
   copy; **JetBrains Mono for all numbers** — timecode, frame numbers, speed percentages,
   property values, layer indices, labels, attribution. No exceptions to the mono-for-numbers
-  rule anywhere in the UI.
+  rule anywhere in the UI. *(Embedding status: only Inter is wired today; Schibsted Grotesk,
+  Source Serif 4 and JetBrains Mono are not yet bundled, and the 13/14/20 px type-scale steps
+  are not in the theme struct - [TODO.md](TODO.md).)*
 - **Radii**: 4px (dense elements — clips, keyframe flags, thumbnails), 8px (buttons, inputs,
   chips), 16px (floating cards, dialogs), full (pills, playhead grab handle). No other radii.
 - **Hairline elevation.** Panels and cards are flat fills separated by 1px hairline borders.
@@ -63,11 +63,11 @@ is a dense professional tool rather than a web app.
 ### 1.3 What does not apply
 
 Lumit is a native desktop application, so the household web skeleton (React/Vite/Tailwind,
-`sync-theme.sh`, FastAPI monorepo, Mishka Hub auth proxy, mobile bottom tab bar, PWA icon
-rules) does not apply. The Aizome *values* still derive from the canonical `theme.css`; when
-that file is repainted, Lumit's theme struct SHOULD be re-derived in the same change wave.
-Person-identity colours (person 1 = `clay`, person 2 = `sky`) have no meaning in a single-user
-pro tool, but `sky` remains reserved fleet-wide and MUST NOT be repurposed as a second accent.
+`sync-theme. sh`, FastAPI monorepo, mobile bottom tab bar, PWA icon rules) does not apply.
+The Aizome *values* still derive from the canonical `theme.css`; when that file is repainted,
+Lumit's theme struct SHOULD be re-derived in the same change wave. Person-identity colours
+(person 1 = `clay`, person 2 = `sky`) have no meaning in a single-user pro tool, but `sky`
+remains reserved fleet-wide and MUST NOT be repurposed as a second accent.
 
 ## 2. The dark ramp
 

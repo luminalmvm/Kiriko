@@ -71,7 +71,7 @@ tempfile = "3"
 
 # The bridge is the one crate that cannot inherit the workspace's
 # `unsafe_code = "deny"`: a C ABI over raw pointers is unsafe by construction
-# (docs/flutter-port/03-ARCHITECTURE.md "Bridge v0"). The clippy denies from the
+# (docs/archive/flutter-port/03-ARCHITECTURE.md "Bridge v0"). The clippy denies from the
 # workspace are kept, so no-panic/no-unwrap discipline still holds here.
 [lints.clippy]
 unwrap_used = "deny"

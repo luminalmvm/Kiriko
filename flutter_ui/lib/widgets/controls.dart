@@ -1,4 +1,4 @@
-// House controls, owned rather than Material (docs/flutter-port/04): every
+// House controls, owned rather than Material (docs/archive/flutter-port/04): every
 // colour and metric reads the theme, idle widgets are borderless, hover and
 // press bring an edge back (the K-084 owner amendment).
 

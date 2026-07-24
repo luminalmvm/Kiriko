@@ -5,6 +5,8 @@ the project owner) or **PROPOSED** (a strong default chosen during the July 2026
 editing the entry and noting why). Reversing a DECIDED entry requires a new entry that
 supersedes it — never edit history.
 
+**How to use this log:** it is a long reference, not a start-of-task read. Don't read it end to end - search it for the entries relevant to your task (by topic keyword, or by the `k-###` numbers the relevant spec cites) and read those. Where two entries conflict, the later one that says it supersedes the earlier wins.
+
 Format: ID · status · decision · rationale · consequences.
 
 ---
@@ -2226,14 +2228,14 @@ and missing ones are named in a notice, the relink dialogue remaining future wor
 one-for-one before any redesign.** The owner wants to evaluate replacing the egui frontend
 with Flutter (text rendering, motion, platform polish, widget ecosystem). The experiment
 lives on `flutter-frontend-alternative`: a Dart application in `flutter_ui/` over the
-unchanged Rust engine crates, specified by `docs/flutter-port/` (strategy, full UI
+unchanged Rust engine crates, specified by `docs/archive/flutter-port/` (strategy, full UI
 inventory, bridge architecture, widget map, living parity checklist). Ground rules: the
 first pass reproduces the shipped egui behaviour exactly — known rough edges are logged,
 not fixed — so there is a truthful baseline; the glossary, no-hex-outside-theme and
 tests-with-features rules bind the Dart tree as they bind Rust; engine crates never depend
 on either frontend; `main` keeps shipping the egui frontend until the Flutter one reaches
 parity and wins the side-by-side. The Viewer's frame path is the one piece of new systems
-work (wgpu → shared D3D11 texture → Flutter texture registrar, docs/flutter-port/03).
+work (wgpu → shared D3D11 texture → Flutter texture registrar, docs/archive/flutter-port/03).
 
 **K-175 · DECIDED · The bridge borrows lumit-ui's renderer through the headless seam until
 the pixel pass moves into an engine crate.** The composited comp frame the Flutter Viewer
@@ -2247,7 +2249,7 @@ feature that depends on `lumit-ui` and drives that seam through
 bridge (a leaf, not an engine crate) depends on the UI crate here and nowhere else. The
 docs/05 rule — *engine crates never depend on a frontend* — is unbroken; the bridge is not
 an engine crate. When the pixel pass is extracted into an engine crate (the shared-compositor
-work docs/flutter-port/03 anticipates), the bridge will depend on that crate instead and the
+work docs/archive/flutter-port/03 anticipates), the bridge will depend on that crate instead and the
 `lumit-ui` dependency is dropped. Recorded so the dependency edge is understood as scaffolding,
 not the destination.
 

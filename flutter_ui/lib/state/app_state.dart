@@ -3,7 +3,7 @@
 // here it is a small ChangeNotifier that answers the chrome's questions and
 // records the actions the chrome dispatches, so every menu item, shortcut and
 // panel control can be wired now and re-pointed at the bridge in Phase F1
-// (docs/flutter-port/03-ARCHITECTURE.md).
+// (docs/archive/flutter-port/03-ARCHITECTURE.md).
 
 import 'dart:async';
 import 'dart:collection';

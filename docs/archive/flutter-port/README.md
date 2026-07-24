@@ -1,3 +1,9 @@
+> **Archived, frozen record.** The egui-to-Flutter port is completel Flutter is
+> now the frontend. These notes are kept for history and are not maintained. The
+> durable parts were folded into [`../../17-BRIDGE-CONTRACT.md`](../../17-BRIDGE-CONTRACT.md)
+> and [`../../TODO.md`](../../TODO.md). Internal links below may point at original
+> locations.
+
 # The Flutter frontend alternative — documentation set
 
 This folder documents the experimental port of Lumit's frontend from egui to

@@ -1,4 +1,4 @@
-// The final integration sweep (docs/flutter-port/06): the cross-agent seams and
+// The final integration sweep (docs/archive/flutter-port/06): the cross-agent seams and
 // thin remainders closed together — Ctrl+C/V keyframe-clipboard routing, the
 // preview-scale downsample threading, the timeline cache bar, the layer context
 // menu (Rename in place, the categorised Add-effect submenu, Convert / Trim),

@@ -215,7 +215,7 @@ class _ShellBodyState extends State<_ShellBody> {
     super.dispose();
   }
 
-  /// The global shortcut set (docs/flutter-port/02 §5), with the "never
+  /// The global shortcut set (docs/archive/flutter-port/02 §5), with the "never
   /// steal typing" gate: if the focused node is an editable text, stand down.
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
@@ -368,7 +368,7 @@ class _ShellBodyState extends State<_ShellBody> {
                   // same process → shared engine document). Offered only for the
                   // read-mostly panels a second engine can host honestly; the
                   // Viewer and Timeline stay in-window (see popout_arguments.dart
-                  // and docs/flutter-port/05).
+                  // and docs/archive/flutter-port/05).
                   onPopOut: _onPopOut,
                   canPopOut: (panel) =>
                       canPopOutPanel(panel) && !_floating.contains(panel),

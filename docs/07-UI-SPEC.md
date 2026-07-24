@@ -8,6 +8,19 @@ exists and how it behaves*, never what it looks like.
 
 RFC-2119 keywords (MUST, SHOULD, MAY) are used with their standard meanings.
 
+**Implementation status (2026-07-24).** This is the **target** UI specification; the shipping
+Flutter frontend (`flutter_ui/`) implements a subset of it. Broadly built: the docking shell,
+workspaces, Project panel (relink/missing-footage), Timeline lanes + keyframes, the graph
+editor (all lenses), Scopes, Hierarchy, Settings (General/Appearance/Interface/Performance/
+Export), the command palette's Commands category, and a single-export dialogue. **Not yet
+built / regressions** include: the whole **Audio panel** (§10), most of the **Viewer bar**
+(§2.2 - magnification, channel view, guides, ROI, transparency grid, colour-management and
+degradation indicators), the four **workspace presets** (§1.6), the **first-run setup** screen
+(§13.1), the **transform gizmo / motion paths** (§2.3-§2.4, gated on comp rendering), and the
+**Keymap / Colour-management / Preview-mode / CUDA / Plugins** settings pages (§15). The
+concrete gaps and Flutter parity regressions are tracked in [TODO.md](TODO.md); read the
+sections below as the design, not a claim of current state.
+
 The base arrangement is deliberately After Effects-shaped, because the target audience arrives
 from AE: Viewer in the centre, Project panel on the left, Effect Controls / Effects & Presets /
 Scopes on the right, Timeline across the bottom. Everything beyond that shape is movable —

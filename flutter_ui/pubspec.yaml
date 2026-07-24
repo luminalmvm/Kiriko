@@ -1,5 +1,5 @@
 name: lumit_flutter
-description: "Lumit's Flutter frontend alternative (K-174) — the chrome over the Rust engine; see docs/flutter-port/."
+description: "Lumit's Flutter frontend (K-174); see docs/archive/flutter-port/."
 publish_to: 'none'
 version: 0.1.0+1
 

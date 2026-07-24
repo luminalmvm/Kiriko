@@ -1,4 +1,4 @@
-// The Dart half of bridge v0 (docs/flutter-port/03-ARCHITECTURE.md "Bridge
+// The Dart half of bridge v0 (docs/archive/flutter-port/03-ARCHITECTURE.md "Bridge
 // v0"): a thin dart:ffi wrapper over the `lumit_bridge` shared library. Dart
 // calls the crate's C functions, each of which returns a Rust-owned UTF-8 JSON
 // string; this side copies the string out, immediately frees it back to Rust,

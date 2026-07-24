@@ -40,7 +40,7 @@
 //! delivered over a second shared texture: the win here is moving the binning off
 //! the CPU, and the trace is so small that a zero-copy hand-off would save
 //! nothing while costing a second registered texture and its VRAM. See
-//! `docs/flutter-port/06-REMAINING-WORK.md` for the recorded reasoning.
+//! `docs/archive/flutter-port/06-REMAINING-WORK.md` for the recorded reasoning.
 
 use crate::{GpuContext, GpuError};
 

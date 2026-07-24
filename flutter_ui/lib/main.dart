@@ -1,6 +1,6 @@
 // Lumit's Flutter frontend (K-174, the frontend alternative experiment).
 // The engine stays in the Rust crates; this application is the chrome —
-// see docs/flutter-port/ for the plan and the parity checklist.
+// see docs/archive/flutter-port/ for the plan and the parity checklist.
 
 import 'package:flutter/widgets.dart';
 
@@ -32,7 +32,7 @@ class LumitApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // WidgetsApp-level infrastructure only — no Material chrome
-    // (docs/flutter-port/04 "Why not Material chrome"). Settings → Interface →
+    // (docs/archive/flutter-port/04 "Why not Material chrome"). Settings → Interface →
     // UI scale is applied here via [UiScaleView], the Flutter counterpart of
     // egui's `ctx.set_pixels_per_point` — layout and hit-testing scale together
     // (see widgets/ui_scale.dart for why this mechanism, not a devicePixelRatio

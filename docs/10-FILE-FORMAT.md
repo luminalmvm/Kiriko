@@ -17,7 +17,7 @@ A `.lum` file is a ZIP archive (deflate). Contents:
 myproject.lum
 ├── manifest.json          # tiny: format + version info, read first
 ├── project.json           # the entire document model
-└── thumbs/                # small embedded preview thumbnails (JPEG/WebP)
+└── thumbs/                # planned, not yet written (see below)
     ├── comp-<uuid>.webp
     └── item-<uuid>.webp
 ```
@@ -30,7 +30,8 @@ Rules:
 - `project.json` is pretty-printed with stable key order and stable array order, so two
   saves of the same document are byte-identical and version-control diffs are meaningful.
 - Thumbnails are disposable previews for the Project panel and file browsers; a reader MUST
-  tolerate their absence.
+  tolerate their absence. **Not yet written** - v1 saves only `manifest.json` and
+  `project.json`; the `thumbs/` folder is planned ([TODO.md](TODO.md)).
 - Nothing else goes in the container. Media is never embedded; caches never ride along.
 
 ### 1.1 project.json conventions
@@ -76,16 +77,23 @@ workspaces are app-level with optional project hints.
 
 ## 3. The sidecar cache folder
 
-All derived data lives outside the project, in a per-project cache directory:
+All derived data lives outside the project. **v1 status:** only the rendered-frame cache and
+the media index are built; `proxies/`, `peaks/`, and `flow/` are planned
+([TODO.md](TODO.md)). What exists today:
 
 ```
-<global cache root>/<project-uuid>/
-├── disk-cache/        # rendered frame cache (06-RENDER-PIPELINE.md tier 3)
-├── proxies/           # background-generated proxy media
-├── peaks/             # audio waveform peak files (09-AUDIO.md)
-├── flow/              # cached optical-flow vector fields (04-RETIMING.md, 08-EFFECTS.md)
-└── index/             # frame indexes for exact long-GOP seeking (05-ARCHITECTURE.md)
+<project>.lum-cache/
+└── frames/            # rendered frame cache, LZ4 .kfr files (06-RENDER-PIPELINE.md tier 3)
+
+<global cache root>/
+├── media-index/       # frame indexes for exact long-GOP seeking, shared across projects
+└── <project-uuid>/journal/ops.jsonl # the crash-recovery journal (§4)
 ```
+
+The intended full per-project layout (`<cache root>/<project-uuid>/` with `disk-cache/`,
+`proxies/`, `peaks/`, `flow/`, `index/`) is the design direction; audio peaks are currently
+computed on demand rather than stored, and the frame cache sits in a `.lum-cache/` sidecar
+beside the project rather than under the global root.
 
 Rules, binding:
 - The global cache root defaults under the user's local app-data and is configurable with a
@@ -102,9 +110,10 @@ Rules, binding:
   plugin install), rotating `<name>.autosave-<k>.lum` copies (default keep 5) in an
   `autosaves/` folder beside the project.
 - **Journal recovery**: the operation journal ([03-DATA-MODEL.md](03-DATA-MODEL.md) §10) is
-  appended to a sidecar `journal/` log between saves. After a crash, Lumit offers: last
-  save + replayed journal (usually everything), or last save, or an autosave. The journal is
-  truncated on successful save.
+  appended between saves to `<global cache root>/<project-uuid>/journal/ops.jsonl` (kept out
+  of the `.lum` beside the project so shared projects carry no local paths). After a crash,
+  Lumit offers: last save + replayed journal (usually everything), or last save, or an
+  autosave. The journal is truncated on successful save.
 - Recovery is offered calmly on next launch — one dialogue, no error storm
   ([15-DESIGN.md](15-DESIGN.md) voice rules).
 

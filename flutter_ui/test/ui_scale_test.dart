@@ -1,6 +1,6 @@
 // UI scale (Settings → Interface → UI scale, K-117): the [UiScaleView] wrapper
 // scales layout AND hit-testing together — the mechanism recorded in
-// widgets/ui_scale.dart and docs/flutter-port/05.
+// widgets/ui_scale.dart and docs/archive/flutter-port/05.
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';

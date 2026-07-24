@@ -2,7 +2,7 @@
 // larger or smaller relative to the display's native scale, exactly as egui's
 // `ctx.set_pixels_per_point(scale)` does — layout AND hit-testing move together.
 //
-// Why this mechanism (recorded in docs/flutter-port/05, and the one the ledger
+// Why this mechanism (recorded in docs/archive/flutter-port/05, and the one the ledger
 // asked to choose):
 //   * A `MediaQuery.devicePixelRatio` override does NOT work — the render tree
 //     reads the real `FlutterView.devicePixelRatio` directly, so overriding it

@@ -1,7 +1,7 @@
 // The workspace controller: everything the egui `Shell` persists (dock
 // layout, colour scheme, shape, accent override, animation level, the
 // settings structs), held in one ChangeNotifier and written to a JSON file —
-// the Flutter counterpart of eframe's storage (docs/flutter-port/03).
+// the Flutter counterpart of eframe's storage (docs/archive/flutter-port/03).
 
 import 'dart:convert';
 import 'dart:io';

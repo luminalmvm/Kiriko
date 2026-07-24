@@ -1,5 +1,5 @@
 // The shared placeholder a panel shows before its phase makes it live
-// (docs/flutter-port/05-PARITY-CHECKLIST.md).
+// (docs/archive/flutter-port/05-PARITY-CHECKLIST.md).
 
 import 'package:flutter/widgets.dart';
 

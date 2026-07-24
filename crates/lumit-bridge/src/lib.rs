@@ -1,5 +1,5 @@
 //! lumit-bridge: the seam the Flutter frontend calls the Rust engine through
-//! (docs/flutter-port/03-ARCHITECTURE.md).
+//! (docs/archive/flutter-port/03-ARCHITECTURE.md).
 //!
 //! # In plain terms
 //!

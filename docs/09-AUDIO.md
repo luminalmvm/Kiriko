@@ -16,6 +16,14 @@ from video footage, audio scrubbing, audio in export.
 
 Out (explicitly, §7): audio effects, a mixing console, and audio retiming.
 
+**Implementation status (2026-07-24).** The engine layer is built: cpal playback with the
+audio clock as master, per-layer volume plus master limiter, spectral-flux beat detection,
+and AAC export all work ( `lumit-audio`, `lumit-bridge`). The **Flutter frontend has no Audio
+panel yet** , so the UI for waveforms, beat-marker generation, level meters, and beat-tap is
+not built; persistent waveform peak files, "detach audio", and the retimed-audio mute badge
+are likewise unbuilt. These gaps are tracked in [TODO.md](TODO.md); the sections below
+describe the intended design.
+
 ## 2. Import and decode
 
 - Lumit MUST import any ffmpeg-decodable audio (via rsmpeg, K-013): mp3, AAC/m4a, wav,
@@ -77,11 +85,12 @@ same decoded ring, so it is warm wherever the cache bar is warm.
 
 ## 4. Waveforms
 
-- At import, the background pass writes a **peak file**: min/max/RMS per block at multiple
-  zoom tiers (samples-per-block 256 / 4 096 / 65 536), stored in the project's sidecar
-  folder (K-040), keyed by content hash, rebuilt silently if missing or stale.
-- The Timeline draws waveforms from peak files only — never from raw decode — so waveform
-  rendering is O(pixels) at any zoom. Rendering follows
+- Waveform peaks (min/max/RMS per block) are **computed on demand** from the decoded audio
+  (`lumit-audio::mix::waveform_peaks`). The design intent is a background pass that writes a
+  persistent **peak file** at multiple zoom tiers (samples-per-block 256 / 4 096 / 65 536) to
+  the project sidecar keyed by content hash; that persistent cache is **not yet built**
+  ([TODO.md](TODO.md)).
+- Waveforms render 0(pixels) from the peak buckets - never from raw decode. Rendering follows
   [15-DESIGN.md](15-DESIGN.md): filled min/max body with RMS core, no per-sample spikes.
 - Waveforms appear: on Audio layers (always), on Footage layers with audio (expandable
   lane), and **inside Sequence layer clips** — each clip draws the waveform of its own
@@ -130,10 +139,9 @@ same decoded ring, so it is warm wherever the cache bar is warm.
 - **Mute / solo** via the audible and solo switches ([01-GLOSSARY.md](01-GLOSSARY.md) §2).
   Solo on any layer silences non-soloed audio, matching video solo semantics.
 - **Audio from video footage**: a Footage layer with audio exposes its audio as part of
-  the same layer (audible switch, volume property, waveform lane). "Detach audio" creates
-  a linked Audio layer sharing the source so music-video workflows can keyframe them
-  independently; the link is a grouping convenience, not a constraint — either side can be
-  trimmed or moved alone after detaching.
+  the same layer (audible switch, volume property, waveform lane). "Detach audio" (creating
+  a linked Audio layer sharing the source, so music-video workflows can keyframe them
+  independently) is **not yet built** ([TODO.md](TODO.md)).
 - Stereo is the v1 channel model; mono sources upmix centred. Pan is not in v1 (see §7).
 
 ## 7. Out of scope for v1
@@ -143,9 +151,11 @@ same decoded ring, so it is warm wherever the cache bar is warm.
   reserves an audio-effect extension so the ABI does not need breaking later.
 - **Mixing console** — no mixer panel; per-layer volume plus master limiter only.
 - **Audio retiming.** Retime is video-only in v1: a retimed Footage layer's own audio is
-  muted with a badge whenever its retime map differs from identity ("Retime mutes audio in
-  this version"), because unpitched audio warping sounds bad and pitch-preserving
-  stretching is real work. Roadmap: a later release adds pitch-preserving audio retime
+  intended to mute with a badge whenever its retime map differs from identity ("Retime mutes
+  audio in this version") - the mute-on-retime detection and badge are **not yet wired**
+  ([TODO.md](TODO.md)). The reason it mutes rather than warps: unpitched audio warping sounds
+  bad and pitch-preserving stretching is real work. Roadmap: a later release adds
+  pitch-preserving audio retime
   (phase-vocoder or WSOLA class) as a per-layer opt-in following the same retime map
   ([04-RETIMING.md](04-RETIMING.md)); nothing in the retime model assumes audio ignores
   it. Montage practice today (music is the master; gameplay audio is muted) makes this a
@@ -155,7 +165,7 @@ same decoded ring, so it is warm wherever the cache bar is warm.
 
 - Export mixes audio with the same engine as preview (same code path, §3.1, minus the
   device) at the export sample rate, and encodes **AAC via ffmpeg** (default 48 kHz stereo
-  256 kbps; wav/PCM available for archival exports). Encoder settings live in the export
+  320 kbps). Encoder settings live in the export
   queue's per-item settings ([06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md) export
   section).
 - Export MUST be sample-accurate and deterministic: two exports of the same project

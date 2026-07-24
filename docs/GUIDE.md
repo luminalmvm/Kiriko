@@ -22,11 +22,15 @@ app's departments). They live in `crates/`:
 | `lumit-project` | `.lum` files, autosave, recovery | Saving and loading, and the "never lose work" machinery |
 | `lumit-ui` | Everything you see | Panels, menus, the theme — the shell around the engine |
 | `lumit-app` | The `main()` entry | Ten lines that open the window and start the UI |
-| `lumit-media` | (coming) decoding video | Turning an .mp4 into frames |
-| `lumit-gpu` | (coming) the GPU pipeline | Drawing and processing frames on the graphics card |
-| `lumit-audio` | (coming) sound | Playback and the clock everything syncs to |
-| `lumit-eval` | (coming) the render engine | Working out what each frame looks like |
-| `lumit-cache` | (coming) caching | Remembering rendered frames so they're never rendered twice |
+| `lumit-media` | Decoding video | Turning an .mp4 into frames |
+| `lumit-gpu` | The GPU pipeline | Drawing and processing frames on the graphics card |
+| `lumit-audio` | Sound | Playback and the clock everything syncs to |
+| `lumit-eval` | The render engine | Working out what each frame looks like |
+| `lumit-cache` | Caching | Remembering rendered frames so they're never rendered twice |
+| `lumit-flow` | Optical flow | Motion vectors for smooth-retime and flow motion blur |
+| `lumit-text` | Text | Rasterising text layers |
+| `lumit-keymap` | Keyboard shortcuts | The remappable shortcut model |
+| `lumit-bridge` | The Flutter seam | How the Flutter frontend talks to the engine (see [17-BRIDGE-CONTRACT.md](17-BRIDGE-CONTRACT.md)) |
 
 Three of these have proper names you'll see in the app and docs (decision K-083),
 drawn from the same astral register as the app itself: **Nova** (a burst of new light) is
@@ -862,7 +866,7 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   and it hands back a graded red/green/blue. The common `.cube` text format stores that as a
   cube of sample points — a 3D LUT is a grid (say 33×33×33) of "this colour in, that colour
   out", a 1D LUT is three separate curves, one per channel. This file reads such a file into
-  memory and answers the one question the coming LUT effect (docs/08 §3.11) will ask millions
+  memory and answers the one question the LUT effect (docs/08 §3.11) will ask millions
   of times a frame — "what does this LUT turn *this* pixel into?" — by **trilinear
   interpolation**: it finds the eight grid points around the input colour and blends them by
   how close the input sits to each, so colours between the baked samples come out smooth
@@ -2179,10 +2183,11 @@ Mesa's *lavapipe*, a Vulkan driver that renders on the CPU, so the GPU tests act
 a machine with no graphics card in it. And a sixth job builds the Flatpak, which is how we
 know the packaging works and not just the code.
 
-## 9. The Flutter frontend experiment, in plain terms
+## 9. The Flutter frontend, in plain terms
 
-*(K-174, branch `flutter-frontend-alternative`. Skip this section if you are
-working on `main` — nothing here changes the egui application.)*
+*(K-174. Flutter is now Lumit's frontend; the earlier egui code remains only as
+the parity reference. The front/back boundary is specified in full in
+[17-BRIDGE-CONTRACT.md](17-BRIDGE-CONTRACT.md).)*
 
 **What Flutter and Dart are.** Flutter is Google's toolkit for building user
 interfaces; Dart is the programming language it uses, roughly as readable as
@@ -2196,17 +2201,17 @@ interface and the engine.
 **What moves and what stays.** Everything that opens files, decodes video,
 composites frames, caches, mixes audio and exports stays exactly where it is,
 in the Rust crates — the Flutter interface is a new front door on the same
-house. The Dart code lives in `flutter_ui/` and is a stand-alone application
-during the experiment: you can build and run it without touching the Rust
-build, and vice versa.
+house. The Dart code lives in `flutter_ui/` and is a stand-alone application:
+you can build and run it without touching the Rust build, and vice versa.
 
-**How they will talk.** Dart cannot call Rust directly, so a small generated
-layer (the bridge, `flutter_rust_bridge`) turns Rust functions into functions
-Dart can call, and Rust's progress messages into streams Dart can listen to.
-The Viewer is special: video frames are too large to pass through function
-calls sixty times a second, so the engine draws each frame into a piece of GPU
-memory that Flutter displays directly — the picture never takes a detour
-through ordinary memory.
+**How they talk.** Dart cannot call Rust directly, so a bridge crate
+(`lumit-bridge`) sits between them: Dart calls plain C functions that exchange
+JSON text, one call per user action, each returning the refreshed document. The
+Viewer is special: video frames are too large to pass through function calls
+sixty times a second, so the engine draws each frame into a piece of GPU memory
+that Flutter displays directly - the picture never takes a detour through
+ordinary memory. The full contract, including why the bridge is hand-written for
+now rather than generated, is in [17-BRIDGE-CONTRACT.md](17-BRIDGE-CONTRACT.md).
 
 **The picture now stays on the graphics card (K-177).** For a while the Viewer
 took exactly that detour: the engine drew the frame on the graphics card, copied
@@ -2337,7 +2342,8 @@ as you left them, rather than resetting each time — the hidden tabs are kept a
 off to one side, doing no drawing and no per-frame work but holding their place,
 the way the old egui interface remembered them.
 
-**Where things are.** `docs/flutter-port/` holds the plan: `01` the strategy
+**Where things are.** `docs/archive/flutter-port/` holds the historical port
+notes: `01` the strategy
 and phases, `02` an inventory of every surface the egui interface ships (the
 port's shopping list), `03` the bridge design, `04` a table mapping each egui
 mechanism to its Flutter counterpart, `05` the living checklist of what is
@@ -2477,7 +2483,7 @@ zero-copy shared-texture path is Windows/Linux only (`shared-texture` /
 `shared-texture-linux`) — macOS always uses the portable CPU frame path, so the
 picture still draws, just via the read-back route every platform can fall back
 to; and the native macOS menu bar (`native_menu.rs`, muda) stays deferred with
-the rest of the "macOS pass" named in `docs/flutter-port/01-STRATEGY.md` — the
+the rest of the "macOS pass" named in `docs/archive/flutter-port/01-STRATEGY.md` — the
 in-window menu bar renders instead, same as it does today.
 
 **What the bridge carries now (v0.2).** The first bridge only described the
@@ -2932,7 +2938,7 @@ source-position ("Time") lens for retimed clips. The Flutter graph editor draws
 the *speed* curve for retimed clips today; the value curve is a large, separate
 build, and drawing it at low fidelity (straight lines where real curves belong)
 would look wrong, so it is left as an honest, named remainder rather than
-half-built (see `docs/flutter-port/06-REMAINING-WORK.md` §C).
+half-built (see `docs/archive/flutter-port/06-REMAINING-WORK.md` §C).
 
 **Audio playback in the Flutter frontend.** Until this change, pressing play in
 the Flutter window moved the picture but made no sound at all — the playhead

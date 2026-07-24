@@ -178,7 +178,8 @@ here.
 **Depth is one project-wide switch (K-069, supersedes K-026's per-comp clause).** The
 project's working depth — 8 bpc integer, 16 bpc float (default), or 32 bpc float —
 applies to every comp, every effect buffer, and every inter-node texture in the
-project. There is no per-comp override: switching the project switches everything,
+project. **v1 status:** the engine currently renders **fp16 only**; the 8/32 bpc options
+and the depth control below are the intended design, not yet built ([TODO.md](TODO.md)). There is no per-comp override: switching the project switches everything,
 exactly like AE's project bit depth. The control lives as a small depth button at the
 foot of the Project panel (AE's spot; click to cycle, dialogue for the long list
 later), and Application Settings holds only the *default for newly created projects*.
@@ -515,9 +516,10 @@ consistency is exact.
 
 All encoding goes through ffmpeg as the single abstraction: hardware encode via `h264_nvenc` /
 `hevc_nvenc`, `*_amf`, `*_qsv` (probed and picked automatically), with **x264/x265 software
-fallback** always available and used for quality-first masters. ProRes/DNxHR intermediates via
-ffmpeg's encoders for interchange. Audio: AAC via ffmpeg; PCM in intermediates. Colour: working
-space → the preset's output space (Rec.709/sRGB in v1) as the final export transform; alpha
+fallback** always available and used for quality-first masters. (ProRes/DNxHR intermediate
+codecs for interchange are planned but **not in v1** - v1 encodes H.264/HEVC only, see
+[TODO.md](TODO.md).) Audio: AAC via ffmpeg. Colour: working
+space -> the preset's output space (Rec.709/sRGB in v1) as the final export transform; alpha
 export straight or premultiplied per output settings.
 
 ### 7.5 Preset set (v1)
@@ -528,7 +530,7 @@ export straight or premultiplied per output settings.
 | YouTube 1440p60 | 2560×1440 @ 60 | HEVC (H.264 fallback) | VBR target 25 Mbps, peak 35 |
 | YouTube 4K60 | 3840×2160 @ 60 | HEVC (H.264 fallback) | VBR target 45 Mbps, peak 60 |
 | Vertical 1080×1920 | 1080×1920 @ 60 | H.264 high | VBR target 16 Mbps, peak 24 |
-| Master (intermediate) | comp size/rate | DNxHR HQX or ProRes 422 HQ | codec-defined |
+| Master (intermediate) - *planned, not in v1* | comp size/rate | DNxHR HQX or ProRes 422 HQ | codec-defined |
 
 Every landscape preset offers a **one-click vertical variant** (1080×1920): centre-crop with a
 draggable reframe, or pillar-fit. Audio on all delivery presets: AAC 320 kbps, 48 kHz. Presets

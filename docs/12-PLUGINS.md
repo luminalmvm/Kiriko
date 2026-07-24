@@ -1,6 +1,13 @@
 # Plugins, scripting, and expressions
 
-**Status: canonical.** This document specifies Lumit's extensibility surfaces: the OFX
+**Status: specification only - not yet implemented (roadmap Phase 4).** The OFX host, the LFX
+native plugin API, and the expression/scripting runtime do not exist in code yet - the crates
+`lumit-ofx`, `lumit-lfx`, and `lumit-expr` are unbuilt. What *does* exist is the placeholder
+plumbing that lets unknown OFX/LFX/expression data round-trip without loss: the
+`EffectNamespace` enum's `Ofx`/`Lfx`/`Placeholder` variants render as identity while
+preserving parameters and keyframes (shared with [11-AE-IMPORT.md](11-AE-IMPORT.md ) §6). This
+document is the design to build against; the concrete build is tracked in [TODO.md](TODO.md).
+It specifies Lumit's extensibility surfaces: the OFX
 host (K-061), the LFX native plugin API (K-062), and the expression/scripting runtime
 (K-063) — see [02-DECISIONS.md](02-DECISIONS.md). Terminology follows
 [01-GLOSSARY.md](01-GLOSSARY.md) exactly. RFC-2119 keywords (MUST, SHOULD, MAY) are

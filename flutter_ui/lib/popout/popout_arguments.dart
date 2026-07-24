@@ -1,7 +1,7 @@
 // The arguments a popped-out panel window carries across the engine boundary.
 //
 // In plain terms: a popped-out panel runs in its OWN Flutter engine (a second
-// engine in the SAME process — see docs/flutter-port/03), so it does not share
+// engine in the SAME process — see docs/archive/flutter-port/03), so it does not share
 // the main window's Dart objects. What it needs is (a) which panel to host,
 // (b) enough appearance state to rebuild the theme identically, and (c) the
 // document context (project path, front comp, selection) to open focused. All
@@ -24,7 +24,7 @@ import '../theme/theme.dart';
 /// empty (`WindowController.fromCurrentEngine().arguments == ''`).
 const String kPopoutBusinessId = 'popout_panel';
 
-/// The panels a popout can host honestly (docs/flutter-port/05, F-multiwindow).
+/// The panels a popout can host honestly (docs/archive/flutter-port/05, F-multiwindow).
 /// The Viewer and Timeline stay in-window: the Viewer owns the shared-texture
 /// registrar (a per-view, main-window concern) and the Timeline owns the
 /// playhead/transport and the cache-bar warm set tied to the main preview — a

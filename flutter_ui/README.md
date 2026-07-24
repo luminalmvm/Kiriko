@@ -1,12 +1,13 @@
-# lumit_flutter — the Flutter frontend alternative
+# lumit_flutter — the Flutter frontend
 
-The experimental Flutter port of Lumit's interface (decision K-174). The Rust
-engine crates are untouched; this package is the chrome, built to one-for-one
-parity with the egui frontend before any redesign.
+Lumit's interface (decision K-174). The Rust engine crates are untouched; Talks
+to the engine through `crates/lumit-bridge`.
 
-**The plan, the full UI inventory and the living parity checklist live in
-[`docs/flutter-port/`](../docs/flutter-port/README.md).** Read
-`docs/GUIDE.md` §9 for the plain-English framing.
+**How the frontend and engine communicate is specified in
+[`docs/17-BRIDGE-CONTRACT.md`](../docs/17-BRIDGE-CONTRACT.md).** Read
+`docs/GUIDE.md` §9 for the plain-English framing. The historical port notes
+(strategy, UI inventory, parity checklist) are archived under
+[`docs/archive/flutter-port/`](../docs/archive/flutter-port/README.md).
 
 ## Running
 
@@ -25,5 +26,5 @@ flutter analyze           # the lint pass (must stay clean)
 - Glossary terms bind (docs/01-GLOSSARY.md): layer not track, speed not
   velocity, Retime not time remap, export not render.
 - British English, sentence case, no exclamation marks, no emoji.
-- Owned widgets over Material chrome — see docs/flutter-port/04-WIDGET-MAP.md.
+- Owned widgets over Material chrome - see docs/archive/flutter-port/04-WIDGET-MAP.md.
 - Every feature lands with its tests.

@@ -49,31 +49,27 @@ Three companion pieces:
 
 ## Building
 
-Lumit builds on Windows, macOS and Linux with the stable Rust toolchain. The one outside
-dependency is **FFmpeg 7.x** (video/audio decode), plus **LLVM 18** on Windows for the
-binding generator.
+Lumit's engine builds on Windows, macOS, and Linux with the stable Rust
+toolchain. The one external dependency is **FFmpeg 7.X** (video and audio decode),
+plus **LLVM 18** on Windows for the binding generator. Development is Windows-first.
 
-- **macOS**: `brew install ffmpeg@7`, then `cargo test --workspace`. The repo's
-  `.cargo/config.toml` points the build at the keg.
 - **Windows**: unzip a [BtbN FFmpeg 7.1 shared/GPL build](https://github.com/BtbN/FFmpeg-Builds/releases)
-  under `%USERPROFILE%\ffmpeg\`, `winget install LLVM.LLVM --version 18.1.8`, then
-  `. .\scripts\win-dev-env.ps1 -Persist` to wire it up. `cargo run -p lumit-app` launches.
-- **Linux** (K-082): install the FFmpeg 7 development packages plus `pkg-config` and `clang`,
-  then `cargo run -p lumit-app`. Debian 13 / Ubuntu 24.10 or newer:
-  `sudo apt install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev libavfilter-dev libavdevice-dev`.
-  Arch: `sudo pacman -S ffmpeg clang pkgconf`. Note that FFmpeg **7.x** is required —
-  distributions still shipping FFmpeg 6 (Ubuntu 24.04 LTS among them) need a newer release
-  or a self-built FFmpeg before Lumit will build.
+under `%USERPROFILE%\ffmpeg\` , run `winget install LLVM. LLVM -- version 18.1.8`,
+then `. .\scripts\win-dev-env.ps1 -Persist` to wire it up.
+**macOS**: `brew install ffmpeg@7`, then `cargo test -- workspace`. The repo's
+`.cargo/config.toml` points the build at the keg.
+**Linux** (K-082): install the FFmpeg 7 development packages plus `pkg-config`
+and `clang`. Debian 13 / Ubuntu 24.10 or newer:
+`sudo apt install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev libavfilter-dev libavdevice-dev`
+Arch: `sudo pacman -S ffmpeg clang pkgconf`. FFmpeg **7.x** is required;
+distributions still shipping FFmpeg 6 (Ubuntu 24.04 LTS included) need a newer
+release or a self-built FFmpeg first.
 
-**Linux, without building it yourself:** every CI run publishes a **Flatpak bundle**
-(`lumit-x86_64.flatpak`, under the run's Artifacts — about 15 MB). It carries its own
-FFmpeg 7.1, so it installs and runs on any distribution regardless of what that distribution
-ships: `flatpak install --user lumit-x86_64.flatpak`, then
-`flatpak run io.github.luminalmvm.Lumit`.
-The manifest lives in [packaging/flatpak/](packaging/flatpak/).
+The Flutter frontend lives in [flutter_ui/](flutter_ui/) and is built with the
+Flutter SDK; see [flutter_ui/README.md](flutter_ui/README.md).
 
-Full step-by-step, in plain English: [docs/GUIDE.md](docs/GUIDE.md) §8.
+Step-by-step build notes in plain English are in [docs/GUIDE.md](docs/GUIDE.md) §8.
 
 ## Licence
 
-[GPLv3](LICENSE). Forks stay open; contributions welcome once implementation begins.
+[GPLv3](LICENSE). Forks remain open source; contributions are welcome.
